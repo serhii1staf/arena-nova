@@ -32,7 +32,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUwRTYxQzJGNjAwRUM4ODYKUldTR3lBNWdMeHptVUtibWhkTzB2YmF6Q2dsa0hHeC9HKzFZcTI1UmdGV3lNcFRrRENQWTg4K3oK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIxOUI1OTIwNDcxODRDOQpSV1RKaEhFRWtyVVpBck9LRWM1UmV2aVI3ejNIRjZVeVp3WGxONDZaTThKMTJ1VVJGaER0SUluRwo=",
       "endpoints": [
         "https://github.com/serhii1staf/arena-nova/releases/latest/download/latest.json"
       ],
