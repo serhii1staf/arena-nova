@@ -1,0 +1,15 @@
+{
+  "identifier": "default",
+  "description": "Window controls (the OS title bar is hidden) plus in-app updates.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-fullscreen",
+    "updater:default",
+    "process:allow-restart"
+  ]
+}

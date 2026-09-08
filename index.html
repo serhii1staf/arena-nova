@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0a0f0a" />
+    <title>Arena Nova — Overgrown Sanctuary</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #06090a;
+        font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+          sans-serif;
+        color: #dfe9dc;
+        -webkit-user-select: none;
+        user-select: none;
+        touch-action: none;
+        overscroll-behavior: none;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        outline: none;
+      }
+
+      /* ---- Loading overlay ---- */
+      #loader {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 22px;
+        background: radial-gradient(
+          circle at 50% 40%,
+          #12351f 0%,
+          #0a1a12 45%,
+          #05090a 100%
+        );
+        z-index: 10;
+        transition: opacity 0.9s ease;
+      }
+      #loader.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .brand {
+        font-size: clamp(28px, 6vw, 52px);
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        background: linear-gradient(180deg, #eafff0 0%, #7fd18a 60%, #3f8f57 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        text-shadow: 0 0 40px rgba(120, 220, 140, 0.25);
+      }
+      .brand small {
+        display: block;
+        margin-top: 8px;
+        font-size: clamp(10px, 1.6vw, 13px);
+        letter-spacing: 0.5em;
+        font-weight: 500;
+        color: #6f9a78;
+        -webkit-text-fill-color: #6f9a78;
+      }
+      .bar {
+        width: min(320px, 60vw);
+        height: 4px;
+        border-radius: 4px;
+        background: rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+      }
+      .bar > i {
+        display: block;
+        height: 100%;
+        width: 0%;
+        border-radius: 4px;
+        background: linear-gradient(90deg, #4f9e63, #a6f0b4);
+        box-shadow: 0 0 16px rgba(140, 240, 160, 0.6);
+        transition: width 0.25s ease;
+      }
+      #loaderStatus {
+        font-size: 12px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: #6f9a78;
+        min-height: 14px;
+      }
+
+      /* ---- Scene-transition fade (hides the build hitch) ---- */
+      #fade {
+        position: fixed;
+        inset: 0;
+        background: #05090a;
+        opacity: 0;
+        pointer-events: none;
+        z-index: 8;
+        transition: opacity 0.26s ease;
+      }
+      #fade.on {
+        opacity: 1;
+      }
+
+      /* ---- HUD ---- */
+      #hud {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 5;
+        opacity: 0;
+        transition: opacity 0.6s ease;
+      }
+      #hud.visible {
+        opacity: 1;
+      }
+      #crosshair {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 6px;
+        height: 6px;
+        margin: -3px 0 0 -3px;
+        border-radius: 50%;
+        background: rgba(230, 255, 235, 0.55);
+        box-shadow: 0 0 6px rgba(180, 255, 200, 0.5);
+      }
+      #stats {
+        position: absolute;
+        top: 10px;
+        left: 12px;
+        font-variant-numeric: tabular-nums;
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        color: rgba(200, 230, 205, 0.7);
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+        white-space: pre;
+      }
+      #hint {
+        position: absolute;
+        left: 50%;
+        bottom: 26px;
+        transform: translateX(-50%);
+        font-size: 13px;
+        letter-spacing: 0.08em;
+        color: rgba(210, 235, 214, 0.85);
+        text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+        background: rgba(6, 14, 9, 0.35);
+        padding: 8px 16px;
+        border-radius: 999px;
+        backdrop-filter: blur(6px);
+        border: 1px solid rgba(140, 200, 150, 0.15);
+        transition: opacity 0.5s ease;
+      }
+
+      /* ================= Shared UI kit ================= */
+      .panel {
+        background: rgba(10, 22, 15, 0.62);
+        border: 1px solid rgba(150, 220, 165, 0.18);
+        border-radius: 18px;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+      }
+      .btn {
+        appearance: none;
+        border: 1px solid rgba(150, 225, 165, 0.28);
+        background: linear-gradient(180deg, rgba(60, 140, 85, 0.9), rgba(32, 92, 55, 0.9));
+        color: #eafff0;
+        font: inherit;
+        font-size: 15px;
+        letter-spacing: 0.06em;
+        padding: 12px 26px;
+        border-radius: 999px;
+        cursor: pointer;
+        transition: transform 0.14s ease, filter 0.14s ease, background 0.2s ease;
+      }
+      .btn:hover {
+        filter: brightness(1.15);
+        transform: translateY(-1px);
+      }
+      .btn:active {
+        transform: translateY(1px);
+      }
+      .btn.ghost {
+        background: rgba(255, 255, 255, 0.06);
+        border-color: rgba(180, 220, 190, 0.22);
+      }
+      .btn.big {
+        font-size: 19px;
+        letter-spacing: 0.22em;
+        padding: 16px 62px;
+        text-transform: uppercase;
+      }
+
+      /* ================= Start screen ================= */
+      #start {
+        position: fixed;
+        inset: 0;
+        z-index: 12;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 30px;
+        background:
+          radial-gradient(circle at 50% 32%, rgba(84, 190, 120, 0.22) 0%, rgba(0, 0, 0, 0) 60%),
+          linear-gradient(170deg, #0e2b1a 0%, #0a1c13 48%, #050b09 100%);
+        transition: opacity 0.7s ease;
+      }
+      #start.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+      #start .brand {
+        margin-bottom: 4px;
+      }
+      #startHint {
+        font-size: 12px;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        color: rgba(150, 200, 165, 0.65);
+      }
+      #version {
+        position: fixed;
+        right: 16px;
+        bottom: 14px;
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        color: rgba(160, 200, 170, 0.5);
+      }
+
+      /* ================= Pause menu ================= */
+      #pause {
+        position: fixed;
+        inset: 0;
+        z-index: 11;
+        display: none;
+        align-items: center;
+        justify-content: center;
+      }
+      #pause.open {
+        display: flex;
+      }
+      /* The blur lives in its own layer BEHIND the card. Keeping the interactive
+         card out of a backdrop-filtered ancestor avoids hit-testing going through
+         a composited filter layer, which can swallow clicks. */
+      #pauseBlur {
+        position: absolute;
+        inset: 0;
+        backdrop-filter: blur(14px) saturate(0.9) brightness(0.72);
+        background: rgba(6, 16, 11, 0.28);
+        pointer-events: none;
+      }
+      #pauseCard {
+        position: relative; /* sits above #pauseBlur */
+        z-index: 1;
+        width: min(560px, 92vw);
+        padding: 30px 34px 26px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      #pauseCard h2 {
+        margin: 0;
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: #d8f5e0;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      .settings {
+        display: none;
+        flex-direction: column;
+        gap: 14px;
+        border-top: 1px solid rgba(150, 220, 165, 0.14);
+        padding-top: 16px;
+      }
+      .settings.open {
+        display: flex;
+      }
+      .field {
+        display: grid;
+        grid-template-columns: 132px 1fr 52px;
+        align-items: center;
+        gap: 12px;
+        font-size: 13px;
+        color: rgba(214, 240, 220, 0.86);
+      }
+      .field input[type='range'] {
+        width: 100%;
+        accent-color: #5fc27e;
+      }
+      .field select {
+        grid-column: 2 / span 2;
+        background: rgba(8, 20, 14, 0.9);
+        color: #dff5e6;
+        border: 1px solid rgba(150, 220, 165, 0.25);
+        border-radius: 8px;
+        padding: 7px 10px;
+        font: inherit;
+        font-size: 13px;
+      }
+      .field .val {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        color: rgba(170, 215, 182, 0.8);
+      }
+      #updateRow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-top: 1px solid rgba(150, 220, 165, 0.14);
+        padding-top: 14px;
+      }
+      #updateStatus {
+        font-size: 12px;
+        letter-spacing: 0.05em;
+        color: rgba(170, 210, 180, 0.72);
+      }
+      #updateStatus.available {
+        color: #9df0b4;
+      }
+      #updateDot {
+        display: none;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #7ef29b;
+        box-shadow: 0 0 10px #7ef29b;
+        margin-left: 6px;
+      }
+      #updateDot.on {
+        display: inline-block;
+      }
+
+      /* Native window controls — only visible inside the pause menu. */
+      #winControls {
+        position: absolute;
+        top: 14px;
+        right: 16px;
+        display: none;
+        gap: 8px;
+      }
+      #winControls.on {
+        display: flex;
+      }
+      #winControls button {
+        appearance: none;
+        width: 34px;
+        height: 30px;
+        border-radius: 8px;
+        border: 1px solid rgba(180, 220, 190, 0.2);
+        background: rgba(255, 255, 255, 0.06);
+        color: #dff2e4;
+        font-size: 14px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      #winControls button:hover {
+        background: rgba(255, 255, 255, 0.14);
+      }
+      #winControls button.close:hover {
+        background: #c0392b;
+        border-color: #c0392b;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <div id="hud">
+      <div id="stats"></div>
+      <div id="crosshair"></div>
+      <div id="hint">Click to enter · WASD move · Shift sprint · Space jump</div>
+    </div>
+
+    <div id="fade"></div>
+
+    <!-- Pause / settings overlay (Escape) -->
+    <div id="pause">
+      <div id="pauseBlur"></div>
+      <div id="winControls">
+        <button id="winMin" title="Minimise">&#8211;</button>
+        <button id="winMax" title="Maximise">&#9633;</button>
+        <button id="winClose" class="close" title="Quit">&#10005;</button>
+      </div>
+      <div id="pauseCard" class="panel">
+        <!-- With the OS title bar hidden, this heading is the drag handle. -->
+        <h2 data-tauri-drag-region>Paused</h2>
+        <div class="row">
+          <button id="btnResume" class="btn">Resume</button>
+          <button id="btnSettings" class="btn ghost">Settings</button>
+        </div>
+
+        <div id="settings" class="settings">
+          <div class="field">
+            <label for="setQuality">Quality</label>
+            <select id="setQuality">
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="ultra">Ultra</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="setMusic">Music</label>
+            <input id="setMusic" type="range" min="0" max="100" value="50" />
+            <span class="val" id="valMusic">50%</span>
+          </div>
+          <div class="field">
+            <label for="setSfx">Effects</label>
+            <input id="setSfx" type="range" min="0" max="100" value="80" />
+            <span class="val" id="valSfx">80%</span>
+          </div>
+          <div class="field">
+            <label for="setSens">Sensitivity</label>
+            <input id="setSens" type="range" min="20" max="300" value="100" />
+            <span class="val" id="valSens">1.00</span>
+          </div>
+          <div class="field">
+            <label for="setFov">Field of view</label>
+            <input id="setFov" type="range" min="60" max="110" value="68" />
+            <span class="val" id="valFov">68</span>
+          </div>
+        </div>
+
+        <div id="updateRow">
+          <span id="updateStatus">Updates: not checked<i id="updateDot"></i></span>
+          <button id="btnUpdate" class="btn ghost">Check for updates</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Start screen: shown before the world is revealed -->
+    <div id="start">
+      <div class="brand">
+        Arena Nova
+        <small>Overgrown Sanctuary</small>
+      </div>
+      <button id="btnPlay" class="btn big" disabled>Loading…</button>
+      <div id="startHint">Preparing the ruins…</div>
+      <div id="version"></div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

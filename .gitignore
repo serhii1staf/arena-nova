@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Tauri native build artifacts
+src-tauri/target/
+src-tauri/gen/
+
+# Editor / OS
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Signing keys — NEVER commit these
+*.key
+*.key.pub
+.arena-nova-keys/
+
+# Smoke-test artefacts
+scripts/*.png
