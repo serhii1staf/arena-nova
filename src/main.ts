@@ -2,7 +2,8 @@ import { Engine } from './core/Engine.ts';
 import { LobbyScene } from './scenes/LobbyScene.ts';
 import { ExteriorScene } from './scenes/ExteriorScene.ts';
 import { GameUI } from './ui/GameUI.ts';
-import { prepareNative } from './ui/native.ts';
+import { invalidateWindowCentre, prepareNative } from './ui/native.ts';
+import { applyTranslations, t } from './ui/i18n.ts';
 
 /**
  * Bootstraps the game: builds the engine, loads the lobby while the start screen
@@ -20,19 +21,23 @@ function fail(message: string): void {
   const hintEl = $('startHint');
   const btn = $<HTMLButtonElement>('btnPlay');
   if (hintEl) {
+    delete hintEl.dataset.i18n;
     hintEl.textContent = message;
     hintEl.style.color = '#ff9b9b';
   }
   if (btn) {
-    btn.textContent = 'Unavailable';
+    delete btn.dataset.i18n;
+    btn.textContent = t('start.unavailable');
     btn.disabled = true;
   }
   console.error('[Arena Nova]', message);
 }
 
 async function boot(): Promise<void> {
+  applyTranslations();
+
   if (!app) {
-    fail('Missing #app container.');
+    fail(t('err.container'));
     return;
   }
 
@@ -40,15 +45,18 @@ async function boot(): Promise<void> {
   try {
     const probe = document.createElement('canvas');
     if (!(probe.getContext('webgl2') ?? probe.getContext('webgl'))) {
-      fail('WebGL is not available on this system.');
+      fail(t('err.noWebgl'));
       return;
     }
   } catch {
-    fail('WebGL is not available on this system.');
+    fail(t('err.noWebgl'));
     return;
   }
 
-  void prepareNative();
+  // The native mouse-capture helpers need the window handle ready before play.
+  await prepareNative();
+  // Moving or resizing invalidates the cached centre used for cursor warping.
+  window.addEventListener('resize', invalidateWindowCentre);
 
   let engine: Engine;
   try {
@@ -72,7 +80,7 @@ async function boot(): Promise<void> {
   engine.registerScene('exterior', () => new ExteriorScene());
 
   const ui = new GameUI(engine);
-  ui.setLoadingStatus('Growing the moss…');
+  ui.setLoadingStatus('start.growing');
 
   try {
     // Yield once so the start screen paints before the heavy world build.
@@ -86,16 +94,20 @@ async function boot(): Promise<void> {
 
   ui.markReady();
 
-  const isTouch = engine.input.isTouch;
   if (hint) {
-    hint.textContent = isTouch
-      ? 'Left: move · Right: look · Tap: jump · enter the portal to travel'
-      : 'WASD · Shift sprint · Space jump · Scroll: 3rd person · Esc: menu';
+    const key = engine.input.isTouch ? 'hud.hintTouch' : 'hud.hintDesktop';
+    hint.dataset.i18n = key;
+    hint.textContent = t(key);
   }
 
   // Clicking the canvas re-captures the mouse after the menu closes.
   app.addEventListener('click', () => {
-    if (ui.hasStarted) engine.input.requestPointerLock();
+    if (ui.hasStarted && !ui.isPaused) engine.input.requestPointerLock();
+  });
+
+  // Alt-tabbing away should hand the cursor back to the OS.
+  window.addEventListener('blur', () => {
+    if (engine.input.locked) engine.input.releasePointerLock();
   });
 
   // Expose a small surface for the console and the automated smoke test.

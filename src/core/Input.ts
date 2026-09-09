@@ -1,4 +1,10 @@
 import { Vector2 } from 'three';
+import {
+  beginNativeMouseCapture,
+  endNativeMouseCapture,
+  isNative,
+  recentreNativeCursor,
+} from '../ui/native.ts';
 
 /**
  * Input
@@ -19,6 +25,8 @@ export class Input {
   locked = false;
   /** Player-configurable look-speed multiplier (see the settings menu). */
   lookSensitivityScale = 1;
+  /** True when the native shell (not the browser) owns the cursor. */
+  private nativeCapture = false;
 
   private readonly keys = new Set<string>();
   private readonly el: HTMLElement;
@@ -74,13 +82,35 @@ export class Input {
     return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
   }
 
+  /**
+   * Begins mouse capture. On desktop the OS cursor is hidden and confined by the
+   * native shell (no Pointer Lock, so Chromium never shows its "press Esc"
+   * banner); in a browser we fall back to the Pointer Lock API.
+   */
   requestPointerLock(): void {
-    if (!this.isTouch && !this.locked) {
-      void this.el.requestPointerLock?.();
+    if (this.isTouch) return;
+    if (isNative()) {
+      this.nativeCapture = true;
+      this.locked = true;
+      void beginNativeMouseCapture();
+      return;
     }
+    if (!this.locked) void this.el.requestPointerLock?.();
+  }
+
+  /** Ends mouse capture (menu opened, window lost focus…). */
+  releasePointerLock(): void {
+    if (isNative()) {
+      this.nativeCapture = false;
+      this.locked = false;
+      void endNativeMouseCapture();
+      return;
+    }
+    if (document.pointerLockElement) document.exitPointerLock();
   }
 
   private onLockChange(): void {
+    if (isNative()) return; // native capture tracks its own state
     this.locked = document.pointerLockElement === this.el;
   }
 
@@ -102,6 +132,22 @@ export class Input {
     if (!this.locked) return;
     this.lookDelta.x += e.movementX;
     this.lookDelta.y += e.movementY;
+
+    // Native capture has no pointer lock, so the cursor really travels across
+    // the window. Warp it back to the middle before it reaches an edge and stops
+    // producing movement deltas.
+    if (this.nativeCapture) {
+      const marginX = window.innerWidth * 0.28;
+      const marginY = window.innerHeight * 0.28;
+      if (
+        e.clientX < marginX ||
+        e.clientX > window.innerWidth - marginX ||
+        e.clientY < marginY ||
+        e.clientY > window.innerHeight - marginY
+      ) {
+        void recentreNativeCursor();
+      }
+    }
   }
 
   private onWheel(e: WheelEvent): void {

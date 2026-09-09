@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Window controls (the OS title bar is hidden) plus in-app updates.",
+  "description": "Window controls (the OS title bar is hidden), native mouse capture, fullscreen and in-app updates.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -9,6 +9,13 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen",
+    "core:window:allow-set-cursor-grab",
+    "core:window:allow-set-cursor-visible",
+    "core:window:allow-set-cursor-position",
+    "core:window:allow-outer-position",
+    "core:window:allow-inner-size",
+    "core:window:allow-scale-factor",
     "updater:default",
     "process:allow-restart"
   ]

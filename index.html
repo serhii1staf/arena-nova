@@ -211,6 +211,18 @@
         text-transform: uppercase;
       }
 
+      /* Invisible strip along the top used to drag the frameless window. */
+      .dragStrip {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 40px;
+        z-index: 2;
+        -webkit-app-region: drag;
+        app-region: drag;
+      }
+
       /* ================= Start screen ================= */
       #start {
         position: fixed;
@@ -396,7 +408,9 @@
     <div id="hud">
       <div id="stats"></div>
       <div id="crosshair"></div>
-      <div id="hint">Click to enter · WASD move · Shift sprint · Space jump</div>
+      <div id="hint" data-i18n="hud.hintDesktop">
+        WASD · Shift sprint · Space jump · Scroll: 3rd person · F11 fullscreen · Esc menu
+      </div>
     </div>
 
     <div id="fade"></div>
@@ -404,66 +418,74 @@
     <!-- Pause / settings overlay (Escape) -->
     <div id="pause">
       <div id="pauseBlur"></div>
+      <div class="dragStrip" data-tauri-drag-region></div>
       <div id="winControls">
-        <button id="winMin" title="Minimise">&#8211;</button>
-        <button id="winMax" title="Maximise">&#9633;</button>
-        <button id="winClose" class="close" title="Quit">&#10005;</button>
+        <button id="winMin" data-i18n-title="win.minimise" title="Minimise">&#8211;</button>
+        <button id="winMax" data-i18n-title="win.maximise" title="Maximise">&#9633;</button>
+        <button id="winClose" class="close" data-i18n-title="win.quit" title="Quit">&#10005;</button>
       </div>
       <div id="pauseCard" class="panel">
-        <!-- With the OS title bar hidden, this heading is the drag handle. -->
-        <h2 data-tauri-drag-region>Paused</h2>
+        <h2 data-i18n="pause.title">Paused</h2>
         <div class="row">
-          <button id="btnResume" class="btn">Resume</button>
-          <button id="btnSettings" class="btn ghost">Settings</button>
+          <button id="btnResume" class="btn" data-i18n="pause.resume">Resume</button>
+          <button id="btnSettings" class="btn ghost" data-i18n="pause.settings">Settings</button>
+          <button id="btnFullscreen" class="btn ghost" data-i18n="pause.fullscreen">Fullscreen</button>
         </div>
 
         <div id="settings" class="settings">
           <div class="field">
-            <label for="setQuality">Quality</label>
-            <select id="setQuality">
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="ultra">Ultra</option>
+            <label for="setLang" data-i18n="set.language">Language</label>
+            <select id="setLang">
+              <option value="en">English</option>
+              <option value="ru">Русский</option>
             </select>
           </div>
           <div class="field">
-            <label for="setMusic">Music</label>
+            <label for="setQuality" data-i18n="set.quality">Quality</label>
+            <select id="setQuality">
+              <option value="low" data-i18n="quality.low">Low</option>
+              <option value="medium" data-i18n="quality.medium">Medium</option>
+              <option value="high" data-i18n="quality.high">High</option>
+              <option value="ultra" data-i18n="quality.ultra">Ultra</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="setMusic" data-i18n="set.music">Music</label>
             <input id="setMusic" type="range" min="0" max="100" value="50" />
             <span class="val" id="valMusic">50%</span>
           </div>
           <div class="field">
-            <label for="setSfx">Effects</label>
+            <label for="setSfx" data-i18n="set.sfx">Effects</label>
             <input id="setSfx" type="range" min="0" max="100" value="80" />
             <span class="val" id="valSfx">80%</span>
           </div>
           <div class="field">
-            <label for="setSens">Sensitivity</label>
+            <label for="setSens" data-i18n="set.sensitivity">Sensitivity</label>
             <input id="setSens" type="range" min="20" max="300" value="100" />
             <span class="val" id="valSens">1.00</span>
           </div>
           <div class="field">
-            <label for="setFov">Field of view</label>
+            <label for="setFov" data-i18n="set.fov">Field of view</label>
             <input id="setFov" type="range" min="60" max="110" value="68" />
             <span class="val" id="valFov">68</span>
           </div>
         </div>
 
         <div id="updateRow">
-          <span id="updateStatus">Updates: not checked<i id="updateDot"></i></span>
-          <button id="btnUpdate" class="btn ghost">Check for updates</button>
+          <span id="updateStatus" data-i18n="upd.notChecked">Updates: not checked</span
+          ><i id="updateDot"></i>
+          <button id="btnUpdate" class="btn ghost" data-i18n="upd.check">Check for updates</button>
         </div>
       </div>
     </div>
 
     <!-- Start screen: shown before the world is revealed -->
     <div id="start">
-      <div class="brand">
-        Arena Nova
-        <small>Overgrown Sanctuary</small>
-      </div>
-      <button id="btnPlay" class="btn big" disabled>Loading…</button>
-      <div id="startHint">Preparing the ruins…</div>
+      <!-- With no OS title bar, this strip is how the window gets dragged. -->
+      <div class="dragStrip" data-tauri-drag-region></div>
+      <div class="brand">Arena Nova</div>
+      <button id="btnPlay" class="btn big" disabled data-i18n="start.loading">Loading…</button>
+      <div id="startHint" data-i18n="start.preparing">Preparing the ruins…</div>
       <div id="version"></div>
     </div>
 

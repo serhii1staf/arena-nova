@@ -7,11 +7,22 @@
  * the web build never pays for code it can't use.
  */
 
+interface PhysicalPoint {
+  x: number;
+  y: number;
+}
+
 interface NativeWindowLike {
   minimize(): Promise<void>;
   toggleMaximize(): Promise<void>;
   close(): Promise<void>;
   setFullscreen(v: boolean): Promise<void>;
+  isFullscreen(): Promise<boolean>;
+  setCursorGrab(grab: boolean): Promise<void>;
+  setCursorVisible(visible: boolean): Promise<void>;
+  setCursorPosition(position: PhysicalPoint): Promise<void>;
+  outerPosition(): Promise<PhysicalPoint>;
+  innerSize(): Promise<{ width: number; height: number }>;
 }
 
 export interface PendingUpdate {
@@ -45,14 +56,128 @@ export function nativeWindow(): NativeWindowLike | null {
   return cachedWindow;
 }
 
+let PhysicalPositionCtor: (new (x: number, y: number) => PhysicalPoint) | null = null;
+
 /** Eagerly warm up the window handle so the first menu click responds. */
 export async function prepareNative(): Promise<void> {
   if (!isNative() || cachedWindow) return;
   try {
     const m = await import('@tauri-apps/api/window');
     cachedWindow = m.getCurrentWindow() as unknown as NativeWindowLike;
+    const dpi = await import('@tauri-apps/api/dpi');
+    PhysicalPositionCtor = dpi.PhysicalPosition as unknown as new (
+      x: number,
+      y: number,
+    ) => PhysicalPoint;
   } catch {
     /* ignore */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Native mouse capture
+// ---------------------------------------------------------------------------
+// WebView2 has no way to hide Chromium's "press Esc to show your cursor" banner
+// (confirmed by Microsoft), and that banner is what makes the native build feel
+// like a browser. So on desktop we skip the Pointer Lock API entirely: the OS
+// cursor is hidden and confined to the window, and we recentre it whenever it
+// drifts, which gives unlimited mouse travel with no browser UI at all.
+
+let captureActive = false;
+let warpPending = false;
+let windowCentre: PhysicalPoint | null = null;
+let centreValidUntil = 0;
+
+/** Hides and confines the OS cursor. Safe to call repeatedly. */
+export async function beginNativeMouseCapture(): Promise<void> {
+  const win = cachedWindow;
+  if (!isNative() || !win || captureActive) return;
+  captureActive = true;
+  try {
+    await win.setCursorVisible(false);
+    await win.setCursorGrab(true);
+    await recentreNativeCursor(true);
+  } catch {
+    captureActive = false;
+  }
+}
+
+/** Restores the cursor so the player can use the menu. */
+export async function endNativeMouseCapture(): Promise<void> {
+  const win = cachedWindow;
+  if (!isNative() || !win || !captureActive) return;
+  captureActive = false;
+  try {
+    await win.setCursorGrab(false);
+    await win.setCursorVisible(true);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function isNativeMouseCaptured(): boolean {
+  return captureActive;
+}
+
+/**
+ * Warps the cursor back to the middle of the window. Throttled to one in-flight
+ * request, and the window geometry is cached briefly, so this stays cheap enough
+ * to call from mouse-move handling.
+ */
+export async function recentreNativeCursor(force = false): Promise<void> {
+  const win = cachedWindow;
+  if (!win || !PhysicalPositionCtor) return;
+  if (warpPending && !force) return;
+  warpPending = true;
+  try {
+    const now = performance.now();
+    if (!windowCentre || now > centreValidUntil) {
+      const [pos, size] = await Promise.all([win.outerPosition(), win.innerSize()]);
+      windowCentre = {
+        x: Math.round(pos.x + size.width / 2),
+        y: Math.round(pos.y + size.height / 2),
+      };
+      centreValidUntil = now + 1000; // re-measure at most once a second
+    }
+    await win.setCursorPosition(new PhysicalPositionCtor(windowCentre.x, windowCentre.y));
+  } catch {
+    /* window moved or permission missing — ignore */
+  } finally {
+    warpPending = false;
+  }
+}
+
+/** Invalidate the cached window centre (call when the window moves/resizes). */
+export function invalidateWindowCentre(): void {
+  windowCentre = null;
+}
+
+// ---------------------------------------------------------------------------
+// Fullscreen
+// ---------------------------------------------------------------------------
+
+/** Toggles real fullscreen: the OS window natively, the Fullscreen API on web. */
+export async function toggleFullscreen(): Promise<boolean> {
+  const win = cachedWindow;
+  if (isNative() && win) {
+    try {
+      const now = await win.isFullscreen();
+      await win.setFullscreen(!now);
+      invalidateWindowCentre();
+      return !now;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      return false;
+    }
+    await document.documentElement.requestFullscreen();
+    return true;
+  } catch {
+    return false;
   }
 }
 

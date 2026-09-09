@@ -1,7 +1,14 @@
 import type { Engine } from '../core/Engine.ts';
 import type { QualityTier } from '../core/QualityManager.ts';
 import { SettingsStore } from './Settings.ts';
-import { checkForUpdate, installUpdate, isNative, nativeWindow } from './native.ts';
+import {
+  checkForUpdate,
+  installUpdate,
+  isNative,
+  nativeWindow,
+  toggleFullscreen,
+} from './native.ts';
+import { applyTranslations, getLang, onLangChange, setLang, t, type Lang } from './i18n.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T | null =>
   document.getElementById(id) as T | null;
@@ -25,10 +32,27 @@ export class GameUI {
     this.engine = engine;
     this.settings = new SettingsStore(engine);
     this.settings.applyAll();
+    applyTranslations();
     this.wireStartScreen();
     this.wirePauseMenu();
     this.wireSettings();
     this.wireUpdates();
+    this.wireFullscreen();
+    this.showVersion();
+    // Anything with dynamic text has to be refreshed when the language changes.
+    onLangChange(() => this.refreshDynamicText());
+  }
+
+  /** Re-renders strings that aren't plain `data-i18n` labels. */
+  private refreshDynamicText(): void {
+    const btn = $<HTMLButtonElement>('btnPlay');
+    if (btn) btn.textContent = btn.disabled ? t('start.loading') : t('start.play');
+    const hint = $('startHint');
+    if (hint && !this.started) hint.textContent = btn?.disabled ? t('start.preparing') : t('start.ready');
+    const hudHint = $('hint');
+    if (hudHint) {
+      hudHint.textContent = this.engine.input.isTouch ? t('hud.hintTouch') : t('hud.hintDesktop');
+    }
     this.showVersion();
   }
 
@@ -40,14 +64,21 @@ export class GameUI {
     const hint = $('startHint');
     if (btn) {
       btn.disabled = false;
-      btn.textContent = 'Play';
+      btn.textContent = t('start.play');
+      delete btn.dataset.i18n; // now driven by refreshDynamicText
     }
-    if (hint) hint.textContent = 'Click Play to enter the sanctuary';
+    if (hint) {
+      hint.textContent = t('start.ready');
+      delete hint.dataset.i18n;
+    }
   }
 
-  setLoadingStatus(text: string): void {
+  /** Shows a localised loading step on the start screen. */
+  setLoadingStatus(key: 'start.preparing' | 'start.growing'): void {
     const hint = $('startHint');
-    if (hint) hint.textContent = text;
+    if (!hint) return;
+    hint.dataset.i18n = key;
+    hint.textContent = t(key);
   }
 
   private wireStartScreen(): void {
@@ -68,6 +99,10 @@ export class GameUI {
 
   get hasStarted(): boolean {
     return this.started;
+  }
+
+  get isPaused(): boolean {
+    return this.paused;
   }
 
   // ---------------------------------------------------------------- pause ----
@@ -112,8 +147,8 @@ export class GameUI {
     const hint = $('hint');
     if (hint) hint.style.opacity = on ? '0' : '1';
     if (on) {
-      // Release the mouse so the cursor can reach the menu.
-      if (document.pointerLockElement) document.exitPointerLock();
+      // Hand the cursor back so it can reach the menu (native capture or lock).
+      this.engine.input.releasePointerLock();
     } else {
       $('settings')?.classList.remove('open');
       this.engine.input.requestPointerLock();
@@ -122,8 +157,24 @@ export class GameUI {
 
   // ------------------------------------------------------------- settings ----
 
+  /** F11 toggles real fullscreen, both natively and on the web. */
+  private wireFullscreen(): void {
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== 'F11') return;
+      e.preventDefault(); // stop the webview's own fullscreen handling
+      void toggleFullscreen();
+    });
+    $('btnFullscreen')?.addEventListener('click', () => void toggleFullscreen());
+  }
+
   private wireSettings(): void {
     const v = this.settings.values;
+
+    const lang = $<HTMLSelectElement>('setLang');
+    if (lang) {
+      lang.value = getLang();
+      lang.addEventListener('change', () => setLang(lang.value as Lang));
+    }
 
     const quality = $<HTMLSelectElement>('setQuality');
     if (quality) {
@@ -178,48 +229,64 @@ export class GameUI {
     const dot = $('updateDot');
     if (!btn || !status) return;
 
+    // Static messages keep their data-i18n so a language switch re-translates
+    // them; interpolated ones can't, so they're set as plain text.
+    const setStatus = (
+      key: Parameters<typeof t>[0],
+      vars?: Record<string, string | number>,
+    ): void => {
+      if (vars) delete status.dataset.i18n;
+      else status.dataset.i18n = key;
+      status.textContent = t(key, vars);
+    };
+
     if (!isNative()) {
-      status.textContent = 'Updates: web build is always current';
+      setStatus('upd.webBuild');
       btn.disabled = true;
       return;
     }
 
     let pending: Awaited<ReturnType<typeof checkForUpdate>> = null;
 
+    const showAvailable = (version: string): void => {
+      setStatus('upd.available', { version });
+      status.classList.add('available');
+      dot?.classList.add('on');
+      btn.textContent = t('upd.install');
+      delete btn.dataset.i18n;
+    };
+
     btn.addEventListener('click', () => {
       if (pending) {
         // Second press installs what we found.
-        status.textContent = 'Downloading update…';
+        setStatus('upd.downloading');
         btn.disabled = true;
         void installUpdate(pending, (pct) => {
-          status.textContent = `Downloading update… ${pct}%`;
+          setStatus('upd.downloadingPct', { pct });
         }).catch((err: unknown) => {
-          status.textContent = `Update failed: ${(err as Error).message}`;
+          setStatus('upd.failed', { error: (err as Error).message });
           btn.disabled = false;
         });
         return;
       }
 
-      status.textContent = 'Checking…';
+      setStatus('upd.checking');
       btn.disabled = true;
       void checkForUpdate()
         .then((update) => {
           btn.disabled = false;
           if (!update) {
-            status.textContent = 'Updates: you are up to date';
+            setStatus('upd.upToDate');
             status.classList.remove('available');
             dot?.classList.remove('on');
             return;
           }
           pending = update;
-          status.textContent = `Update available: v${update.version}`;
-          status.classList.add('available');
-          dot?.classList.add('on');
-          btn.textContent = 'Install & restart';
+          showAvailable(update.version);
         })
         .catch((err: unknown) => {
           btn.disabled = false;
-          status.textContent = `Check failed: ${(err as Error).message}`;
+          setStatus('upd.checkFailed', { error: (err as Error).message });
         });
     });
 
@@ -228,10 +295,7 @@ export class GameUI {
       .then((update) => {
         if (!update) return;
         pending = update;
-        status.textContent = `Update available: v${update.version}`;
-        status.classList.add('available');
-        dot?.classList.add('on');
-        btn.textContent = 'Install & restart';
+        showAvailable(update.version);
       })
       .catch(() => {
         /* offline or no endpoint yet — stay quiet */

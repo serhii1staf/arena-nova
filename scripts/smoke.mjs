@@ -69,6 +69,20 @@ try {
   );
   await page.click('#btnSettings');
   await page.waitForTimeout(500);
+
+  // Switch the UI to Russian and confirm the labels actually change.
+  await page.selectOption('#setLang', 'ru');
+  await page.waitForTimeout(400);
+  report.localisedToRussian = await page.evaluate(() => {
+    const resume = document.getElementById('btnResume')?.textContent?.trim() ?? '';
+    const title = document.querySelector('#pauseCard h2')?.textContent?.trim() ?? '';
+    return resume === 'Продолжить' && title === 'Пауза';
+  });
+  await page.screenshot({ path: join(here, 'smoke_menu_ru.png') });
+
+  // Back to English for the remaining screenshots.
+  await page.selectOption('#setLang', 'en');
+  await page.waitForTimeout(300);
   await page.screenshot({ path: join(here, 'smoke_menu.png') });
   await page.click('#btnResume');
   await page.waitForTimeout(500);
@@ -134,6 +148,7 @@ try {
     report.drawCalls > 0 &&
     report.triangles > 1000 &&
     report.pauseOpensOnEscape &&
+    report.localisedToRussian &&
     errors.length === 0;
 
   console.log('\n=== SMOKE REPORT ===');
