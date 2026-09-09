@@ -16,6 +16,8 @@ import { Avatar } from '../player/Avatar.ts';
 import { buildExterior, type ExteriorBuild } from '../world/Exterior.ts';
 import { buildDragon, type DragonBuild } from '../world/Dragon.ts';
 import { DayNight } from '../world/DayNight.ts';
+import { RemoteCrowd } from '../net/RemoteCrowd.ts';
+import { ensureConnected, gameSession } from '../net/session.ts';
 
 /**
  * ExteriorScene — the open world reached through the cathedral door: rolling
@@ -39,6 +41,9 @@ export class ExteriorScene implements GameScene {
   private dayNight!: DayNight;
   private fog!: FogExp2;
   private background!: Color;
+  private crowd!: RemoteCrowd;
+  private readonly net = gameSession();
+  private netAccum = 0;
   private time = 0;
   private returning = false;
   /**
@@ -128,12 +133,28 @@ export class ExteriorScene implements GameScene {
     this.character.object.visible = false;
     this.scene.add(this.character.object);
 
+    // Other players. The session is shared with the lobby, so walking through the
+    // portal keeps you in the same room instead of reconnecting.
+    this.crowd = new RemoteCrowd(this.net, GameConfig.player.sprintSpeed);
+    this.scene.add(this.crowd.group);
+    ensureConnected();
+
     // Compile every program now, while the transition is still faded out.
-    // Otherwise the first frame in the open world has to compile the terrain,
-    // three wind-injected vegetation programs, the ember, portal, dragon and
-    // particle shaders all at once — which is a large part of why stepping
-    // through the portal used to drop the frame rate off a cliff.
-    await ctx.renderer.compileAsync(this.scene, this.camera);
+    // Otherwise the first frame in the open world has to compile the terrain, the
+    // wind-injected vegetation programs, the ember, portal, dragon, wildlife and
+    // particle shaders all at once — which is a large part of why stepping through
+    // the portal used to drop the frame rate off a cliff.
+    //
+    // Synchronous `compile`, not `compileAsync`. The async version polls material
+    // readiness through `KHR_parallel_shader_compile`, and on a driver without
+    // that extension it throws from inside its own polling callback — which is
+    // outside the promise, so the await never settles and the scene never
+    // finishes initialising. The game would sit on the transition fade forever.
+    try {
+      ctx.renderer.compile(this.scene, this.camera);
+    } catch {
+      // Warm-up is an optimisation; never let it stop the scene from opening.
+    }
   }
 
   update(dt: number): void {
@@ -143,6 +164,14 @@ export class ExteriorScene implements GameScene {
       this.returning = true;
       this.ctx.requestScene('lobby');
     }
+
+    // Publish our position at ~20 Hz, matching the server's broadcast rate.
+    this.netAccum += dt;
+    if (this.netAccum >= 0.05) {
+      this.netAccum = 0;
+      this.net.sendInput(f.x, f.y, f.z, this.player.viewYaw);
+    }
+    this.net.update();
   }
 
   render(alpha: number, frameDelta: number): void {
@@ -184,6 +213,7 @@ export class ExteriorScene implements GameScene {
       skyMaterial: this.world.skyMaterial,
     });
 
+    this.crowd.update(frameDelta);
     this.world.update(this.time, frameDelta, p, this.dayNight.nightFactor);
     this.dragon.update(this.time, frameDelta);
   }
@@ -199,6 +229,7 @@ export class ExteriorScene implements GameScene {
   }
 
   dispose(): void {
+    this.crowd?.dispose();
     this.character?.dispose();
     this.dragon?.dispose();
     this.dayNight?.dispose();

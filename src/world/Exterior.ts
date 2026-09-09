@@ -163,7 +163,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     parts.push(boxAt(15.4, 3.4, 3.4, 0, slabH - 1.7, 0));
     parts.push(boxAt(17, 1.4, 5.2, 0, 0.7, 0));
     const merged = mergeGeometries(
-      parts.map((p) => p.toNonIndexed()),
+      parts.map((p) => (p.index ? p.toNonIndexed() : p)),
       false,
     );
     for (const p of parts) p.dispose();

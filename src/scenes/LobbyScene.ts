@@ -1,12 +1,9 @@
 import {
-  CapsuleGeometry,
   Color,
   DirectionalLight,
   Fog,
-  Group,
   HemisphereLight,
   Mesh,
-  MeshStandardMaterial,
   PerspectiveCamera,
   PointLight,
   Scene,
@@ -17,8 +14,8 @@ import type { EngineContext, GameScene } from '../core/context.ts';
 import type { AudioManager } from '../core/AudioManager.ts';
 import { PlayerController } from '../player/PlayerController.ts';
 import { Avatar } from '../player/Avatar.ts';
-import { NetworkManager, type RemotePlayer } from '../net/NetworkManager.ts';
-import { defaultPlayerName, roomSocketUrl } from '../net/endpoint.ts';
+import { RemoteCrowd } from '../net/RemoteCrowd.ts';
+import { ensureConnected, gameSession } from '../net/session.ts';
 import { buildCathedral, LAYOUT, type CathedralBuild } from '../world/Cathedral.ts';
 import { buildVegetation, type VegetationBuild } from '../world/Vegetation.ts';
 import { buildAtmosphere, type AtmosphereBuild } from '../world/Atmosphere.ts';
@@ -42,12 +39,9 @@ export class LobbyScene implements GameScene {
   private player!: PlayerController;
   private character!: Avatar;
   private audio!: AudioManager;
-  private readonly net = new NetworkManager();
+  private readonly net = gameSession();
+  private crowd!: RemoteCrowd;
 
-  private readonly avatars = new Map<string, Mesh>();
-  private avatarGeo?: CapsuleGeometry;
-  private avatarMat?: MeshStandardMaterial;
-  private readonly remoteRoot = new Group();
 
   private time = 0;
   private netAccum = 0;
@@ -94,7 +88,6 @@ export class LobbyScene implements GameScene {
     });
     this.scene.add(this.portal.group);
 
-    this.scene.add(this.remoteRoot);
 
     // --- Lighting ----------------------------------------------------------
     const hemi = new HemisphereLight(new Color(0.7, 0.85, 0.6), new Color(0.12, 0.16, 0.1), 1.1);
@@ -137,42 +130,12 @@ export class LobbyScene implements GameScene {
     this.character.object.visible = false;
     this.scene.add(this.character.object);
 
-    // --- Network (offline; ready for connect(url)) -------------------------
-    this.avatarGeo = new CapsuleGeometry(LAYOUT.playerRadius, 1.1, 6, 12);
-    this.avatarMat = new MeshStandardMaterial({
-      color: new Color(0.6, 0.85, 0.7),
-      emissive: new Color(0.05, 0.2, 0.12),
-      roughness: 0.7,
-      metalness: 0,
-    });
-    this.unsub.push(this.net.onPlayerJoin((p) => this.spawnAvatar(p)));
-    this.unsub.push(this.net.onPlayerLeave((p) => this.removeAvatar(p.id)));
-
-    // Go online. Deliberately not awaited: the game must be fully playable the
-    // instant the scene is ready, whether or not the server can be reached.
-    // A failure here leaves the NullTransport in place and nothing else notices.
-    void this.net
-      .connect(roomSocketUrl())
-      .then(() => this.net.join(defaultPlayerName()))
-      .catch(() => {
-        /* offline or server unreachable — carry on single-player */
-      });
-  }
-
-  private spawnAvatar(p: RemotePlayer): void {
-    if (!this.avatarGeo || !this.avatarMat) return;
-    const mesh = new Mesh(this.avatarGeo, this.avatarMat);
-    mesh.castShadow = true;
-    this.avatars.set(p.id, mesh);
-    this.remoteRoot.add(mesh);
-  }
-
-  private removeAvatar(id: string): void {
-    const mesh = this.avatars.get(id);
-    if (mesh) {
-      this.remoteRoot.remove(mesh);
-      this.avatars.delete(id);
-    }
+    // --- Network -----------------------------------------------------------
+    // The session is shared with every other scene, so walking through the portal
+    // no longer drops you out of the room.
+    this.crowd = new RemoteCrowd(this.net, GameConfig.player.sprintSpeed);
+    this.scene.add(this.crowd.group);
+    ensureConnected();
   }
 
   update(dt: number): void {
@@ -220,11 +183,7 @@ export class LobbyScene implements GameScene {
     this.atmosphere.update(this.time, this.camera);
     this.portal.update(this.time);
 
-    // Place interpolated remote avatars.
-    for (const [id, mesh] of this.avatars) {
-      const rp = this.net.remotePlayers.get(id);
-      if (rp) mesh.position.set(rp.x, rp.y + 1.0, rp.z);
-    }
+    this.crowd.update(frameDelta);
   }
 
   /** Debug/menu hook: set the third-person camera distance (0 = first person). */
@@ -240,11 +199,8 @@ export class LobbyScene implements GameScene {
   dispose(): void {
     for (const u of this.unsub) u();
     this.unsub = [];
-    this.net.dispose();
+    this.crowd?.dispose();
     this.character?.dispose();
-    this.avatarGeo?.dispose();
-    this.avatarMat?.dispose();
-    this.avatars.clear();
     this.portal?.dispose();
     this.vegetation?.dispose();
     this.atmosphere?.dispose();

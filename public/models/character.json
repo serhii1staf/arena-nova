@@ -1,8 +1,8 @@
 {
-  "_readme": "See README.md in this folder. Put character.glb here, then set enabled to true.",
-  "_readme_ru": "Смотрите README.md в этой папке. Положите character.glb сюда и поставьте enabled: true.",
+  "_readme": "See README.md in this folder. Replace character.glb to change the avatar.",
+  "_source": "KayKit Pirate Pack by Kay Lousberg (CC0). See CREDITS.md in the repo root.",
 
-  "enabled": false,
+  "enabled": true,
 
   "url": "character.glb",
   "height": 1.8,
@@ -11,5 +11,14 @@
 
   "animationUrls": [],
 
-  "clips": {}
+  "clips": {
+    "idle": "Idle",
+    "walk": "Walk",
+    "run": "Run",
+    "jump": "Jump",
+    "fall": "Jump_Idle"
+  },
+
+  "walkClipSpeed": 3.0,
+  "runClipSpeed": 7.0
 }

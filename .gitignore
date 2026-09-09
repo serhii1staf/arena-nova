@@ -30,8 +30,13 @@ npm-debug.log*
 scripts/*.png
 
 # Authored character models are user-supplied (see public/models/README.md).
-# Licences vary per asset, so they are never committed.
+# Licences vary per asset, so they are never committed — except the one the game
+# ships with, which is CC0 and credited in CREDITS.md.
 public/models/*.glb
+!public/models/character.glb
+
+# Asset packs downloaded for conversion; only the converted GLB is kept.
+*.zip
 public/models/*.gltf
 public/models/*.bin
 public/models/*.fbx

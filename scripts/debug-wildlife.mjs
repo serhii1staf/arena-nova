@@ -143,6 +143,7 @@ try {
   );
 
   await page.screenshot({ path: join(here, 'wildlife.png') });
+  void join;
   console.log(`errors: ${errors.length}`);
   for (const e of errors.slice(0, 6)) console.log(' ', e);
 

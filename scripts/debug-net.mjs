@@ -101,8 +101,43 @@ try {
   console.log(`errors: ${errors.length}`);
   for (const e of errors.slice(0, 8)) console.log(' ', e);
 
-  const ok = sawEachOther && moved && errors.length === 0;
-  console.log('RESULT:', ok ? 'PASS — two players see each other move' : 'FAIL');
+  // ---- Open world --------------------------------------------------------
+  // The session has to survive the scene switch. Each scene used to own its own
+  // connection, so stepping through the portal dropped you out of the room and
+  // nobody in the big world could see anybody.
+  console.log('--- both players step into the open world ---');
+  for (const p of [a, b]) {
+    await p.evaluate(() => window.arena.engine.requestScene('exterior'));
+  }
+  for (const p of [a, b]) {
+    await p
+      .waitForFunction(
+        () => window.arena.engine.scenes.currentName === 'exterior' && !!window.arena.scene,
+        { timeout: 150000 },
+      )
+      .catch(() => {});
+  }
+  await a.waitForTimeout(6000);
+
+  const exterior = await Promise.all([status(a), status(b)]);
+  console.log('A in exterior:', JSON.stringify(exterior[0]));
+  console.log('B in exterior:', JSON.stringify(exterior[1]));
+  const crowd = await b.evaluate(() => {
+    const g = window.arena.scene.scene.getObjectByName('RemotePlayers');
+    return { present: !!g, avatars: g?.children.length ?? 0 };
+  });
+  console.log('B remote-player group:', JSON.stringify(crowd));
+
+  const worldOk =
+    exterior[0].state === 'online' &&
+    exterior[1].state === 'online' &&
+    exterior[0].remotes.length > 0 &&
+    exterior[1].remotes.length > 0 &&
+    crowd.avatars > 0;
+  console.log(`open world sync: ${worldOk}`);
+
+  const ok = sawEachOther && moved && worldOk && errors.length === 0;
+  console.log('RESULT:', ok ? 'PASS — two players see each other, lobby and open world' : 'FAIL');
   process.exitCode = ok ? 0 : 1;
 } finally {
   await browser.close();

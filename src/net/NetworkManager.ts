@@ -87,8 +87,12 @@ export class NetworkManager {
   readonly remotePlayers = new Map<string, RemotePlayer>();
   localId = '';
 
-  private readonly INTERP_DELAY = 100; // ms
-  private timeOffset = 0; // serverTime - clientTime estimate
+  /**
+   * How far behind live the remote players are rendered, in ms. Has to exceed the
+   * snapshot spacing (50 ms at 20 Hz) so there are always two samples to blend.
+   */
+  private readonly INTERP_DELAY = 80;
+  private timeOffset = 0; // serverTime - clientTime estimate, for input stamps
   private inputSeq = 0;
 
   private joinHandlers = new Set<PlayerEvent>();
@@ -133,7 +137,19 @@ export class NetworkManager {
     });
   }
 
-  private ingest(players: PlayerSnapshot[], t: number): void {
+  /**
+   * Buffers a snapshot against the *local* clock rather than the server's.
+   *
+   * Stamping with the server's time requires the two clocks to agree, and the
+   * offset here is a single unsynchronised sample taken at connect — so any skew
+   * between the two machines shifted every sample, pushing the interpolation
+   * window off the buffered range. Interpolation then fell through to "hold the
+   * newest sample", which is why remote players looked heavily delayed and
+   * steppy. Arrival time needs no clock agreement at all: the spacing between
+   * snapshots is what interpolation actually depends on, and that survives.
+   */
+  private ingest(players: PlayerSnapshot[], _serverTime: number): void {
+    const t = performance.now();
     for (const s of players) {
       if (s.id === this.localId) continue; // server reconciliation handled elsewhere
       let rp = this.remotePlayers.get(s.id);
@@ -173,7 +189,8 @@ export class NetworkManager {
 
   /** Advance interpolation for all remote players. Call once per frame. */
   update(): void {
-    const renderTime = performance.now() + this.timeOffset - this.INTERP_DELAY;
+    // Same clock the snapshots were stamped with in `ingest` — the local one.
+    const renderTime = performance.now() - this.INTERP_DELAY;
     for (const rp of this.remotePlayers.values()) rp.interpolate(renderTime);
   }
 

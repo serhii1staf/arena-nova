@@ -88,7 +88,6 @@ export async function prepareNative(): Promise<void> {
 let captureActive = false;
 let warpPending = false;
 let windowCentre: PhysicalPoint | null = null;
-let centreValidUntil = 0;
 /** Warps issued whose synthetic mouse event has not been discarded yet. */
 let pendingWarps = 0;
 
@@ -134,24 +133,23 @@ export async function recentreNativeCursor(force = false): Promise<void> {
   if (warpPending && !force) return;
   warpPending = true;
   try {
-    const now = performance.now();
-    if (!windowCentre || now > centreValidUntil) {
-      // `innerPosition` is the client area's origin. Mixing `outerPosition` with
-      // `innerSize` put the target a few pixels off the real centre, which biased
-      // where the cursor landed after every warp.
-      // `innerPosition` needs its own capability, and if it is ever missing the
-      // whole warp would fail silently and the camera would stop turning at the
-      // window edge. Fall back to the outer frame rather than losing the warp.
-      const [pos, size] = await Promise.all([
-        win.innerPosition().catch(() => win.outerPosition()),
-        win.innerSize(),
-      ]);
-      windowCentre = {
-        x: Math.round(pos.x + size.width / 2),
-        y: Math.round(pos.y + size.height / 2),
-      };
-      centreValidUntil = now + 1000; // re-measure at most once a second
-    }
+    // The target comes from the DOM, not from the window API.
+    //
+    // `screenX/screenY` are the viewport's own position on the desktop and
+    // `innerWidth/innerHeight` its size, both in CSS pixels; scaling by the
+    // device pixel ratio gives the physical point `setCursorPosition` expects.
+    //
+    // This replaced `innerPosition() + innerSize()/2`, which was wrong for a
+    // windowed app and only *looked* right in fullscreen — there the window
+    // origin is (0,0), so any error in the origin cancels out. That is precisely
+    // the reported symptom: the camera turned freely in fullscreen and jammed in
+    // a window. Reading the DOM also needs no IPC and no capability, so it can
+    // neither be denied nor go stale between frames.
+    const ratio = window.devicePixelRatio || 1;
+    windowCentre = {
+      x: Math.round((window.screenX + window.innerWidth / 2) * ratio),
+      y: Math.round((window.screenY + window.innerHeight / 2) * ratio),
+    };
     // Announce the warp *before* it happens. Moving the OS cursor generates a
     // real WM_MOUSEMOVE, and because this path deliberately avoids Pointer Lock
     // there is nothing to distinguish it from the player's own movement — so the

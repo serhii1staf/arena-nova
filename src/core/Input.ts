@@ -194,20 +194,22 @@ export class Input {
     this.lookDelta.y += e.movementY;
 
     // Native capture has no pointer lock, so the cursor really travels across the
-    // window. Warp it back before it reaches an edge and stops producing deltas.
-    // The margin is deliberately small: every warp costs one discarded event, so
-    // the aim is to leave as much free travel as possible.
+    // window; warp it back before it reaches an edge and stops producing deltas.
+    //
+    // Two margins, because the warp is an async round-trip while mouse input is
+    // not. The outer one is a hard stop: the cursor is confined to the window, so
+    // once it is pressed against the frame the OS reports no more movement and
+    // the view simply stops turning. Moving fast could cross a single small
+    // margin and hit the wall before the warp landed — so past the outer margin
+    // the throttle is bypassed and a warp is forced.
     if (this.nativeCapture) {
-      const marginX = window.innerWidth * 0.1;
-      const marginY = window.innerHeight * 0.1;
-      if (
-        e.clientX < marginX ||
-        e.clientX > window.innerWidth - marginX ||
-        e.clientY < marginY ||
-        e.clientY > window.innerHeight - marginY
-      ) {
-        void recentreNativeCursor();
-      }
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const dx = Math.abs(e.clientX - w * 0.5) / (w * 0.5);
+      const dy = Math.abs(e.clientY - h * 0.5) / (h * 0.5);
+      const offCentre = Math.max(dx, dy);
+      if (offCentre > 0.72) void recentreNativeCursor(true);
+      else if (offCentre > 0.5) void recentreNativeCursor();
     }
   }
 
