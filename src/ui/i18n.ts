@@ -14,6 +14,7 @@ const STRINGS = {
   en: {
     'start.loading': 'Loading…',
     'start.play': 'Play',
+    'start.name': 'Your name',
     'start.ready': 'Press Play to enter the sanctuary',
     'start.preparing': 'Preparing the ruins…',
     'start.growing': 'Growing the moss…',
@@ -70,6 +71,7 @@ const STRINGS = {
   ru: {
     'start.loading': 'Загрузка…',
     'start.play': 'Играть',
+    'start.name': 'Ваше имя',
     'start.ready': 'Нажмите «Играть», чтобы войти',
     'start.preparing': 'Пробуждаем руины…',
     'start.growing': 'Выращиваем мох…',
@@ -185,6 +187,14 @@ export function applyTranslations(root: ParentNode = document): void {
   for (const el of Array.from(root.querySelectorAll<HTMLElement>('[data-i18n]'))) {
     const key = el.dataset.i18n as StringKey | undefined;
     if (key) el.textContent = t(key);
+  }
+  // Placeholders need their own pass: they are an attribute, not text content, and
+  // an input's text content is not shown at all.
+  for (const el of Array.from(
+    root.querySelectorAll<HTMLInputElement>('[data-i18n-placeholder]'),
+  )) {
+    const key = el.dataset.i18nPlaceholder as StringKey | undefined;
+    if (key) el.placeholder = t(key);
   }
   for (const el of Array.from(root.querySelectorAll<HTMLElement>('[data-i18n-title]'))) {
     const key = el.dataset.i18nTitle as StringKey | undefined;

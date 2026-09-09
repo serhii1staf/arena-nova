@@ -277,12 +277,107 @@
       }
       #start .brand {
         margin-bottom: 4px;
+        transition:
+          transform 0.75s cubic-bezier(0.22, 1, 0.36, 1),
+          opacity 0.5s ease;
       }
       #startHint {
         font-size: 12px;
         letter-spacing: 0.2em;
         text-transform: uppercase;
         color: rgba(150, 200, 165, 0.65);
+        transition:
+          transform 0.75s cubic-bezier(0.22, 1, 0.36, 1),
+          opacity 0.5s ease;
+      }
+      /*
+       * Once the world is built the two labels get out of the way — the title
+       * upward, the prompt downward — and the button becomes the name form. The
+       * button is never removed and never replaced: it is the same element the
+       * whole time, so the layout does not jump and the click target stays put.
+       */
+      #start.ready .brand {
+        transform: translateY(-56px);
+      }
+      #start.ready #startHint {
+        transform: translateY(52px);
+        opacity: 0;
+      }
+
+      /* ---- Loading spinner, and the one beside the play button ---- */
+      .spinner {
+        width: 18px;
+        height: 18px;
+        flex: 0 0 auto;
+        border: 2px solid rgba(150, 220, 175, 0.25);
+        border-top-color: rgba(180, 245, 200, 0.95);
+        border-radius: 50%;
+        animation: spin 0.85s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      /* Respect a user who has asked for less motion. */
+      @media (prefers-reduced-motion: reduce) {
+        .spinner {
+          animation-duration: 3s;
+        }
+        #start .brand,
+        #start #startHint,
+        #playRow {
+          transition: none;
+        }
+      }
+
+      /* ---- The button, and what it becomes ---- */
+      #playRow {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        transition: transform 0.75s cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      #start.ready #playRow {
+        transform: translateY(-6px);
+      }
+      #nameField {
+        display: none;
+        align-items: center;
+        gap: 10px;
+        padding: 0 4px 0 16px;
+        border: 1px solid rgba(120, 210, 150, 0.3);
+        border-radius: 999px;
+        background: rgba(8, 26, 16, 0.72);
+      }
+      #start.ready #nameField {
+        display: flex;
+      }
+      #nameInput {
+        width: 190px;
+        padding: 13px 0;
+        border: 0;
+        background: transparent;
+        color: #d7f3e0;
+        font: inherit;
+        font-size: 15px;
+        letter-spacing: 0.04em;
+        outline: none;
+      }
+      #nameInput::placeholder {
+        color: rgba(150, 200, 165, 0.5);
+      }
+      #nameNote {
+        min-height: 16px;
+        font-size: 11px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: rgba(255, 170, 120, 0.9);
+        opacity: 0;
+        transition: opacity 0.25s ease;
+      }
+      #nameNote.on {
+        opacity: 1;
       }
       #version {
         position: fixed;
@@ -547,7 +642,23 @@
       <!-- With no OS title bar, this strip is how the window gets dragged. -->
       <div class="dragStrip" data-tauri-drag-region></div>
       <div class="brand">Arena Nova</div>
-      <button id="btnPlay" class="btn big" disabled data-i18n="start.loading">Loading…</button>
+      <div id="playRow">
+        <div id="nameField">
+          <input
+            id="nameInput"
+            type="text"
+            maxlength="18"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Player name"
+            placeholder="Your name"
+            data-i18n-placeholder="start.name"
+          />
+        </div>
+        <button id="btnPlay" class="btn big" disabled data-i18n="start.loading">Loading…</button>
+        <div id="playSpinner" class="spinner" aria-hidden="true"></div>
+      </div>
+      <div id="nameNote" role="status" aria-live="polite"></div>
       <div id="startHint" data-i18n="start.preparing">Preparing the ruins…</div>
       <div id="version"></div>
     </div>

@@ -10,6 +10,7 @@ import {
 } from './native.ts';
 import { applyTranslations, getLang, onLangChange, setLang, t, type Lang } from './i18n.ts';
 import { SKINS, savedSkin, saveSkin } from '../player/skins.ts';
+import { savedName, saveName } from '../net/identity.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T | null =>
   document.getElementById(id) as T | null;
@@ -60,7 +61,13 @@ export class GameUI {
 
   // ---------------------------------------------------------------- start ----
 
-  /** Enable the Play button once the world is built. */
+  /**
+   * The world is built: turn the loading screen into the name form.
+   *
+   * The title lifts, the prompt drops away and the button gains a name field
+   * beside it. Deliberately the same button element throughout — replacing it
+   * would move the click target at the exact moment the player is reaching for it.
+   */
   markReady(): void {
     const btn = $<HTMLButtonElement>('btnPlay');
     const hint = $('startHint');
@@ -73,6 +80,21 @@ export class GameUI {
       hint.textContent = t('start.ready');
       delete hint.dataset.i18n;
     }
+
+    const name = $<HTMLInputElement>('nameInput');
+    if (name) {
+      // Show the stored name if there is one; otherwise leave the field empty so
+      // the placeholder invites an answer rather than presenting a default the
+      // player has to delete first.
+      name.value = savedName();
+      name.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') this.play();
+      });
+    }
+    $('start')?.classList.add('ready');
+    // Focus after the layout settles, or the field animates while focused and the
+    // caret jumps around it.
+    window.setTimeout(() => name?.focus(), 480);
   }
 
   /** Shows a localised loading step on the start screen. */
@@ -90,6 +112,15 @@ export class GameUI {
 
   private play(): void {
     if (this.started) return;
+    const btn = $<HTMLButtonElement>('btnPlay');
+    if (btn?.disabled) return; // still loading
+
+    // Commit the name before anything joins a room, so the first announcement
+    // already carries it and nobody sees a placeholder that then changes.
+    const field = $<HTMLInputElement>('nameInput');
+    const chosen = saveName(field?.value ?? '');
+    if (field) field.value = chosen;
+
     this.started = true;
     $('start')?.classList.add('hidden');
     $('hud')?.classList.add('visible');

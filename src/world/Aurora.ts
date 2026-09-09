@@ -65,21 +65,36 @@ const FRAG = /* glsl */ `
 
     // Curtains: three shearing waves at different rates. The vertical term makes
     // each band lean as it rises, which is what gives the folded-sheet look.
+    //
+    // Every frequency here MUST be a whole number. x runs 0..2PI once around the
+    // ring, so a fractional multiplier does not come back to the same phase after
+    // a full turn: the pattern fails to close and leaves a hard vertical seam
+    // down the sky where the two ends of the cylinder meet.
     float lean = y * 1.7;
     float w1 = sin(x * 3.0 + lean + uTime * 0.10);
-    float w2 = sin(x * 6.7 - lean * 0.6 + uTime * 0.16) * 0.6;
-    float w3 = sin(x * 12.3 + lean * 1.4 - uTime * 0.23) * 0.35;
+    float w2 = sin(x * 7.0 - lean * 0.6 + uTime * 0.16) * 0.6;
+    float w3 = sin(x * 13.0 + lean * 1.4 - uTime * 0.23) * 0.35;
     float folds = w1 + w2 + w3;
 
     // Turn the wave field into discrete ribbons with soft edges.
-    float ribbon = pow(max(0.0, 1.0 - abs(folds) * 0.42), 2.0);
+    float ribbon = pow(max(0.0, 1.0 - abs(folds) * 0.42), 2.4);
 
     // Bright and dense at the bottom, dissolving into streaks at the top.
     float rise = smoothstep(0.0, 0.10, y) * (1.0 - smoothstep(0.55, 1.0, y));
-    // Vertical streaking, the giveaway detail of a real aurora.
-    float streak = 0.75 + 0.25 * sin(x * 40.0 + sin(x * 7.0) * 3.0);
+    // Vertical streaking, the giveaway detail of a real aurora. Whole numbers
+    // again, for the same reason as the folds.
+    float streak = 0.75 + 0.25 * sin(x * 41.0 + sin(x * 7.0) * 3.0);
 
-    float a = ribbon * rise * window * streak * uAmount;
+    // Brightness waves running along the curtain. This is the shimmer: in a real
+    // display the light does not simply fade up and down, pulses travel sideways
+    // through the sheet and overlap. Two speeds in opposite directions, plus a
+    // faster ripple, so the interference never repeats visibly.
+    float p1 = sin(x * 2.0 - uTime * 0.55 + y * 2.0);
+    float p2 = sin(x * 5.0 + uTime * 0.37 - y * 1.3);
+    float p3 = sin(x * 11.0 - uTime * 0.9 + y * 4.0);
+    float shimmer = 0.55 + 0.45 * (0.5 + 0.28 * p1 + 0.16 * p2 + 0.10 * p3);
+
+    float a = ribbon * rise * window * streak * shimmer * uAmount;
     if (a <= 0.002) discard;
 
     // Green at the base through cyan to violet at the tips.
@@ -89,9 +104,20 @@ const FRAG = /* glsl */ `
     vec3 col = mix(low, mid, smoothstep(0.0, 0.4, y));
     col = mix(col, high, smoothstep(0.35, 0.9, y));
 
+    // The hue drifts along the curtain as well as up it, tied to the same waves
+    // that drive the brightness. Height alone gives a static gradient that a
+    // pulsing alpha cannot rescue — it reads as a lit backdrop rather than
+    // something alive. Coupling colour to the travelling pulses is what makes it
+    // shift and swim.
+    float hueShift = 0.5 + 0.5 * p1 * p2;
+    col = mix(col, vec3(0.45, 0.55, 1.0), hueShift * 0.20 * y);
+    // Ribbon cores run hotter and greener than their edges, the way a bright fold
+    // photographs almost white-green.
+    col += vec3(0.20, 0.55, 0.28) * pow(ribbon, 2.0);
+
     // Additive over a night sky, so the alpha has to be generous to register at
     // all: the ribbon term alone lands around a tenth, which is invisible.
-    gl_FragColor = vec4(col, min(1.0, a * 1.7));
+    gl_FragColor = vec4(col, min(1.0, a * 2.1));
   }
 `;
 

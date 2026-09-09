@@ -1,5 +1,6 @@
 import { NetworkManager } from './NetworkManager.ts';
-import { defaultPlayerName, roomSocketUrl } from './endpoint.ts';
+import { roomSocketUrl } from './endpoint.ts';
+import { onNameChange, playerName } from './identity.ts';
 import { onSkinChange, savedSkin } from '../player/skins.ts';
 
 /**
@@ -13,6 +14,7 @@ import { onSkinChange, savedSkin } from '../player/skins.ts';
 let shared: NetworkManager | null = null;
 let connecting = false;
 let unsubscribeSkin: (() => void) | null = null;
+let unsubscribeName: (() => void) | null = null;
 
 export function gameSession(): NetworkManager {
   if (!shared) {
@@ -21,8 +23,13 @@ export function gameSession(): NetworkManager {
     // the change straight away. `join` is the same message used at connect time
     // and the server treats it as an identity update, so no new protocol is
     // needed and a client that never changes skin behaves exactly as before.
+    // The name is announced the same way, so editing it on the start screen or
+    // later is reflected in the room without a reconnect.
+    unsubscribeName = onNameChange((name) => {
+      if (shared?.isOnline) shared.join(name, savedSkin());
+    });
     unsubscribeSkin = onSkinChange((id) => {
-      if (shared?.isOnline) shared.join(defaultPlayerName(), id);
+      if (shared?.isOnline) shared.join(playerName(), id);
     });
   }
   return shared;
@@ -39,7 +46,7 @@ export function ensureConnected(): void {
   connecting = true;
   void net
     .connect(roomSocketUrl())
-    .then(() => net.join(defaultPlayerName(), savedSkin()))
+    .then(() => net.join(playerName(), savedSkin()))
     .catch(() => {
       /* offline or unreachable — carry on single-player */
     })
@@ -52,6 +59,8 @@ export function ensureConnected(): void {
 export function disposeSession(): void {
   unsubscribeSkin?.();
   unsubscribeSkin = null;
+  unsubscribeName?.();
+  unsubscribeName = null;
   shared?.dispose();
   shared = null;
   connecting = false;
