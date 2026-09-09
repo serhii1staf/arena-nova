@@ -24,6 +24,13 @@ export interface LocomotionState {
   speed01: number;
   grounded: boolean;
   phase: number;
+  /**
+   * Signed vertical speed, m/s. Optional so a caller that has no meaningful
+   * value can leave it out; the rig then treats airborne as falling, which is
+   * the safe reading. Without it the jump clip is unreachable, because
+   * `grounded` alone cannot tell rising from falling.
+   */
+  vy?: number;
 }
 
 /**

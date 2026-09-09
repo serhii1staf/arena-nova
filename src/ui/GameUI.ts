@@ -202,13 +202,13 @@ export class GameUI {
       );
       skin.value = savedSkin();
       skin.addEventListener('change', () => {
+        // The avatar and the network session both listen for this, so the change
+        // is applied on the spot rather than waiting for the next area to load.
         saveSkin(skin.value);
-        // Rigs are built when a scene loads, so the change lands on the next
-        // one. Swapping in place would mean rebuilding the local player and
-        // re-announcing to the room mid-frame for no real gain.
         if (skinNote) {
-          skinNote.textContent = t('skin.applies');
+          skinNote.textContent = t('skin.applied');
           skinNote.classList.add('on');
+          window.setTimeout(() => skinNote.classList.remove('on'), 2200);
         }
       });
     }

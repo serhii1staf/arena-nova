@@ -27,6 +27,16 @@ export const GameConfig = {
     damping: 10,
     jumpSpeed: 6.4,
     gravity: 20,
+    /**
+     * Downhill ground-following. `groundSnapSlope` is a gradient: the body may be
+     * pulled back down by this multiple of the distance it travelled horizontally
+     * in the step, which keeps it planted on slopes up to about 58°. `groundSnapMin`
+     * is the fixed allowance that carries it down a stair tread while walking slowly.
+     */
+    groundSnapSlope: 1.6,
+    groundSnapMin: 0.25,
+    /** Grace period before the animation layer accepts that the body is airborne. */
+    coyoteTime: 0.11,
     mouseSensitivity: 0.0022,
     touchLookSensitivity: 0.005,
     /** Third-person camera: max orbit distance (0 = first person) and zoom speed. */

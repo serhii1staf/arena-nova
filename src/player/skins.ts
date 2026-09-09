@@ -56,10 +56,36 @@ export function savedSkin(): string {
   return DEFAULT_SKIN;
 }
 
+/**
+ * Listeners for a local skin change.
+ *
+ * The choice is made in the settings menu but has to be acted on by whatever
+ * scene is loaded and by the network session, neither of which the menu knows
+ * about. A change is announced here instead of the menu reaching into the scene
+ * graph, which also means the choice applies straight away rather than waiting
+ * for the next area to load.
+ */
+const listeners = new Set<(id: string) => void>();
+
+export function onSkinChange(fn: (id: string) => void): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
 export function saveSkin(id: string): void {
+  const resolved = resolveSkin(id).id;
+  const previous = savedSkin();
   try {
-    localStorage.setItem(STORAGE_KEY, resolveSkin(id).id);
+    localStorage.setItem(STORAGE_KEY, resolved);
   } catch {
     /* ignore */
+  }
+  if (resolved === previous) return;
+  for (const fn of [...listeners]) {
+    try {
+      fn(resolved);
+    } catch (err) {
+      console.warn(`[skins] listener failed: ${String((err as Error)?.message ?? err)}`);
+    }
   }
 }

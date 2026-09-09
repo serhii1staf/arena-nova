@@ -53,6 +53,10 @@ export class PlayerController {
   /** Horizontal speed normalised to sprint (0..1). */
   speed01 = 0;
   isGrounded = false;
+  /** Metres per second, signed. Lets the rig tell rising from falling. */
+  verticalSpeed = 0;
+  /** How long the body has genuinely had no ground under it. */
+  private airborneFor = 0;
   private footstepFlag = false;
   private jumpedFlag = false;
   private landedFlag = false;
@@ -158,22 +162,53 @@ export class PlayerController {
     this.world.collide(this.position);
 
     // Ground.
+    //
+    // Walking *downhill* needs a downward snap, not just the upward one. Landing
+    // resets vertical velocity to zero every step, so at the start of the next
+    // step the body can only fall gravity*dt² ≈ 5 mm while it travels up to
+    // 127 mm forward at a sprint. Any slope steeper than about 8% therefore drops
+    // away faster than the body falls: the probe reported airborne, the animation
+    // switched to the fall clip, gravity built up for a few steps, the body
+    // caught the surface and was snapped flat again — over and over, at step
+    // rate. That is the hopping, juddering descent, and it also stalled the
+    // stride phase and the footstep events, which only advance while grounded.
+    //
+    // The allowance is derived from how far the body actually moved this step
+    // rather than being a fixed number, so it scales with speed and cannot let a
+    // stationary player sink. The constant floor on top of it is what carries the
+    // player down single stair treads without leaving the ground.
     const floor = this.world.floorHeightAt(this.position.x, this.position.z);
     const wasGrounded = this.grounded;
+    const travelled = Math.hypot(this.velocity.x, this.velocity.z) * dt;
+    const snapDown = Math.max(cfg.groundSnapMin, travelled * cfg.groundSnapSlope);
     if (this.position.y <= floor) {
       if (!wasGrounded && this.velocity.y < -3) this.landedFlag = true;
+      this.position.y = floor;
+      this.velocity.y = 0;
+      this.grounded = true;
+    } else if (wasGrounded && this.velocity.y <= 0 && this.position.y - floor <= snapDown) {
+      // Still following the surface, just downhill. Stay planted.
       this.position.y = floor;
       this.velocity.y = 0;
       this.grounded = true;
     } else {
       this.grounded = false;
     }
-    this.isGrounded = this.grounded;
+
+    // Publish a slightly forgiving version of the flag to the animation layer.
+    // A genuine step off a kerb or over a bump should not flip the whole body to
+    // a falling pose for two frames; a real jump or fall still reads instantly
+    // because the hold is shorter than a blend and is skipped while rising.
+    if (this.grounded) this.airborneFor = 0;
+    else this.airborneFor += dt;
+    this.isGrounded =
+      this.grounded || (this.airborneFor < cfg.coyoteTime && this.velocity.y < cfg.jumpSpeed * 0.2);
+    this.verticalSpeed = this.velocity.y;
 
     // Locomotion state for animation + footstep events.
     const hSpeed = Math.hypot(this.velocity.x, this.velocity.z);
     this.speed01 = MathUtils.clamp(hSpeed / cfg.sprintSpeed, 0, 1);
-    if (this.grounded && hSpeed > 0.4) {
+    if (this.isGrounded && hSpeed > 0.4) {
       this.animPhase += hSpeed * dt * 1.9;
       const step = Math.floor(this.animPhase / Math.PI);
       if (step !== this.lastStepIndex) {
@@ -190,7 +225,7 @@ export class PlayerController {
     // Look.
     const look = this.input.consumeLook(this.lookScratch);
     const sens =
-      (this.input.isTouch ? cfg.touchLookSensitivity : cfg.mouseSensitivity) *
+      (this.input.lookCameFromTouch ? cfg.touchLookSensitivity : cfg.mouseSensitivity) *
       this.input.lookSensitivityScale;
     this.yaw -= look.x * sens;
     this.pitch -= look.y * sens;

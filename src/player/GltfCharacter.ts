@@ -259,11 +259,13 @@ export class GltfCharacter {
     this.object.rotation.y = yaw;
 
     let want: LocoState;
-    if (!s.grounded) want = 'fall';
+    // Rising reads as a jump, falling as a fall. Previously everything airborne
+    // played the fall clip, so the jump animation could never be seen at all.
+    if (!s.grounded) want = (s.vy ?? 0) > 1.2 ? 'jump' : 'fall';
     else if (s.speed01 > 0.58) want = 'run';
     else if (s.speed01 > 0.06) want = 'walk';
     else want = 'idle';
-    this.play(want, want === 'fall' ? 0.1 : 0.18);
+    this.play(want, want === 'idle' || want === 'walk' || want === 'run' ? 0.18 : 0.1);
 
     if (this.current) {
       if (this.currentState === 'walk' || this.currentState === 'run') {

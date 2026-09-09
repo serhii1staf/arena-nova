@@ -32,6 +32,13 @@ export class RemotePlayer {
   }
 
   push(state: TimedState): void {
+    // Seed straight from the first snapshot instead of waiting for the first
+    // interpolation pass. Snapshots arrive on the socket callback while the
+    // exposed x/y/z are only written inside the frame loop, so a player was
+    // briefly readable at the world origin — visible as a pop-in at (0, 0, 0)
+    // when someone joins, and outright wrong for a client that is connected but
+    // not yet rendering.
+    if (this.buffer.length === 0) this.apply(state);
     this.buffer.push(state);
     if (this.buffer.length > 30) this.buffer.shift();
   }

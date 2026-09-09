@@ -16,6 +16,7 @@ import { PlayerController } from '../player/PlayerController.ts';
 import { Avatar } from '../player/Avatar.ts';
 import { RemoteCrowd } from '../net/RemoteCrowd.ts';
 import { ensureConnected, gameSession } from '../net/session.ts';
+import { LocalPublisher } from '../net/publish.ts';
 import { buildCathedral, LAYOUT, type CathedralBuild } from '../world/Cathedral.ts';
 import { buildVegetation, type VegetationBuild } from '../world/Vegetation.ts';
 import { buildAtmosphere, type AtmosphereBuild } from '../world/Atmosphere.ts';
@@ -44,7 +45,7 @@ export class LobbyScene implements GameScene {
 
 
   private time = 0;
-  private netAccum = 0;
+  private readonly publisher = new LocalPublisher();
   private unsub: Array<() => void> = [];
   private ctx!: EngineContext;
   private exiting = false;
@@ -148,14 +149,7 @@ export class LobbyScene implements GameScene {
       this.ctx.requestScene('exterior');
     }
 
-    // Push local state to the server at ~20 Hz (only when online).
-    this.netAccum += dt;
-    if (this.netAccum >= 0.05) {
-      this.netAccum = 0;
-      const c = this.camera.position;
-      // Feet, not eye level: the receiving side adds its own avatar height.
-      this.net.sendInput(c.x, c.y - GameConfig.player.eyeHeight, c.z, this.camera.rotation.y);
-    }
+    this.publisher.step(this.net, this.player, dt);
     this.net.update();
   }
 
@@ -163,16 +157,22 @@ export class LobbyScene implements GameScene {
     this.time += frameDelta;
     this.player.render(alpha, frameDelta);
 
-    // Drive + show the character only in third person.
+    // Hidden in first person, but still driven: the avatar owns its animation
+    // mixer and its character-change effect, and skipping the call left both
+    // frozen — a skin change requested from a first-person view never completed
+    // and its particle cloud was never released.
     this.character.object.visible = this.player.thirdPerson;
-    if (this.player.thirdPerson) {
-      this.character.update(
-        this.player.renderPosition,
-        this.player.viewYaw,
-        { speed01: this.player.speed01, grounded: this.player.isGrounded, phase: this.player.animPhase },
-        frameDelta,
-      );
-    }
+    this.character.update(
+      this.player.renderPosition,
+      this.player.viewYaw,
+      {
+        speed01: this.player.speed01,
+        grounded: this.player.isGrounded,
+        phase: this.player.animPhase,
+        vy: this.player.verticalSpeed,
+      },
+      frameDelta,
+    );
 
     // Procedural sound effects.
     if (this.player.consumeFootstep()) this.audio.footstep(this.player.speed01);

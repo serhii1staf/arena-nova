@@ -25,9 +25,17 @@ interface Tracked {
   speed01: number;
   phase: number;
   primed: boolean;
+  /** Smoothed vertical speed, m/s, derived from the interpolated path. */
+  vy: number;
 }
 
 export class RemoteCrowd {
+  /**
+   * Vertical speed past which a remote player is treated as airborne. Well above
+   * what walking a slope produces, so ordinary terrain does not trip it.
+   */
+  private static readonly AIRBORNE_SPEED = 3.2;
+
   readonly group = new Group();
 
   private readonly tracked = new Map<string, Tracked>();
@@ -47,24 +55,11 @@ export class RemoteCrowd {
     this.unsub.push(net.onPlayerJoin((p) => this.add(p)));
     this.unsub.push(net.onPlayerLeave((p) => this.remove(p.id)));
     // A player is visible from the moment their socket is accepted, which can be a
-    // round-trip before their chosen character is known. Rebuild rather than
-    // leave them wearing the fallback for the rest of the session.
-    this.unsub.push(
-      net.onPlayerSkinChange((p) => {
-        const t = this.tracked.get(p.id);
-        if (!t) return;
-        this.remove(p.id);
-        this.add(p);
-        // Carry the motion state across so the swap does not reset their stride.
-        const next = this.tracked.get(p.id);
-        if (next) {
-          next.prev.copy(t.prev);
-          next.speed01 = t.speed01;
-          next.phase = t.phase;
-          next.primed = t.primed;
-        }
-      }),
-    );
+    // round-trip before their chosen character is known, and they can change it
+    // mid-session. Swapping in place keeps their motion state and plays the same
+    // dissolve everyone else sees, so a character change looks deliberate rather
+    // than like the player blinking out and back.
+    this.unsub.push(net.onPlayerSkinChange((p) => this.tracked.get(p.id)?.avatar.setSkin(p.skin)));
   }
 
   private add(p: RemotePlayer): void {
@@ -78,6 +73,7 @@ export class RemoteCrowd {
       speed01: 0,
       phase: 0,
       primed: false,
+      vy: 0,
     });
   }
 
@@ -110,6 +106,14 @@ export class RemoteCrowd {
       const measured = Math.min(1, moved / dt / this.sprintSpeed);
       // Eased, because interpolation makes the raw per-frame delta noisy.
       t.speed01 += (measured - t.speed01) * Math.min(1, dt * 8);
+
+      // Vertical motion, from the same interpolated path. `grounded` used to be
+      // hard-coded true here, so remote players never jumped or fell — they slid
+      // up and down slopes and through the air in a walk cycle. Heavily smoothed,
+      // because interpolation between 20 Hz snapshots makes the raw frame-to-frame
+      // delta far too noisy to threshold directly.
+      const rise = (this.scratch.y - t.prev.y) / dt;
+      t.vy += (rise - t.vy) * Math.min(1, dt * 6);
       t.prev.copy(this.scratch);
 
       if (t.speed01 > 0.02) t.phase += t.speed01 * this.sprintSpeed * dt * 1.9;
@@ -117,7 +121,12 @@ export class RemoteCrowd {
       t.avatar.update(
         this.scratch,
         rp.yaw,
-        { speed01: t.speed01, grounded: true, phase: t.phase },
+        {
+          speed01: t.speed01,
+          grounded: Math.abs(t.vy) < RemoteCrowd.AIRBORNE_SPEED,
+          phase: t.phase,
+          vy: t.vy,
+        },
         frameDelta,
       );
     }

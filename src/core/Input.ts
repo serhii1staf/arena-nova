@@ -48,6 +48,16 @@ export class Input {
   // Mouse-wheel zoom (first ↔ third person).
   private wheelDelta = 0;
 
+  /** How close to the middle a move must land to be read as our own warp. */
+  private static readonly WARP_LANDING_TOLERANCE = 64;
+  /** Last cursor position, for measuring native-capture deltas ourselves. */
+  private readonly lastPointer = new Vector2();
+  private haveLastPointer = false;
+  /** A warp has been asked for; the next move is its landing, not the player's. */
+  private awaitingWarpLanding = false;
+  /** True while the accumulated look delta came from a touch drag. */
+  private lookFromTouch = false;
+
   private readonly bound: {
     keydown: (e: KeyboardEvent) => void;
     keyup: (e: KeyboardEvent) => void;
@@ -89,17 +99,34 @@ export class Input {
   }
 
   /**
+   * True only for devices with *no* precise pointer at all.
+   *
+   * `isTouch` is not a usable test for "should we capture the mouse": a laptop
+   * with a touchscreen, or a Windows precision touchpad, reports touch points
+   * while still being driven by a pointer. Gating capture on `isTouch` meant
+   * mouse capture was never started on those machines, so every mouse move was
+   * dropped by `onMouseMove` and looking around fell back to whatever the touch
+   * handlers picked up — which is why turning behaved so strangely on the laptop.
+   */
+  private get pointerIsCoarseOnly(): boolean {
+    if (!this.isTouch) return false;
+    return typeof matchMedia === 'function' ? !matchMedia('(any-pointer: fine)').matches : true;
+  }
+
+  /**
    * Begins mouse capture. On desktop the OS cursor is hidden and confined by the
    * native shell (no Pointer Lock, so Chromium never shows its "press Esc"
    * banner); in a browser we fall back to the Pointer Lock API.
    */
   requestPointerLock(): void {
-    if (this.isTouch) return;
+    if (this.pointerIsCoarseOnly) return;
     this.captureWanted = true;
     if (this.peeking) return; // Tab is held — stay released until it comes up
     if (isNative()) {
       this.nativeCapture = true;
       this.locked = true;
+      this.haveLastPointer = false;
+      this.awaitingWarpLanding = false;
       document.documentElement.classList.add('mouse-captured');
       void beginNativeMouseCapture();
       return;
@@ -116,6 +143,8 @@ export class Input {
   /** Drops capture without forgetting that the game wants it back. */
   private stopCapture(): void {
     document.documentElement.classList.remove('mouse-captured');
+    this.haveLastPointer = false;
+    this.awaitingWarpLanding = false;
     if (isNative()) {
       this.nativeCapture = false;
       this.locked = false;
@@ -169,47 +198,75 @@ export class Input {
   private onMouseMove(e: MouseEvent): void {
     if (!this.locked) return;
 
-    // Discard the move caused by our own cursor warp.
+    if (!this.nativeCapture) {
+      // Pointer Lock: the cursor does not move, and `movementX/Y` is the raw
+      // device delta. Nothing to correct.
+      this.lookFromTouch = false;
+      this.lookDelta.x += e.movementX;
+      this.lookDelta.y += e.movementY;
+      return;
+    }
+
+    // Native capture has no Pointer Lock, so the cursor really travels across the
+    // window and has to be warped back before it reaches an edge and stops
+    // producing movement at all.
     //
-    // Native capture recentres the OS cursor, and that generates a genuine
-    // WM_MOUSEMOVE carrying a large delta back toward the middle. Accumulating it
-    // made the yaw a function of where the cursor sat in the window rather than of
-    // how far the mouse had travelled, so turning simply could not accumulate —
-    // push right, hit the margin, get snapped back left.
-    //
-    // The event is identified by both facts being true: a warp is outstanding, and
-    // this event lands on the centre. Checking only the flag would sometimes eat a
-    // real move that arrived first.
-    if (this.nativeCapture && hasPendingCursorWarp()) {
-      const cx = window.innerWidth * 0.5;
-      const cy = window.innerHeight * 0.5;
-      const tolerance = 48;
-      if (Math.abs(e.clientX - cx) < tolerance && Math.abs(e.clientY - cy) < tolerance) {
+    // The delta is measured from the previous event position rather than taken
+    // from `movementX/Y`. Those are computed against the browser's own record of
+    // where the cursor was, which a warp invalidates in a way we cannot observe:
+    // the correction leaked into the accumulated look and pulled the view back
+    // the way it came. It shows up worst with a touchpad, where movement arrives
+    // as a long stream of small deltas and so crosses the warp margin over and
+    // over — pushing right, the view crawled left.
+    const px = e.clientX;
+    const py = e.clientY;
+    const hadPrevious = this.haveLastPointer;
+    const dx = px - this.lastPointer.x;
+    const dy = py - this.lastPointer.y;
+    this.lastPointer.set(px, py);
+    this.haveLastPointer = true;
+
+    // Swallow the event the warp itself produced: resync the reference position
+    // and emit nothing. Identified either by being the first event after a warp
+    // was requested, or by landing near the centre while one is still in flight —
+    // the first alone is not enough, because a real move can arrive while the warp
+    // is still on its way, and the second alone misses a warp that happens to land
+    // where a real movement would have.
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    if (this.awaitingWarpLanding || hasPendingCursorWarp()) {
+      const nearCentre =
+        Math.abs(px - w * 0.5) < Input.WARP_LANDING_TOLERANCE &&
+        Math.abs(py - h * 0.5) < Input.WARP_LANDING_TOLERANCE;
+      if (this.awaitingWarpLanding || nearCentre) {
+        this.awaitingWarpLanding = false;
         claimCursorWarp();
         return;
       }
     }
 
-    this.lookDelta.x += e.movementX;
-    this.lookDelta.y += e.movementY;
+    if (hadPrevious) {
+      this.lookFromTouch = false;
+      this.lookDelta.x += dx;
+      this.lookDelta.y += dy;
+    }
 
-    // Native capture has no pointer lock, so the cursor really travels across the
-    // window; warp it back before it reaches an edge and stops producing deltas.
-    //
     // Two margins, because the warp is an async round-trip while mouse input is
     // not. The outer one is a hard stop: the cursor is confined to the window, so
-    // once it is pressed against the frame the OS reports no more movement and
-    // the view simply stops turning. Moving fast could cross a single small
-    // margin and hit the wall before the warp landed — so past the outer margin
-    // the throttle is bypassed and a warp is forced.
-    if (this.nativeCapture) {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      const dx = Math.abs(e.clientX - w * 0.5) / (w * 0.5);
-      const dy = Math.abs(e.clientY - h * 0.5) / (h * 0.5);
-      const offCentre = Math.max(dx, dy);
-      if (offCentre > 0.72) void recentreNativeCursor(true);
-      else if (offCentre > 0.5) void recentreNativeCursor();
+    // once it is pressed against the frame the OS reports no more movement and the
+    // view simply stops turning. Moving fast could cross a single small margin and
+    // hit the wall before the warp landed — so past the outer margin the throttle
+    // is bypassed and a warp is forced.
+    const offCentre = Math.max(
+      Math.abs(px - w * 0.5) / (w * 0.5),
+      Math.abs(py - h * 0.5) / (h * 0.5),
+    );
+    if (offCentre > 0.72) {
+      this.awaitingWarpLanding = true;
+      void recentreNativeCursor(true);
+    } else if (offCentre > 0.5) {
+      this.awaitingWarpLanding = true;
+      void recentreNativeCursor();
     }
   }
 
@@ -247,6 +304,7 @@ export class Input {
         this.move.set(nx, -ny); // screen-down is backward
         this.sprint = this.move.length() > 0.85;
       } else if (t.identifier === this.lookTouchId) {
+        this.lookFromTouch = true;
         this.lookDelta.x += t.clientX - this.lookLast.x;
         this.lookDelta.y += t.clientY - this.lookLast.y;
         this.lookTouchMoved += Math.abs(t.clientX - this.lookLast.x) + Math.abs(t.clientY - this.lookLast.y);
@@ -296,6 +354,18 @@ export class Input {
     out.copy(this.lookDelta);
     this.lookDelta.set(0, 0);
     return out;
+  }
+
+  /**
+   * Whether the pending look delta came from a finger rather than a pointer.
+   *
+   * Sensitivity has to follow the input that produced the delta, not the device
+   * it might have come from. Touch sensitivity is more than twice the mouse
+   * figure, and picking it from `isTouch` meant a laptop with a touchscreen
+   * applied it to mouse movement too, making the view whip around.
+   */
+  get lookCameFromTouch(): boolean {
+    return this.lookFromTouch;
   }
 
   /** Returns true once per queued jump. */

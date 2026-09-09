@@ -1,6 +1,6 @@
 import { NetworkManager } from './NetworkManager.ts';
 import { defaultPlayerName, roomSocketUrl } from './endpoint.ts';
-import { savedSkin } from '../player/skins.ts';
+import { onSkinChange, savedSkin } from '../player/skins.ts';
 
 /**
  * The one network session for the whole game.
@@ -12,9 +12,19 @@ import { savedSkin } from '../player/skins.ts';
  */
 let shared: NetworkManager | null = null;
 let connecting = false;
+let unsubscribeSkin: (() => void) | null = null;
 
 export function gameSession(): NetworkManager {
-  shared ??= new NetworkManager();
+  if (!shared) {
+    shared = new NetworkManager();
+    // Re-announce when the player picks a different character, so the room sees
+    // the change straight away. `join` is the same message used at connect time
+    // and the server treats it as an identity update, so no new protocol is
+    // needed and a client that never changes skin behaves exactly as before.
+    unsubscribeSkin = onSkinChange((id) => {
+      if (shared?.isOnline) shared.join(defaultPlayerName(), id);
+    });
+  }
   return shared;
 }
 
@@ -40,6 +50,8 @@ export function ensureConnected(): void {
 
 /** Only for teardown of the whole game, not for scene switches. */
 export function disposeSession(): void {
+  unsubscribeSkin?.();
+  unsubscribeSkin = null;
   shared?.dispose();
   shared = null;
   connecting = false;
