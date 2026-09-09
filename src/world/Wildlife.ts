@@ -42,7 +42,7 @@ import {
  * multiplayer, positions will come from the server anyway.
  */
 
-export type SpeciesId = 'deer' | 'boar' | 'rabbit';
+export type SpeciesId = 'moose' | 'boar' | 'rabbit' | 'fox';
 
 /** Limb ids baked per vertex; the shader keys its articulation off these. */
 const LIMB_BODY = 0;
@@ -158,54 +158,132 @@ function legs(
   }
 }
 
-/** Slender, long-legged browser. Faces −Z, like the player character. */
-function buildDeer(): BufferGeometry {
+/**
+ * Moose. The silhouette is what makes it readable at distance, so the three
+ * things that say "moose" rather than "deer" are all exaggerated: a high
+ * shoulder hump, a long drooping muzzle, and broad palmate antlers.
+ * Faces −Z, like the player character.
+ */
+function buildMoose(): BufferGeometry {
   const parts: Part[] = [];
-  const coat = new Color(0.46, 0.3, 0.18);
-  const belly = new Color(0.62, 0.47, 0.33);
-  const dark = new Color(0.2, 0.14, 0.1);
+  const coat = new Color(0.2, 0.14, 0.1);
+  const flank = new Color(0.27, 0.19, 0.13);
+  const legPale = new Color(0.42, 0.34, 0.26);
+  const bone = new Color(0.58, 0.52, 0.4);
+  const origin = new Vector3();
 
-  const hipY = 0.92;
-  parts.push({ geo: box(0.46, 0.5, 1.15, 0, hipY + 0.12, 0), colour: coat, limb: LIMB_BODY, hip: new Vector3() });
-  parts.push({ geo: box(0.4, 0.22, 0.9, 0, hipY - 0.06, 0.02), colour: belly, limb: LIMB_BODY, hip: new Vector3() });
+  const hipY = 1.25;
+  // Barrel body, deepest at the chest.
+  parts.push({ geo: box(0.62, 0.68, 1.5, 0, hipY + 0.16, 0), colour: coat, limb: LIMB_BODY, hip: origin });
+  parts.push({ geo: box(0.56, 0.3, 1.1, 0, hipY - 0.1, 0.05), colour: flank, limb: LIMB_BODY, hip: origin });
+  // Shoulder hump — the signature line.
+  parts.push({ geo: box(0.5, 0.3, 0.62, 0, hipY + 0.54, -0.34), colour: coat, limb: LIMB_BODY, hip: origin });
 
-  // Neck and head pivot at the shoulder, so grazing dips the whole neck.
-  const neckHip = new Vector3(0, hipY + 0.3, -0.5);
-  const neck = new BoxGeometry(0.2, 0.55, 0.22);
-  neck.translate(0, 0.24, -0.1);
-  neck.rotateX(-0.35);
+  // Neck and head pivot at the shoulder, so grazing swings the whole neck down.
+  const neckHip = new Vector3(0, hipY + 0.5, -0.66);
+  const neck = new BoxGeometry(0.32, 0.62, 0.34);
+  neck.translate(0, 0.26, -0.08);
+  neck.rotateX(-0.22);
   neck.translate(neckHip.x, neckHip.y, neckHip.z);
   parts.push({ geo: neck, colour: coat, limb: LIMB_HEAD, hip: neckHip });
-  const head = new BoxGeometry(0.22, 0.22, 0.42);
-  head.translate(0, 0.52, -0.34);
-  head.translate(neckHip.x, neckHip.y, neckHip.z);
-  parts.push({ geo: head, colour: coat, limb: LIMB_HEAD, hip: neckHip });
+  // Long muzzle, angled down — a moose carries its nose low.
+  const skull = new BoxGeometry(0.26, 0.26, 0.36);
+  skull.translate(0, 0.56, -0.24);
+  skull.translate(neckHip.x, neckHip.y, neckHip.z);
+  parts.push({ geo: skull, colour: coat, limb: LIMB_HEAD, hip: neckHip });
+  const muzzle = new BoxGeometry(0.2, 0.24, 0.34);
+  muzzle.rotateX(0.3);
+  muzzle.translate(0, 0.42, -0.52);
+  muzzle.translate(neckHip.x, neckHip.y, neckHip.z);
+  parts.push({ geo: muzzle, colour: flank, limb: LIMB_HEAD, hip: neckHip });
+  // Dewlap under the throat.
+  const bell = new BoxGeometry(0.14, 0.26, 0.12);
+  bell.translate(0, 0.24, -0.34);
+  bell.translate(neckHip.x, neckHip.y, neckHip.z);
+  parts.push({ geo: bell, colour: coat, limb: LIMB_HEAD, hip: neckHip });
+
   for (const side of [-1, 1]) {
-    const ear = new ConeGeometry(0.07, 0.2, 5);
-    ear.rotateX(-0.3);
-    ear.translate(side * 0.11, 0.68, -0.2);
+    const ear = new ConeGeometry(0.07, 0.22, 5);
+    ear.rotateZ(side * 0.9);
+    ear.translate(side * 0.2, 0.66, -0.16);
     ear.translate(neckHip.x, neckHip.y, neckHip.z);
-    parts.push({ geo: ear, colour: dark, limb: LIMB_HEAD, hip: neckHip });
-    // Antlers: two forked prongs, enough to read as a stag in silhouette.
-    const antler = new BoxGeometry(0.04, 0.34, 0.04);
-    antler.rotateZ(side * 0.35);
-    antler.rotateX(-0.2);
-    antler.translate(side * 0.09, 0.86, -0.24);
-    antler.translate(neckHip.x, neckHip.y, neckHip.z);
-    parts.push({ geo: antler, colour: dark, limb: LIMB_HEAD, hip: neckHip });
+    parts.push({ geo: ear, colour: coat, limb: LIMB_HEAD, hip: neckHip });
+
+    // Palmate antler: a flat blade with prongs along its outer edge.
+    const palm = new BoxGeometry(0.42, 0.08, 0.34);
+    palm.rotateZ(side * 0.3);
+    palm.translate(side * 0.34, 0.82, -0.14);
+    palm.translate(neckHip.x, neckHip.y, neckHip.z);
+    parts.push({ geo: palm, colour: bone, limb: LIMB_HEAD, hip: neckHip });
+    for (let i = 0; i < 3; i++) {
+      const prong = new BoxGeometry(0.05, 0.16, 0.05);
+      prong.translate(side * (0.42 + i * 0.05), 0.94, -0.26 + i * 0.16);
+      prong.translate(neckHip.x, neckHip.y, neckHip.z);
+      parts.push({ geo: prong, colour: bone, limb: LIMB_HEAD, hip: neckHip });
+    }
   }
 
-  const tailHip = new Vector3(0, hipY + 0.28, 0.58);
-  const tail = new BoxGeometry(0.1, 0.22, 0.08);
-  tail.translate(0, -0.1, 0.03);
-  parts.push({
-    geo: (tail.translate(tailHip.x, tailHip.y, tailHip.z), tail),
-    colour: belly,
-    limb: LIMB_TAIL,
-    hip: tailHip,
-  });
+  const tailHip = new Vector3(0, hipY + 0.34, 0.76);
+  const tail = new BoxGeometry(0.1, 0.18, 0.08);
+  tail.translate(0, -0.08, 0.03);
+  tail.translate(tailHip.x, tailHip.y, tailHip.z);
+  parts.push({ geo: tail, colour: flank, limb: LIMB_TAIL, hip: tailHip });
 
-  legs(parts, coat, hipY, 0.88, 0.11, 0.17, -0.42, 0.44);
+  legs(parts, legPale, hipY, 1.2, 0.13, 0.22, -0.56, 0.58);
+  return assemble(parts);
+}
+
+/** Fox: small, low, bright orange, with a tail nearly as long as its body. */
+function buildFox(): BufferGeometry {
+  const parts: Part[] = [];
+  const fur = new Color(0.72, 0.31, 0.08);
+  const pale = new Color(0.9, 0.86, 0.8);
+  const dark = new Color(0.12, 0.09, 0.08);
+  const origin = new Vector3();
+
+  const hipY = 0.4;
+  parts.push({ geo: box(0.26, 0.26, 0.66, 0, hipY + 0.04, 0), colour: fur, limb: LIMB_BODY, hip: origin });
+  parts.push({ geo: box(0.22, 0.12, 0.5, 0, hipY - 0.08, 0.02), colour: pale, limb: LIMB_BODY, hip: origin });
+
+  const headHip = new Vector3(0, hipY + 0.14, -0.3);
+  const head = new BoxGeometry(0.22, 0.2, 0.24);
+  head.translate(0, 0.06, -0.06);
+  head.translate(headHip.x, headHip.y, headHip.z);
+  parts.push({ geo: head, colour: fur, limb: LIMB_HEAD, hip: headHip });
+  const snout = new BoxGeometry(0.11, 0.1, 0.18);
+  snout.translate(0, 0.02, -0.24);
+  snout.translate(headHip.x, headHip.y, headHip.z);
+  parts.push({ geo: snout, colour: pale, limb: LIMB_HEAD, hip: headHip });
+  // Nose tip, and the eyes he asked about.
+  const nose = new BoxGeometry(0.06, 0.05, 0.05);
+  nose.translate(0, 0.02, -0.34);
+  nose.translate(headHip.x, headHip.y, headHip.z);
+  parts.push({ geo: nose, colour: dark, limb: LIMB_HEAD, hip: headHip });
+  for (const side of [-1, 1]) {
+    const eye = new BoxGeometry(0.035, 0.035, 0.025);
+    eye.translate(side * 0.075, 0.1, -0.16);
+    eye.translate(headHip.x, headHip.y, headHip.z);
+    parts.push({ geo: eye, colour: dark, limb: LIMB_HEAD, hip: headHip });
+
+    const ear = new ConeGeometry(0.055, 0.16, 4);
+    ear.translate(side * 0.08, 0.22, -0.02);
+    ear.translate(headHip.x, headHip.y, headHip.z);
+    parts.push({ geo: ear, colour: fur, limb: LIMB_HEAD, hip: headHip });
+  }
+
+  // Big bushy tail with a white tip, angled up and back.
+  const tailHip = new Vector3(0, hipY + 0.08, 0.32);
+  const brush = new BoxGeometry(0.16, 0.16, 0.44);
+  brush.rotateX(-0.35);
+  brush.translate(0, 0.06, 0.22);
+  brush.translate(tailHip.x, tailHip.y, tailHip.z);
+  parts.push({ geo: brush, colour: fur, limb: LIMB_TAIL, hip: tailHip });
+  const tip = new BoxGeometry(0.13, 0.13, 0.14);
+  tip.translate(0, 0.19, 0.45);
+  tip.translate(tailHip.x, tailHip.y, tailHip.z);
+  parts.push({ geo: tip, colour: pale, limb: LIMB_TAIL, hip: tailHip });
+
+  legs(parts, dark, hipY, 0.36, 0.07, 0.11, -0.2, 0.22);
   return assemble(parts);
 }
 
@@ -280,14 +358,15 @@ function buildRabbit(): BufferGeometry {
 
 const SPECIES: Species[] = [
   {
-    id: 'deer',
+    id: 'moose',
     biomes: ['meadow', 'sakura', 'pine', 'jungle'],
-    walkSpeed: 1.5,
-    runSpeed: 9.5,
-    alertRadius: 22,
-    gaitRate: 1.9,
-    weight: 0.42,
-    build: buildDeer,
+    walkSpeed: 1.3,
+    runSpeed: 8.5,
+    // Big and confident: it lets you get closer than the smaller animals do.
+    alertRadius: 18,
+    gaitRate: 1.6,
+    weight: 0.3,
+    build: buildMoose,
   },
   {
     id: 'boar',
@@ -296,7 +375,7 @@ const SPECIES: Species[] = [
     runSpeed: 7,
     alertRadius: 15,
     gaitRate: 2.4,
-    weight: 0.26,
+    weight: 0.2,
     build: buildBoar,
   },
   {
@@ -306,8 +385,18 @@ const SPECIES: Species[] = [
     runSpeed: 6.5,
     alertRadius: 12,
     gaitRate: 4.2,
-    weight: 0.32,
+    weight: 0.26,
     build: buildRabbit,
+  },
+  {
+    id: 'fox',
+    biomes: ['meadow', 'sakura', 'pine', 'savanna'],
+    walkSpeed: 1.6,
+    runSpeed: 8,
+    alertRadius: 14,
+    gaitRate: 3.4,
+    weight: 0.24,
+    build: buildFox,
   },
 ];
 
@@ -345,21 +434,34 @@ function injectLimbAnimation(material: MeshStandardMaterial): void {
              // Diagonal pairs move together, which is what a real four-legged
              // gait looks like: front-left with back-right, and vice versa.
              float pairOffset = (aLimb == 1.0 || aLimb == 4.0) ? 0.0 : 3.14159;
-             float swingAmt = 0.22 + aGait * 0.55;
+             // Scaled entirely by gait: a standing animal must have still legs.
+             // A constant base term made every idle animal look like it was
+             // walking on the spot.
+             float swingAmt = aGait * 0.62;
              float angle = sin(aPhase + pairOffset) * swingAmt;
+             // A trace of weight-shifting while standing, an order of magnitude
+             // smaller than a stride.
+             angle += sin(aPhase * 0.35 + pairOffset) * 0.022 * (1.0 - aGait);
              transformed = swing(transformed, aHip, angle);
            } else if (aLimb > 4.5 && aLimb < 5.5) {
-             // Head: lowers to the ground while grazing, lifts and steadies at
-             // speed so a running animal looks like it is looking where it goes.
-             float dip = aGraze * 0.85 - aGait * 0.12;
-             float bob = sin(aPhase * 0.5) * 0.05 * (1.0 - aGraze);
-             transformed = swing(transformed, aHip, dip + bob);
+             // Head. The swing helper rotates about +X, which lifts a point that
+             // sits forward of the pivot — so grazing needs a NEGATIVE angle to
+             // put the muzzle on the ground. Getting this sign wrong had the
+             // animals staring at the sky while supposedly eating.
+             float dip = -aGraze * 0.95 + aGait * 0.12;
+             // Cropping at the grass while grazing, a slow scan while alert.
+             float chew = sin(aPhase * 2.6) * 0.06 * aGraze;
+             float scan = sin(aPhase * 0.4) * 0.05 * (1.0 - aGraze) * (1.0 - aGait);
+             transformed = swing(transformed, aHip, dip + chew + scan);
            } else if (aLimb > 5.5) {
-             float flick = sin(aPhase * 2.0) * (0.12 + aGait * 0.3);
+             // Tail flicks, and keeps flicking while standing — it is the main
+             // sign of life on an animal that is otherwise still.
+             float flick = sin(aPhase * 2.0) * (0.14 + aGait * 0.3);
              transformed = swing(transformed, aHip, flick);
            } else {
-             // Body rises and falls with the stride.
+             // Body rises and falls with the stride, plus a faint breath at rest.
              transformed.y += abs(sin(aPhase)) * 0.045 * aGait;
+             transformed.y += sin(aPhase * 0.3) * 0.012 * (1.0 - aGait);
            }
          }`,
       );

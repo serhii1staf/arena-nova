@@ -526,17 +526,23 @@ export function buildLog(seed: number): BufferGeometry {
 
 /** Irregular boulder. */
 export function buildRock(seed: number, detail = 1): BufferGeometry {
-  const rng = makeRng(seed);
   const geo = new IcosahedronGeometry(1, detail);
   const p = geo.attributes.position;
   const v = new Vector3();
   for (let i = 0; i < p.count; i++) {
     v.set(p.getX(i), p.getY(i), p.getZ(i)).normalize();
+    // Displacement MUST be a pure function of the direction, nothing else.
+    //
+    // An icosahedron is non-indexed, so every corner exists once per adjoining
+    // face — five or six copies of the same point. A per-vertex random term
+    // therefore pushed each copy a different way and tore the mesh open along
+    // every edge. The cracks were invisible while boulders were pale blobs, but
+    // as soon as they were dark you could see the grass through them.
     const n =
       0.26 * Math.sin(v.x * 3.1 + seed) +
       0.2 * Math.cos(v.y * 4.7 + seed * 1.7) +
       0.16 * Math.sin(v.z * 5.9 + seed * 2.3) +
-      0.12 * (rng() - 0.5);
+      0.11 * Math.sin(v.x * 8.3 - v.z * 7.1 + seed * 3.7) * Math.cos(v.y * 6.7 + seed);
     v.multiplyScalar(1 + n * 0.45);
     if (v.y < -0.3) v.y *= 0.7; // flatten the base so it sits on the ground
     p.setXYZ(i, v.x, v.y, v.z);

@@ -220,12 +220,18 @@
         cursor: none !important;
       }
 
-      /* Invisible strip along the top used to drag the frameless window. */
+      /* Invisible strip along the top used to drag the frameless window.
+         It deliberately stops short of the right-hand corner: the window buttons
+         live there, and a drag region swallows mousedown before it can become a
+         click. That is why those buttons only responded near their outer edge —
+         the strip covered the top 26px of each 30px button. z-index alone would
+         not have fixed it, because app-region is hit-tested by the compositor
+         rather than by CSS stacking. */
       .dragStrip {
         position: absolute;
         top: 0;
         left: 0;
-        right: 0;
+        right: 170px;
         height: 40px;
         z-index: 2;
         -webkit-app-region: drag;
@@ -395,6 +401,8 @@
         right: 16px;
         display: none;
         gap: 8px;
+        /* Above the drag strip, so nothing can paint over the buttons. */
+        z-index: 3;
       }
       #winControls.on {
         display: flex;

@@ -2,6 +2,8 @@ import { Vector2 } from 'three';
 import {
   beginNativeMouseCapture,
   endNativeMouseCapture,
+  claimCursorWarp,
+  hasPendingCursorWarp,
   isNative,
   recentreNativeCursor,
 } from '../ui/native.ts';
@@ -166,15 +168,38 @@ export class Input {
 
   private onMouseMove(e: MouseEvent): void {
     if (!this.locked) return;
+
+    // Discard the move caused by our own cursor warp.
+    //
+    // Native capture recentres the OS cursor, and that generates a genuine
+    // WM_MOUSEMOVE carrying a large delta back toward the middle. Accumulating it
+    // made the yaw a function of where the cursor sat in the window rather than of
+    // how far the mouse had travelled, so turning simply could not accumulate —
+    // push right, hit the margin, get snapped back left.
+    //
+    // The event is identified by both facts being true: a warp is outstanding, and
+    // this event lands on the centre. Checking only the flag would sometimes eat a
+    // real move that arrived first.
+    if (this.nativeCapture && hasPendingCursorWarp()) {
+      const cx = window.innerWidth * 0.5;
+      const cy = window.innerHeight * 0.5;
+      const tolerance = 48;
+      if (Math.abs(e.clientX - cx) < tolerance && Math.abs(e.clientY - cy) < tolerance) {
+        claimCursorWarp();
+        return;
+      }
+    }
+
     this.lookDelta.x += e.movementX;
     this.lookDelta.y += e.movementY;
 
-    // Native capture has no pointer lock, so the cursor really travels across
-    // the window. Warp it back to the middle before it reaches an edge and stops
-    // producing movement deltas.
+    // Native capture has no pointer lock, so the cursor really travels across the
+    // window. Warp it back before it reaches an edge and stops producing deltas.
+    // The margin is deliberately small: every warp costs one discarded event, so
+    // the aim is to leave as much free travel as possible.
     if (this.nativeCapture) {
-      const marginX = window.innerWidth * 0.28;
-      const marginY = window.innerHeight * 0.28;
+      const marginX = window.innerWidth * 0.1;
+      const marginY = window.innerHeight * 0.1;
       if (
         e.clientX < marginX ||
         e.clientX > window.innerWidth - marginX ||

@@ -22,6 +22,8 @@ interface NativeWindowLike {
   setCursorVisible(visible: boolean): Promise<void>;
   setCursorPosition(position: PhysicalPoint): Promise<void>;
   outerPosition(): Promise<PhysicalPoint>;
+  /** Origin of the client area, which is what the cursor centre must be based on. */
+  innerPosition(): Promise<PhysicalPoint>;
   innerSize(): Promise<{ width: number; height: number }>;
 }
 
@@ -87,6 +89,8 @@ let captureActive = false;
 let warpPending = false;
 let windowCentre: PhysicalPoint | null = null;
 let centreValidUntil = 0;
+/** Warps issued whose synthetic mouse event has not been discarded yet. */
+let pendingWarps = 0;
 
 /** Hides and confines the OS cursor. Safe to call repeatedly. */
 export async function beginNativeMouseCapture(): Promise<void> {
@@ -132,19 +136,48 @@ export async function recentreNativeCursor(force = false): Promise<void> {
   try {
     const now = performance.now();
     if (!windowCentre || now > centreValidUntil) {
-      const [pos, size] = await Promise.all([win.outerPosition(), win.innerSize()]);
+      // `innerPosition` is the client area's origin. Mixing `outerPosition` with
+      // `innerSize` put the target a few pixels off the real centre, which biased
+      // where the cursor landed after every warp.
+      const [pos, size] = await Promise.all([win.innerPosition(), win.innerSize()]);
       windowCentre = {
         x: Math.round(pos.x + size.width / 2),
         y: Math.round(pos.y + size.height / 2),
       };
       centreValidUntil = now + 1000; // re-measure at most once a second
     }
+    // Announce the warp *before* it happens. Moving the OS cursor generates a
+    // real WM_MOUSEMOVE, and because this path deliberately avoids Pointer Lock
+    // there is nothing to distinguish it from the player's own movement — so the
+    // input layer has to be told to expect it and throw it away.
+    pendingWarps++;
     await win.setCursorPosition(new PhysicalPositionCtor(windowCentre.x, windowCentre.y));
   } catch {
+    pendingWarps = Math.max(0, pendingWarps - 1);
     /* window moved or permission missing — ignore */
   } finally {
     warpPending = false;
   }
+}
+
+/**
+ * Claims one expected warp-induced mouse move.
+ *
+ * Without this the camera could not turn at all in the native build: every warp
+ * fed a large delta pointing back to the centre, so the accumulated yaw was
+ * pinned to wherever the cursor happened to sit inside the window. Pushing right
+ * hit the margin and got snapped back — which is why it read as "the camera keeps
+ * twisting to the left".
+ */
+export function claimCursorWarp(): boolean {
+  if (pendingWarps <= 0) return false;
+  pendingWarps--;
+  return true;
+}
+
+/** True when a warp has been issued and its mouse event has not arrived yet. */
+export function hasPendingCursorWarp(): boolean {
+  return pendingWarps > 0;
 }
 
 /** Invalidate the cached window centre (call when the window moves/resizes). */
