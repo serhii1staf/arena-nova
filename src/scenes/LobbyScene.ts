@@ -18,6 +18,7 @@ import type { AudioManager } from '../core/AudioManager.ts';
 import { PlayerController } from '../player/PlayerController.ts';
 import { Avatar } from '../player/Avatar.ts';
 import { NetworkManager, type RemotePlayer } from '../net/NetworkManager.ts';
+import { defaultPlayerName, roomSocketUrl } from '../net/endpoint.ts';
 import { buildCathedral, LAYOUT, type CathedralBuild } from '../world/Cathedral.ts';
 import { buildVegetation, type VegetationBuild } from '../world/Vegetation.ts';
 import { buildAtmosphere, type AtmosphereBuild } from '../world/Atmosphere.ts';
@@ -146,6 +147,16 @@ export class LobbyScene implements GameScene {
     });
     this.unsub.push(this.net.onPlayerJoin((p) => this.spawnAvatar(p)));
     this.unsub.push(this.net.onPlayerLeave((p) => this.removeAvatar(p.id)));
+
+    // Go online. Deliberately not awaited: the game must be fully playable the
+    // instant the scene is ready, whether or not the server can be reached.
+    // A failure here leaves the NullTransport in place and nothing else notices.
+    void this.net
+      .connect(roomSocketUrl())
+      .then(() => this.net.join(defaultPlayerName()))
+      .catch(() => {
+        /* offline or server unreachable — carry on single-player */
+      });
   }
 
   private spawnAvatar(p: RemotePlayer): void {
@@ -179,7 +190,8 @@ export class LobbyScene implements GameScene {
     if (this.netAccum >= 0.05) {
       this.netAccum = 0;
       const c = this.camera.position;
-      this.net.sendInput(c.x, c.z, this.camera.rotation.y);
+      // Feet, not eye level: the receiving side adds its own avatar height.
+      this.net.sendInput(c.x, c.y - GameConfig.player.eyeHeight, c.z, this.camera.rotation.y);
     }
     this.net.update();
   }

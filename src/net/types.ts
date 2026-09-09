@@ -24,6 +24,8 @@ export interface WorldSnapshot {
 export interface InputCommand {
   seq: number;
   x: number;
+  /** Height matters as soon as the world has hills — the lobby floor is flat. */
+  y: number;
   z: number;
   yaw: number;
   t: number;

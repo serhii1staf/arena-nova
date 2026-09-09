@@ -158,11 +158,12 @@ export class NetworkManager {
     this.transport.send({ type: 'join', name });
   }
 
-  sendInput(x: number, z: number, yaw: number): void {
+  sendInput(x: number, y: number, z: number, yaw: number): void {
     if (!this.isOnline) return;
     const cmd: InputCommand = {
       seq: this.inputSeq++,
       x,
+      y,
       z,
       yaw,
       t: performance.now() + this.timeOffset,

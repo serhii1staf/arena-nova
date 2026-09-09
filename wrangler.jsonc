@@ -1,0 +1,36 @@
+{
+  // Cloudflare Worker that serves the built game and hosts the multiplayer
+  // rooms. One deploy publishes both: `npm run deploy`.
+  "name": "arena-nova",
+  "main": "server/worker.ts",
+  "compatibility_date": "2026-09-01",
+
+  // Serves everything in dist/. `single-page-application` makes a stray URL land
+  // on the game rather than on a 404; the game is one page already.
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "GAME_ROOM",
+        "class_name": "GameRoom"
+      }
+    ]
+  },
+
+  // `new_sqlite_classes` is what the free plan requires for Durable Objects.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["GameRoom"]
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  }
+}
