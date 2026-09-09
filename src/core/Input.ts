@@ -27,6 +27,10 @@ export class Input {
   lookSensitivityScale = 1;
   /** True when the native shell (not the browser) owns the cursor. */
   private nativeCapture = false;
+  /** The game wants the mouse captured (i.e. playing, menu closed). */
+  private captureWanted = false;
+  /** Tab is held down, so the cursor is temporarily handed back. */
+  private peeking = false;
 
   private readonly keys = new Set<string>();
   private readonly el: HTMLElement;
@@ -89,9 +93,12 @@ export class Input {
    */
   requestPointerLock(): void {
     if (this.isTouch) return;
+    this.captureWanted = true;
+    if (this.peeking) return; // Tab is held — stay released until it comes up
     if (isNative()) {
       this.nativeCapture = true;
       this.locked = true;
+      document.documentElement.classList.add('mouse-captured');
       void beginNativeMouseCapture();
       return;
     }
@@ -100,6 +107,13 @@ export class Input {
 
   /** Ends mouse capture (menu opened, window lost focus…). */
   releasePointerLock(): void {
+    this.captureWanted = false;
+    this.stopCapture();
+  }
+
+  /** Drops capture without forgetting that the game wants it back. */
+  private stopCapture(): void {
+    document.documentElement.classList.remove('mouse-captured');
     if (isNative()) {
       this.nativeCapture = false;
       this.locked = false;
@@ -121,11 +135,33 @@ export class Input {
       e.preventDefault();
     }
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') this.sprint = true;
+
+    // Hold Tab to peek: the cursor comes back so you can reach anything on
+    // screen, and movement input is dropped until it's released.
+    if (e.code === 'Tab') {
+      e.preventDefault();
+      if (!this.peeking) {
+        this.peeking = true;
+        this.stopCapture();
+      }
+    }
   }
 
   private onKeyUp(e: KeyboardEvent): void {
     this.keys.delete(e.code);
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') this.sprint = false;
+
+    if (e.code === 'Tab') {
+      e.preventDefault();
+      this.peeking = false;
+      // Re-capture only if the game still wants it (not paused).
+      if (this.captureWanted) this.requestPointerLock();
+    }
+  }
+
+  /** True while Tab is held (cursor visible, look/move suspended). */
+  get isPeeking(): boolean {
+    return this.peeking;
   }
 
   private onMouseMove(e: MouseEvent): void {
@@ -211,6 +247,13 @@ export class Input {
   /** Compute the desktop movement vector from currently-held keys. */
   private readKeyboardMove(): void {
     if (this.moveTouchId !== null) return; // touch owns movement
+    if (this.peeking) {
+      // Cursor is handed back while Tab is held; freeze movement so the player
+      // doesn't keep walking while looking at something.
+      this.move.set(0, 0);
+      this.sprint = false;
+      return;
+    }
     let x = 0;
     let y = 0;
     if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) y += 1;

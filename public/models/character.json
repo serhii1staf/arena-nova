@@ -1,0 +1,15 @@
+{
+  "_readme": "See README.md in this folder. Put character.glb here, then set enabled to true.",
+  "_readme_ru": "Смотрите README.md в этой папке. Положите character.glb сюда и поставьте enabled: true.",
+
+  "enabled": false,
+
+  "url": "character.glb",
+  "height": 1.8,
+  "yawOffsetDeg": 180,
+  "stripRootMotion": true,
+
+  "animationUrls": [],
+
+  "clips": {}
+}

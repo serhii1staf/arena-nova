@@ -16,7 +16,7 @@ import { GameConfig } from '../config.ts';
 import type { EngineContext, GameScene } from '../core/context.ts';
 import type { AudioManager } from '../core/AudioManager.ts';
 import { PlayerController } from '../player/PlayerController.ts';
-import { CharacterModel } from '../player/CharacterModel.ts';
+import { Avatar } from '../player/Avatar.ts';
 import { NetworkManager, type RemotePlayer } from '../net/NetworkManager.ts';
 import { buildCathedral, LAYOUT, type CathedralBuild } from '../world/Cathedral.ts';
 import { buildVegetation, type VegetationBuild } from '../world/Vegetation.ts';
@@ -39,7 +39,7 @@ export class LobbyScene implements GameScene {
   private atmosphere!: AtmosphereBuild;
   private portal!: PortalBuild;
   private player!: PlayerController;
-  private character!: CharacterModel;
+  private character!: Avatar;
   private audio!: AudioManager;
   private readonly net = new NetworkManager();
 
@@ -132,7 +132,7 @@ export class LobbyScene implements GameScene {
     this.player.spawn(0, LAYOUT.entranceZ - 4, 0);
 
     // Third-person avatar (hidden in first person).
-    this.character = new CharacterModel();
+    this.character = new Avatar();
     this.character.object.visible = false;
     this.scene.add(this.character.object);
 

@@ -20,7 +20,7 @@ const STRINGS = {
     'start.unavailable': 'Unavailable',
 
     'hud.hintDesktop':
-      'WASD · Shift sprint · Space jump · Scroll: 3rd person · F11 fullscreen · Esc menu',
+      'WASD · Shift sprint · Space jump · Scroll: 3rd person · Hold Tab: cursor · F11 fullscreen · Esc menu',
     'hud.hintTouch': 'Left: move · Right: look · Tap: jump · enter the portal to travel',
 
     'pause.title': 'Paused',
@@ -74,7 +74,7 @@ const STRINGS = {
     'start.unavailable': 'Недоступно',
 
     'hud.hintDesktop':
-      'WASD · Shift — бег · Space — прыжок · колёсико — вид от 3-го лица · F11 — во весь экран · Esc — меню',
+      'WASD · Shift — бег · Space — прыжок · колёсико — вид от 3-го лица · Tab — курсор · F11 — во весь экран · Esc — меню',
     'hud.hintTouch': 'Слева — движение · Справа — обзор · Тап — прыжок · войдите в портал',
 
     'pause.title': 'Пауза',

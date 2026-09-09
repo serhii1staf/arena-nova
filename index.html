@@ -211,6 +211,15 @@
         text-transform: uppercase;
       }
 
+      /* While the mouse is captured the pointer must be invisible. Asking the OS
+         to hide it is unreliable inside a WebView2 window, because the webview
+         child window keeps setting its own cursor — so hide it in CSS, which the
+         page fully controls. */
+      html.mouse-captured,
+      html.mouse-captured * {
+        cursor: none !important;
+      }
+
       /* Invisible strip along the top used to drag the frameless window. */
       .dragStrip {
         position: absolute;

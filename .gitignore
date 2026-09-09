@@ -28,3 +28,10 @@ npm-debug.log*
 
 # Smoke-test artefacts
 scripts/*.png
+
+# Authored character models are user-supplied (see public/models/README.md).
+# Licences vary per asset, so they are never committed.
+public/models/*.glb
+public/models/*.gltf
+public/models/*.bin
+public/models/*.fbx
