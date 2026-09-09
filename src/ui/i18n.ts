@@ -28,6 +28,8 @@ const STRINGS = {
     'pause.settings': 'Settings',
     'pause.fullscreen': 'Fullscreen',
 
+    'set.character': 'Character',
+    'skin.applies': 'Applies on the next area you enter',
     'set.language': 'Language',
     'set.fps': 'Frame rate',
     'fps.vsync': 'Match display (smoothest)',
@@ -82,6 +84,8 @@ const STRINGS = {
     'pause.settings': 'Настройки',
     'pause.fullscreen': 'Во весь экран',
 
+    'set.character': 'Персонаж',
+    'skin.applies': 'Применится при переходе в следующую локацию',
     'set.language': 'Язык',
     'set.fps': 'Частота кадров',
     'fps.vsync': 'По монитору (плавнее всего)',

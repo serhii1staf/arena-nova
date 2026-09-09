@@ -8,6 +8,8 @@
 export interface PlayerSnapshot {
   id: string;
   name: string;
+  /** Chosen character from the library, so everyone sees the same figure. */
+  skin: string;
   x: number;
   y: number;
   z: number;
@@ -32,7 +34,7 @@ export interface InputCommand {
 }
 
 export type ClientMessage =
-  | { type: 'join'; name: string }
+  | { type: 'join'; name: string; skin: string }
   | { type: 'input'; cmd: InputCommand }
   | { type: 'leave' };
 

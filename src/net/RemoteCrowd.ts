@@ -46,11 +46,31 @@ export class RemoteCrowd {
     for (const p of net.remotePlayers.values()) this.add(p);
     this.unsub.push(net.onPlayerJoin((p) => this.add(p)));
     this.unsub.push(net.onPlayerLeave((p) => this.remove(p.id)));
+    // A player is visible from the moment their socket is accepted, which can be a
+    // round-trip before their chosen character is known. Rebuild rather than
+    // leave them wearing the fallback for the rest of the session.
+    this.unsub.push(
+      net.onPlayerSkinChange((p) => {
+        const t = this.tracked.get(p.id);
+        if (!t) return;
+        this.remove(p.id);
+        this.add(p);
+        // Carry the motion state across so the swap does not reset their stride.
+        const next = this.tracked.get(p.id);
+        if (next) {
+          next.prev.copy(t.prev);
+          next.speed01 = t.speed01;
+          next.phase = t.phase;
+          next.primed = t.primed;
+        }
+      }),
+    );
   }
 
   private add(p: RemotePlayer): void {
     if (this.tracked.has(p.id)) return;
-    const avatar = new Avatar();
+    // Wearing the skin they chose, not ours.
+    const avatar = new Avatar(p.skin);
     this.group.add(avatar.object);
     this.tracked.set(p.id, {
       avatar,

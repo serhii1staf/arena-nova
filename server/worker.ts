@@ -106,6 +106,7 @@ export class GameRoom {
     const attached: Attached = {
       id,
       name: 'Player',
+      skin: 'captain',
       x: 0,
       y: 0,
       z: 0,
@@ -141,6 +142,9 @@ export class GameRoom {
         attached.name = String(msg.name ?? 'Player')
           .replace(/[\u0000-\u001f\u007f]/g, '')
           .slice(0, 24) || 'Player';
+        // Skins are ids from a fixed client-side list, so a short allow-listed
+        // string is all that is needed; anything odd falls back on the client.
+        attached.skin = String(msg.skin ?? 'captain').replace(/[^a-z0-9-]/gi, '').slice(0, 24) || 'captain';
         attached.seen = Date.now();
         ws.serializeAttachment(attached);
         this.broadcast(true);
@@ -204,7 +208,7 @@ export class GameRoom {
     for (const peer of sockets) {
       const a = peer.deserializeAttachment() as Attached | null;
       if (!a) continue;
-      players.push({ id: a.id, name: a.name, x: a.x, y: a.y, z: a.z, yaw: a.yaw });
+      players.push({ id: a.id, name: a.name, skin: a.skin, x: a.x, y: a.y, z: a.z, yaw: a.yaw });
     }
 
     const msg: ServerMessage = { type: 'snapshot', snapshot: { t: now, players } };

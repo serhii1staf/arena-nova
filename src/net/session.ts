@@ -1,5 +1,6 @@
 import { NetworkManager } from './NetworkManager.ts';
 import { defaultPlayerName, roomSocketUrl } from './endpoint.ts';
+import { savedSkin } from '../player/skins.ts';
 
 /**
  * The one network session for the whole game.
@@ -28,7 +29,7 @@ export function ensureConnected(): void {
   connecting = true;
   void net
     .connect(roomSocketUrl())
-    .then(() => net.join(defaultPlayerName()))
+    .then(() => net.join(defaultPlayerName(), savedSkin()))
     .catch(() => {
       /* offline or unreachable — carry on single-player */
     })

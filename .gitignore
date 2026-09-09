@@ -40,3 +40,6 @@ public/models/*.glb
 public/models/*.gltf
 public/models/*.bin
 public/models/*.fbx
+
+# Loose source drops in the repo root. Assets that ship live under public/.
+/*.gif

@@ -128,7 +128,8 @@ function resolveAssetUrl(path: string): string {
   return new URL(path, document.baseURI).href;
 }
 
-let sourcePromise: Promise<CharacterSource | null> | null = null;
+/** One prepared prototype per model file. */
+const sources = new Map<string, Promise<CharacterSource | null>>();
 
 /**
  * GltfCharacter
@@ -292,22 +293,36 @@ export class GltfCharacter {
   // ---------------------------------------------------------------------------
 
   /**
-   * Downloads and prepares the shared prototype once. Resolves to `null` when
-   * no model is installed, which is the normal case for a fresh clone of the
-   * repo — the caller then keeps the procedural model.
+   * Downloads and prepares a prototype, once per file. Resolves to `null` when the
+   * model is missing — the caller then keeps the procedural figure.
+   *
+   * Cached per path rather than globally: with a character library the same
+   * session loads several different models, and every one of them still has to be
+   * downloaded and parsed only once no matter how many players wear it.
    */
-  static prepare(manifest: CharacterManifest): Promise<CharacterSource | null> {
-    sourcePromise ??= GltfCharacter.load(manifest);
-    return sourcePromise;
+  static prepare(manifest: CharacterManifest, modelPath?: string): Promise<CharacterSource | null> {
+    const key = modelPath ?? `models/${manifest.url ?? 'character.glb'}`;
+    let pending = sources.get(key);
+    if (!pending) {
+      pending = GltfCharacter.load(manifest, key);
+      sources.set(key, pending);
+    }
+    return pending;
   }
 
   /** Convenience: prepare + instantiate, or `null` if nothing is installed. */
-  static async tryLoad(manifest: CharacterManifest): Promise<GltfCharacter | null> {
-    const source = await GltfCharacter.prepare(manifest);
+  static async tryLoad(
+    manifest: CharacterManifest,
+    modelPath?: string,
+  ): Promise<GltfCharacter | null> {
+    const source = await GltfCharacter.prepare(manifest, modelPath);
     return source ? new GltfCharacter(source) : null;
   }
 
-  private static async load(manifest: CharacterManifest): Promise<CharacterSource | null> {
+  private static async load(
+    manifest: CharacterManifest,
+    modelPath: string,
+  ): Promise<CharacterSource | null> {
     if (manifest.enabled === false) return null;
 
     const loader = new GLTFLoader();
@@ -319,7 +334,6 @@ export class GltfCharacter {
       /* uncompressed models still load */
     }
 
-    const modelPath = `models/${manifest.url ?? 'character.glb'}`;
     let gltf: GLTF;
     try {
       gltf = await loader.loadAsync(resolveAssetUrl(modelPath));

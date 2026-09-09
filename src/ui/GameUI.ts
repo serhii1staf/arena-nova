@@ -9,6 +9,7 @@ import {
   toggleFullscreen,
 } from './native.ts';
 import { applyTranslations, getLang, onLangChange, setLang, t, type Lang } from './i18n.ts';
+import { SKINS, savedSkin, saveSkin } from '../player/skins.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T | null =>
   document.getElementById(id) as T | null;
@@ -187,6 +188,30 @@ export class GameUI {
 
   private wireSettings(): void {
     const v = this.settings.values;
+
+    const skin = $<HTMLSelectElement>('setSkin');
+    const skinNote = $('skinNote');
+    if (skin) {
+      skin.replaceChildren(
+        ...SKINS.map((s) => {
+          const opt = document.createElement('option');
+          opt.value = s.id;
+          opt.textContent = s.label;
+          return opt;
+        }),
+      );
+      skin.value = savedSkin();
+      skin.addEventListener('change', () => {
+        saveSkin(skin.value);
+        // Rigs are built when a scene loads, so the change lands on the next
+        // one. Swapping in place would mean rebuilding the local player and
+        // re-announcing to the room mid-frame for no real gain.
+        if (skinNote) {
+          skinNote.textContent = t('skin.applies');
+          skinNote.classList.add('on');
+        }
+      });
+    }
 
     const lang = $<HTMLSelectElement>('setLang');
     if (lang) {

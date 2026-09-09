@@ -18,15 +18,17 @@ interface TimedState extends PlayerSnapshot {
 export class RemotePlayer {
   readonly id: string;
   name: string;
+  skin: string;
   x = 0;
   y = 0;
   z = 0;
   yaw = 0;
   private readonly buffer: TimedState[] = [];
 
-  constructor(id: string, name: string) {
+  constructor(id: string, name: string, skin: string) {
     this.id = id;
     this.name = name;
+    this.skin = skin;
   }
 
   push(state: TimedState): void {
@@ -97,6 +99,8 @@ export class NetworkManager {
 
   private joinHandlers = new Set<PlayerEvent>();
   private leaveHandlers = new Set<PlayerEvent>();
+  /** Fired when a known player's chosen character turns out to differ. */
+  private skinHandlers = new Set<PlayerEvent>();
   private stateHandlers = new Set<(s: ConnectionState) => void>();
 
   constructor(transport: Transport = new NullTransport()) {
@@ -154,9 +158,19 @@ export class NetworkManager {
       if (s.id === this.localId) continue; // server reconciliation handled elsewhere
       let rp = this.remotePlayers.get(s.id);
       if (!rp) {
-        rp = new RemotePlayer(s.id, s.name);
+        rp = new RemotePlayer(s.id, s.name, s.skin);
         this.remotePlayers.set(s.id, rp);
         for (const h of this.joinHandlers) h(rp);
+      } else if (s.skin !== rp.skin || s.name !== rp.name) {
+        // Identity can arrive after the player does. A socket shows up in the
+        // broadcast the moment it is accepted, which is often a round-trip before
+        // its `join` lands, so the first snapshots carry the server's defaults.
+        // Without this the character someone picked was pinned to the fallback for
+        // the rest of the session, and only for whoever happened to see them early.
+        rp.name = s.name;
+        const skinChanged = s.skin !== rp.skin;
+        rp.skin = s.skin;
+        if (skinChanged) for (const h of this.skinHandlers) h(rp);
       }
       rp.push({ ...s, t });
     }
@@ -170,8 +184,8 @@ export class NetworkManager {
     await this.transport.connect();
   }
 
-  join(name: string): void {
-    this.transport.send({ type: 'join', name });
+  join(name: string, skin: string): void {
+    this.transport.send({ type: 'join', name, skin });
   }
 
   sendInput(x: number, y: number, z: number, yaw: number): void {
@@ -202,6 +216,10 @@ export class NetworkManager {
     this.leaveHandlers.add(h);
     return () => this.leaveHandlers.delete(h);
   }
+  onPlayerSkinChange(h: PlayerEvent): () => void {
+    this.skinHandlers.add(h);
+    return () => this.skinHandlers.delete(h);
+  }
   onStateChange(h: (s: ConnectionState) => void): () => void {
     this.stateHandlers.add(h);
     return () => this.stateHandlers.delete(h);
@@ -212,6 +230,7 @@ export class NetworkManager {
     this.remotePlayers.clear();
     this.joinHandlers.clear();
     this.leaveHandlers.clear();
+    this.skinHandlers.clear();
     this.stateHandlers.clear();
   }
 }

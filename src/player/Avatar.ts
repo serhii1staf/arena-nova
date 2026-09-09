@@ -2,6 +2,7 @@ import { Group, type Vector3 } from 'three';
 import { CharacterModel, type LocomotionState } from './CharacterModel.ts';
 // Type-only: erased at build time, so GLTFLoader stays out of the main bundle.
 import type { CharacterManifest, GltfCharacter } from './GltfCharacter.ts';
+import { savedSkin, skinModelPath } from './skins.ts';
 
 /** What a scene needs from a player avatar, procedural or authored. */
 export interface CharacterAvatar {
@@ -59,11 +60,14 @@ export class Avatar implements CharacterAvatar {
   private active: CharacterAvatar;
   private readonly procedural: CharacterModel;
   private disposed = false;
+  private readonly skinId: string;
 
   /** True once an authored model has taken over. Surfaced for diagnostics. */
   gltfActive = false;
 
-  constructor() {
+  /** `skinId` picks a model from the library; omit it for the saved choice. */
+  constructor(skinId?: string) {
+    this.skinId = skinId ?? savedSkin();
     this.procedural = new CharacterModel();
     this.active = this.procedural;
     this.object.add(this.procedural.object);
@@ -76,7 +80,7 @@ export class Avatar implements CharacterAvatar {
       const manifest = await loadManifest();
       if (!manifest || this.disposed) return;
       const mod = await import('./GltfCharacter.ts');
-      rig = await mod.GltfCharacter.tryLoad(manifest);
+      rig = await mod.GltfCharacter.tryLoad(manifest, skinModelPath(this.skinId));
     } catch (err) {
       console.warn(`[avatar] authored model unavailable: ${String((err as Error)?.message ?? err)}`);
     }

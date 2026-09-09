@@ -17,6 +17,22 @@ const hint = $('hint');
 const stats = $('stats');
 const fade = $('fade');
 
+/*
+ * Transition indicator. Revealed only once the image has actually decoded, so a
+ * missing or broken file leaves the plain dark screen instead of a broken-image
+ * icon. It sits inside #fade and inherits its opacity, so it appears and
+ * disappears with the screen without a second animation to keep in sync.
+ */
+const fadeIcon = $<HTMLImageElement>('fadeIcon');
+if (fadeIcon) {
+  const reveal = (): void => fadeIcon.classList.add('ready');
+  if (fadeIcon.complete && fadeIcon.naturalWidth > 0) reveal();
+  else {
+    fadeIcon.addEventListener('load', reveal, { once: true });
+    fadeIcon.addEventListener('error', () => fadeIcon.remove(), { once: true });
+  }
+}
+
 function fail(message: string): void {
   const hintEl = $('startHint');
   const btn = $<HTMLButtonElement>('btnPlay');

@@ -121,6 +121,24 @@
       #fade.on {
         opacity: 1;
       }
+      /*
+       * Transition indicator. Lives *inside* #fade so it inherits the group
+       * opacity: it appears and disappears with the screen for free, with no
+       * second animation to keep in sync. Hidden until the file loads, so a
+       * missing asset leaves a plain dark screen rather than a broken icon.
+       */
+      #fadeIcon {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: clamp(88px, 13vmin, 152px);
+        height: auto;
+        display: none;
+      }
+      #fadeIcon.ready {
+        display: block;
+      }
 
       /* ---- HUD ---- */
       #hud {
@@ -439,7 +457,9 @@
       </div>
     </div>
 
-    <div id="fade"></div>
+    <div id="fade">
+      <img id="fadeIcon" src="ui/transition.gif" alt="" aria-hidden="true" draggable="false" />
+    </div>
 
     <!-- Pause / settings overlay (Escape) -->
     <div id="pause">
@@ -459,6 +479,11 @@
         </div>
 
         <div id="settings" class="settings">
+          <div class="field">
+            <label for="setSkin" data-i18n="set.character">Character</label>
+            <select id="setSkin"></select>
+          </div>
+          <div id="skinNote" class="note"></div>
           <div class="field">
             <label for="setLang" data-i18n="set.language">Language</label>
             <select id="setLang">

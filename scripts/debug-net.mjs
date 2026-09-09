@@ -14,9 +14,12 @@ const browser = await chromium.launch({
 const errors = [];
 
 /** Boots one client into the lobby of a named room. */
-async function spawnClient(label) {
+async function spawnClient(label, skin) {
   const ctx = await browser.newContext({ viewport: { width: 800, height: 500 } });
   const page = await ctx.newPage();
+  // Different characters per client, so the crowd is checked for the skin each
+  // player actually chose rather than everyone defaulting to the same model.
+  await page.addInitScript((id) => localStorage.setItem('arena.skin', id), skin);
   // Software rendering plus a real network round-trip; the boot is slow here.
   page.setDefaultTimeout(150000);
   page.on('pageerror', (e) => errors.push(`${label} pageerror: ${e.message}`));
@@ -40,6 +43,7 @@ const status = (page) =>
       localId: net.localId,
       remotes: [...net.remotePlayers.values()].map((p) => ({
         id: p.id,
+        skin: p.skin,
         x: +p.x.toFixed(2),
         z: +p.z.toFixed(2),
       })),
@@ -49,8 +53,8 @@ const status = (page) =>
 try {
   console.log('=== NETWORK PROBE ===');
   console.log(`room: ${room}`);
-  const a = await spawnClient('A');
-  const b = await spawnClient('B');
+  const a = await spawnClient('A', 'skeleton');
+  const b = await spawnClient('B', 'anne');
 
   // Give both sockets time to connect and exchange a few snapshots.
   let sa = null;
