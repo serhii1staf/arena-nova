@@ -66,10 +66,21 @@ try {
 
   // Now move A and confirm B's copy of A actually follows.
   const before = sb.remotes[0]?.x ?? null;
+  // Two browser contexts are open, so A has to be the focused one or its key
+  // presses go nowhere — that made this check flaky.
+  await a.bringToFront();
+  await a.locator('#app canvas').click({ position: { x: 200, y: 200 } }).catch(() => {});
   await a.keyboard.down('KeyW');
-  await a.waitForTimeout(6000);
+  // Wall time is the wrong clock here: the engine clamps frameDelta to 0.1 s, so
+  // under software rendering the simulation advances far slower than real time.
+  const startTime = await a.evaluate(() => window.arena.scene.time);
+  for (let i = 0; i < 60; i++) {
+    await a.waitForTimeout(500);
+    const now = await a.evaluate(() => window.arena.scene.time);
+    if (now - startTime >= 5) break;
+  }
   await a.keyboard.up('KeyW');
-  await a.waitForTimeout(1500);
+  await a.waitForTimeout(2000);
   const sb2 = await status(b);
   const after = sb2.remotes[0]?.z ?? null;
   const beforeZ = sb.remotes[0]?.z ?? null;

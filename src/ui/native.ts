@@ -139,7 +139,13 @@ export async function recentreNativeCursor(force = false): Promise<void> {
       // `innerPosition` is the client area's origin. Mixing `outerPosition` with
       // `innerSize` put the target a few pixels off the real centre, which biased
       // where the cursor landed after every warp.
-      const [pos, size] = await Promise.all([win.innerPosition(), win.innerSize()]);
+      // `innerPosition` needs its own capability, and if it is ever missing the
+      // whole warp would fail silently and the camera would stop turning at the
+      // window edge. Fall back to the outer frame rather than losing the warp.
+      const [pos, size] = await Promise.all([
+        win.innerPosition().catch(() => win.outerPosition()),
+        win.innerSize(),
+      ]);
       windowCentre = {
         x: Math.round(pos.x + size.width / 2),
         y: Math.round(pos.y + size.height / 2),

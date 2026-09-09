@@ -8,6 +8,8 @@
  * and the browser meet in the same room.
  */
 
+import { isNative } from '../ui/native.ts';
+
 /** The deployed Worker. Same origin serves the game and the rooms. */
 const PUBLIC_HOST = 'arena-nova.odi44972.workers.dev';
 
@@ -19,9 +21,28 @@ function servedOverHttp(): boolean {
   return p === 'https:' || p === 'http:';
 }
 
-function isLocalHost(): boolean {
+/**
+ * True when the page is not being served by anything that could also host the
+ * rooms.
+ *
+ * The desktop app is the reason this is not just a protocol check: Tauri v2 on
+ * Windows serves the app over `http://tauri.localhost`, so it looks like an
+ * ordinary web origin. Treating it as one made the native build dial
+ * `ws://tauri.localhost/ws` — itself — and silently fail, which is why players in
+ * the app could never see each other while the browser worked fine.
+ */
+function cannotHostRooms(): boolean {
+  if (isNative()) return true;
+  if (!servedOverHttp()) return true;
   const h = location.hostname;
-  return h === 'localhost' || h === '127.0.0.1' || h === '' || h.endsWith('.local');
+  return (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '[::1]' ||
+    h === '' ||
+    h.endsWith('.localhost') ||
+    h.endsWith('.local')
+  );
 }
 
 /**
@@ -35,15 +56,15 @@ export function roomSocketUrl(room?: string): string {
   }
   const target = (name ?? DEFAULT_ROOM).slice(0, 40);
 
-  // Served from a real web origin that isn't a dev server: talk to ourselves.
-  if (servedOverHttp() && !isLocalHost()) {
-    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return `${scheme}//${location.host}/ws?room=${encodeURIComponent(target)}`;
+  // Desktop app, file://, or a dev server — none of them host rooms, so use the
+  // public Worker. That is also what puts the app and the browser in one room.
+  if (cannotHostRooms()) {
+    return `wss://${PUBLIC_HOST}/ws?room=${encodeURIComponent(target)}`;
   }
 
-  // Desktop app (tauri://), file://, or a local dev server — use the public host
-  // so everyone lands in the same room regardless of how they launched the game.
-  return `wss://${PUBLIC_HOST}/ws?room=${encodeURIComponent(target)}`;
+  // Served by the Worker itself: talk to the same origin.
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${scheme}//${location.host}/ws?room=${encodeURIComponent(target)}`;
 }
 
 /** A short, human-readable default name so players are distinguishable. */

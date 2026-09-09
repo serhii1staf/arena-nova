@@ -8,6 +8,7 @@ import {
   Vector3,
 } from 'three';
 import type { AssetManager } from '../core/AssetManager.ts';
+import type { QualitySettings } from '../core/QualityManager.ts';
 import {
   biomeStyle,
   surfaceBiomeAt,
@@ -231,9 +232,24 @@ function buildChunkGeometry(cx: number, cz: number, segments: number): BufferGeo
  * per-frame budget so a huge world can be walked without loading screens or
  * frame-time spikes.
  */
-export function createTerrain(assets: AssetManager): TerrainStreamer {
+export function createTerrain(assets: AssetManager, settings?: QualitySettings): TerrainStreamer {
   const group = new Group();
   group.name = 'Terrain';
+
+  /**
+   * How far the ground streams, by quality tier.
+   *
+   * This has to scale with the tier. The near rings deliberately share one
+   * resolution so the mesh matches `surfaceHeightAt` exactly, but that made the
+   * cost per chunk the same everywhere — so turning quality down did nothing for
+   * the terrain, and a weak laptop still paid for 49 full-detail chunks. Only the
+   * *count* of chunks can be traded away, never their resolution: dropping the
+   * resolution would reintroduce props floating above the ground.
+   */
+  const viewRadius = Math.max(
+    TERRAIN_NEAR_RINGS,
+    Math.min(VIEW_RADIUS, Math.round((settings?.vegetationDensity ?? 1) * 3) + 1),
+  );
 
   const tex = assets.ground();
   const material = new MeshStandardMaterial({
@@ -294,10 +310,10 @@ export function createTerrain(assets: AssetManager): TerrainStreamer {
     const pcz = Math.floor(position.z / CHUNK);
 
     // Queue anything missing inside the view radius.
-    for (let dz = -VIEW_RADIUS; dz <= VIEW_RADIUS; dz++) {
-      for (let dx = -VIEW_RADIUS; dx <= VIEW_RADIUS; dx++) {
+    for (let dz = -viewRadius; dz <= viewRadius; dz++) {
+      for (let dx = -viewRadius; dx <= viewRadius; dx++) {
         const ring = Math.max(Math.abs(dx), Math.abs(dz));
-        if (ring > VIEW_RADIUS) continue;
+        if (ring > viewRadius) continue;
         const cx = pcx + dx;
         const cz = pcz + dz;
         if (Math.abs(cx) > maxChunk || Math.abs(cz) > maxChunk) continue;
@@ -316,11 +332,11 @@ export function createTerrain(assets: AssetManager): TerrainStreamer {
     // chunk stops thrashing when walking along a boundary).
     for (const chunk of [...loaded.values()]) {
       const ring = Math.max(Math.abs(chunk.cx - pcx), Math.abs(chunk.cz - pcz));
-      if (ring > VIEW_RADIUS + 1) dropChunk(chunk);
+      if (ring > viewRadius + 1) dropChunk(chunk);
     }
     for (const [k, want] of [...pending]) {
       const ring = Math.max(Math.abs(want.cx - pcx), Math.abs(want.cz - pcz));
-      if (ring > VIEW_RADIUS + 1) pending.delete(k);
+      if (ring > viewRadius + 1) pending.delete(k);
     }
   };
 

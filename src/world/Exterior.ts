@@ -79,7 +79,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
   const wind = new Wind();
 
   // ---- Streamed world ----------------------------------------------------
-  const terrain: TerrainStreamer = createTerrain(assets);
+  const terrain: TerrainStreamer = createTerrain(assets, settings);
   group.add(terrain.group);
 
   const scatter: ScatterStreamer = createScatter(assets, registry, wind);
