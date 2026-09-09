@@ -165,6 +165,10 @@ export class Avatar implements CharacterAvatar {
     this.active = rig;
     this.gltfActive = true;
     this.installed = id;
+    // Detach explicitly rather than trusting the old body to do it. Both rigs do
+    // remove themselves now, but a body left in the graph is invisible in the
+    // types and very visible on screen, so the ownership is stated here.
+    this.object.remove(previous.object);
     previous.dispose();
     if (previous === this.procedural) this.procedural = null;
   }

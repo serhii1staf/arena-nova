@@ -1,6 +1,6 @@
 [package]
 name = "arena-nova"
-version = "0.8.0"
+version = "0.9.0"
 description = "Arena Nova — overgrown sanctuary"
 authors = ["Arena Nova"]
 edition = "2021"

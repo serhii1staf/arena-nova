@@ -497,6 +497,11 @@ export class CharacterModel {
   }
 
   dispose(): void {
+    // Detach as well as free. Leaving the node in the graph with its buffers
+    // already released is what left the procedural stand-in on screen after an
+    // authored model took over — a disposed mesh does not disappear, it renders
+    // whatever the driver still has.
+    this.object.removeFromParent();
     for (const g of this.geos) g.dispose();
     for (const m of this.mats) m.dispose();
   }

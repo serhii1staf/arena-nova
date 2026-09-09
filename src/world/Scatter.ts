@@ -173,7 +173,11 @@ export function createScatter(
 
   const loaded = new Map<string, ScatterChunk>();
   const pending = new Map<string, { cx: number; cz: number; dist: number }>();
-  const key = (cx: number, cz: number): string => `${cx}|${cz}`;
+  // Namespaced, because this string is also the `PropRegistry` owner key and that
+  // map is flat. Landmarks stream on a 420 m grid while these are 256 m chunks, so
+  // the bare `cx|cz` form collided between the two layers and unloading one
+  // deleted the other's colliders.
+  const key = (cx: number, cz: number): string => `scatter:${cx}|${cz}`;
 
   /**
    * Collects placements for one layer inside a chunk by walking a jittered grid

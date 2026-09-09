@@ -22,6 +22,22 @@ The pack also contains rigged animation clips (`Idle`, `Walk`, `Run`, `Jump`,
 `Jump_Idle`, `Jump_Land`, and others) which the engine maps onto its locomotion
 states.
 
+## World props
+
+The abandoned villages are built from the same **KayKit Pirate Pack** (CC0):
+houses, a sawmill, docks, a ship, barrels, chests, cannon, anchor, and piles of
+bones and skulls.
+
+All fourteen models ship as one merged, deduplicated GLB
+(`public/models/props/village.glb`). Converted separately they came to 2.4 MB,
+because each embedded its own copy of the pack's texture atlas; merged it is
+420 kB with a single atlas and two materials.
+
+Note for anyone adding to it: the pack normalises every model into its own
+roughly two-unit box, so the source files carry no shared sense of scale. Target
+heights are given per prop in `src/world/PropModels.ts` — a single global factor
+produces a half-metre sawmill next to a three-metre pile of skulls.
+
 ## Transition indicator
 
 `public/ui/transition.gif` was supplied by the project owner. Its origin and

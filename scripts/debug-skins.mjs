@@ -41,7 +41,12 @@ try {
     });
     page.on('response', (r) => {
       const u = r.url();
-      if (u.includes('/models/') && u.endsWith('.glb')) fetched.push(u.split('/').pop());
+      // Character models only. The world's authored prop pack also lives under
+      // /models/, and it loads as soon as the exterior streams landmarks — which
+      // this probe does to test the transition overlay.
+      if (u.includes('/models/') && u.endsWith('.glb') && !u.includes('/props/')) {
+        fetched.push(u.split('/').pop());
+      }
     });
 
     // Seed the choice the way the menu would, before the first avatar is built.
@@ -76,7 +81,15 @@ try {
       av?.object.traverse((o) => {
         if (o.isSkinnedMesh) skinned++;
       });
-      return { gltfActive: !!av?.gltfActive, skinned };
+      return {
+        gltfActive: !!av?.gltfActive,
+        skinned,
+        // Exactly one body must hang off the container. The procedural stand-in
+        // used to be left in the graph after the authored model took over, with
+        // its buffers already freed — which is not invisible, it renders whatever
+        // the driver still holds.
+        bodies: av?.object.children.length ?? 0,
+      };
     });
 
     // The indicator is checked structurally rather than by sampling the animated
@@ -173,7 +186,12 @@ try {
     });
     page.on('response', (r) => {
       const u = r.url();
-      if (u.includes('/models/') && u.endsWith('.glb')) fetched.push(u.split('/').pop());
+      // Character models only. The world's authored prop pack also lives under
+      // /models/, and it loads as soon as the exterior streams landmarks — which
+      // this probe does to test the transition overlay.
+      if (u.includes('/models/') && u.endsWith('.glb') && !u.includes('/props/')) {
+        fetched.push(u.split('/').pop());
+      }
     });
 
     await page.addInitScript(() => localStorage.setItem('arena.skin', 'captain'));
@@ -312,12 +330,13 @@ try {
       strays.length === 0 &&
       r.rig.gltfActive &&
       r.rig.skinned > 0 &&
+      r.rig.bodies === 1 &&
       r.menu.count === 7 &&
       r.menu.value === r.skin;
     if (!pass) ok = false;
     console.log(
       `  ${pass ? 'ok  ' : 'FAIL'} ${r.skin.padEnd(9)} fetched=[${r.fetched.join(', ')}] ` +
-        `rig=${r.rig.gltfActive ? 'gltf' : 'procedural'}/${r.rig.skinned} ` +
+        `rig=${r.rig.gltfActive ? 'gltf' : 'procedural'}/${r.rig.skinned} bodies=${r.rig.bodies} ` +
         `menu=${r.menu.count}@${r.menu.value}`,
     );
   }

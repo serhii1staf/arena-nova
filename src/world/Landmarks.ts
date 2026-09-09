@@ -22,6 +22,7 @@ import type { AssetManager } from '../core/AssetManager.ts';
 import { applyTriplanarUV } from './builders/geometry.ts';
 import { buildRock } from './Flora.ts';
 import type { PropRegistry } from './PropRegistry.ts';
+import { loadPropModels, mergeAuthored, type PropName, type PropSet } from './PropModels.ts';
 import {
   cellRandom,
   LANDMARK_CELL,
@@ -48,7 +49,7 @@ const CELL = LANDMARK_CELL;
 /** How many cells out landmarks stream. */
 const VIEW_CELLS = 2;
 
-type LandmarkKind = 'campfire' | 'camp' | 'ruin' | 'stones';
+type LandmarkKind = 'campfire' | 'camp' | 'ruin' | 'stones' | 'village';
 
 interface LandmarkChunk {
   key: string;
@@ -309,6 +310,147 @@ function buildStoneCircle(mats: Materials, rand: (n: number) => number): Group {
   return root;
 }
 
+/** Bones and skulls, strewn around to say nobody left here in good order. */
+const REMAINS: PropName[] = ['Environment_Skulls', 'Environment_LargeBones'];
+const HOUSES: PropName[] = ['Environment_House1', 'Environment_House2', 'Environment_House3'];
+const CLUTTER: PropName[] = ['Prop_Barrel', 'Prop_Chest_Closed', 'Prop_Anchor', 'Prop_Cannon'];
+
+/**
+ * An abandoned hamlet on a levelled pad.
+ *
+ * Built from the authored pack rather than from primitives, and placed on a
+ * landmark site specifically because those sites already have a flat terrace cut
+ * for them. A building is a rigid box — it cannot follow noise the way a campfire
+ * can — so without the existing pad each house would need its own levelling pass
+ * in the terrain, and any large flat footprint that the terrain does not know
+ * about floats or buries itself once a distant chunk drops to a coarser LOD.
+ *
+ * Returns nothing when the pack has not loaded; the caller then falls back to one
+ * of the procedural kinds, so a village is never a hole in the world.
+ */
+function buildVillage(
+  props: PropSet,
+  rand: (n: number) => number,
+  x: number,
+  z: number,
+  h: number,
+  /**
+   * Yaw of the anchor this village hangs under. Props are positioned in
+   * anchor-local space while colliders are registered in world space, so the
+   * offsets have to be turned by the same angle — otherwise the walls you bump
+   * into sit at a different rotation from the houses you can see.
+   */
+  yaw: number,
+  owner: string,
+  registry: PropRegistry,
+): Group {
+  const root = new Group();
+  root.name = 'Village';
+
+  const cosY = Math.cos(yaw);
+  const sinY = Math.sin(yaw);
+  const worldX = (lx: number, lz: number): number => x + lx * cosY + lz * sinY;
+  const worldZ = (lx: number, lz: number): number => z - lx * sinY + lz * cosY;
+
+  /**
+   * Approximates a building's rectangular footprint with a row of circles.
+   *
+   * The registry only holds circles, and these buildings are roughly three times
+   * wider than they are deep — one circle inscribed on the long axis stops the
+   * player four metres out from a wall that is two metres away, which reads as an
+   * invisible barrier around the house. A line of circles the width of the short
+   * axis follows the actual walls.
+   *
+   * `localYaw` is the prop's own rotation; the anchor's is added because the two
+   * compose into a single rotation about Y.
+   */
+  const registerFootprint = (
+    lx: number,
+    lz: number,
+    localYaw: number,
+    shape: { halfX: number; halfZ: number; height: number },
+  ): void => {
+    const short = Math.min(shape.halfX, shape.halfZ);
+    const long = Math.max(shape.halfX, shape.halfZ);
+    // The long axis is X unless the box says otherwise; a quarter turn swaps them.
+    const total = localYaw + yaw + (shape.halfZ > shape.halfX ? Math.PI / 2 : 0);
+    const ux = Math.cos(total);
+    const uz = -Math.sin(total);
+    const reach = Math.max(0, long - short);
+    const steps = Math.max(1, Math.ceil(reach / Math.max(0.6, short * 0.9)));
+    const cx = worldX(lx, lz);
+    const cz = worldZ(lx, lz);
+    for (let i = 0; i <= steps; i++) {
+      const t = steps === 0 ? 0 : (i / steps) * 2 - 1;
+      registry.add(owner, {
+        x: cx + ux * reach * t,
+        z: cz + uz * reach * t,
+        r: short * 0.95,
+        // `top` stays at ground level: raising it would teleport anyone walking
+        // past onto the roof. `blockTop` is what makes the walls solid.
+        top: h,
+        blockTop: h + shape.height * 0.8,
+        solid: true,
+      });
+    }
+  };
+
+  const place = (name: PropName, lx: number, lz: number, yaw: number, tilt = 0): void => {
+    const obj = props.instance(name);
+    if (!obj) return;
+    obj.position.set(lx, 0, lz);
+    obj.rotation.y = yaw;
+    if (tilt !== 0) obj.rotation.z = tilt;
+    root.add(obj);
+  };
+
+  // Houses in a loose ring, each turned to face roughly inward.
+  // Kept deliberately small. The authored houses are eight to twelve thousand
+  // triangles each, so a hamlet is worth a sizeable slice of the world's budget;
+  // two or three reads as a settlement without spending it all in one place.
+  const count = 2 + Math.floor(rand(50) * 2);
+  for (let i = 0; i < count; i++) {
+    const a = (i / count) * Math.PI * 2 + rand(i + 51) * 0.6;
+    const rad = 8 + rand(i + 60) * 4.5;
+    const lx = Math.cos(a) * rad;
+    const lz = Math.sin(a) * rad;
+    const name = HOUSES[Math.floor(rand(i + 70) * HOUSES.length) % HOUSES.length]!;
+    // Face the centre, give or take, so it reads as a settlement and not a row.
+    const houseYaw = -a + Math.PI / 2 + (rand(i + 80) - 0.5) * 0.8;
+    place(name, lx, lz, houseYaw);
+
+    const shape = props.shape(name);
+    if (shape) registerFootprint(lx, lz, houseYaw, shape);
+  }
+
+  // Clutter and remains, scattered wider than the houses.
+  const litter = 4 + Math.floor(rand(90) * 4);
+  for (let i = 0; i < litter; i++) {
+    const a = rand(i + 100) * Math.PI * 2;
+    const rad = 3 + rand(i + 110) * 13;
+    const pool = rand(i + 120) < 0.45 ? REMAINS : CLUTTER;
+    const name = pool[Math.floor(rand(i + 130) * pool.length) % pool.length]!;
+    place(name, Math.cos(a) * rad, Math.sin(a) * rad, rand(i + 140) * Math.PI * 2);
+  }
+
+  // A leaning sawmill sometimes, as the thing the hamlet was built around.
+  if (rand(160) < 0.45) {
+    const millYaw = rand(161) * Math.PI * 2;
+    place('Environment_Sawmill', 0, 0, millYaw);
+    const shape = props.shape('Environment_Sawmill');
+    if (shape) registerFootprint(0, 0, millYaw, shape);
+  }
+
+  // Collapse the whole hamlet into one mesh per material. A dozen cloned props is
+  // a dozen draw calls, and a few villages in view was enough on its own to put
+  // the world over its draw budget.
+  const merged = mergeAuthored(root);
+  root.clear();
+  for (const mesh of merged) root.add(mesh);
+
+  return root;
+}
+
 export function createLandmarks(assets: AssetManager, registry: PropRegistry): LandmarkStreamer {
   const group = new Group();
   group.name = 'Landmarks';
@@ -370,9 +512,27 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
     fireLights.push(light);
   }
 
+  /**
+   * The authored pack. Arrives asynchronously, so cells built before it lands use
+   * a procedural kind instead and are rebuilt once it does — `stale` marks that.
+   * Building the world is not allowed to wait on a download.
+   */
+  let props: PropSet | null = null;
+  let stale = false;
+  let torndown = false;
+  void loadPropModels().then((set) => {
+    if (torndown || !set) return;
+    props = set;
+    stale = true;
+  });
+
   const loaded = new Map<string, LandmarkChunk>();
   const pending = new Map<string, { cx: number; cz: number; dist: number }>();
-  const key = (cx: number, cz: number): string => `${cx}|${cz}`;
+  // Namespaced. `PropRegistry.byOwner` is a flat map keyed by this string, and
+  // vegetation chunks use the bare `cx|cz` form on a *different* grid — so
+  // landmark cell (0,0) and scatter chunk (0,0) shared the owner "0|0", and
+  // whichever unloaded first deleted the other's colliders.
+  const key = (cx: number, cz: number): string => `landmark:${cx}|${cz}`;
   const scratch = new Vector3();
   /** Reused each frame so light assignment allocates nothing. */
   const nearestFires: Array<{ fire: FireEffect; d2: number }> = [];
@@ -396,15 +556,23 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
       const h = surfaceHeightAt(x, z);
       if (surfaceSlopeAt(x, z) > 0.35) return;
 
+      // Note this reuses `rand(3)`, which `landmarkSiteFor` already tested against
+      // 0.3 to decide the cell has a site at all — so `roll` is never below 0.3
+      // and the thresholds below are not the probabilities they look like.
       const roll = rand(3);
       const biome = surfaceBiomeAt(x, z);
       let kind: LandmarkKind;
-      if (roll < 0.52) kind = 'campfire';
-      else if (roll < 0.68) kind = 'camp';
-      else if (roll < 0.86) kind = 'ruin';
+      if (roll < 0.48) kind = 'campfire';
+      else if (roll < 0.62) kind = 'camp';
+      else if (roll < 0.78) kind = 'ruin';
+      else if (roll < 0.9) kind = 'village';
       else kind = 'stones';
       // Snow and highland peaks get shelters rather than overgrown ruins.
       if ((biome === 'snow' || biome === 'highland') && kind === 'ruin') kind = 'camp';
+      // The pack loads asynchronously, so a cell built before it arrives falls
+      // back rather than leaving an empty terrace. Those cells are rebuilt once
+      // it lands (see `update`).
+      if (kind === 'village' && !props) kind = 'ruin';
 
       const anchor = new Group();
       anchor.position.set(x, h, z);
@@ -449,6 +617,9 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
           anchor.add(buildRuin(mats, rand));
           registry.add(k, { x, z, r: 1.0, top: h, blockTop: h, solid: false });
           break;
+        case 'village':
+          if (props) anchor.add(buildVillage(props, rand, x, z, h, anchor.rotation.y, k, registry));
+          break;
         case 'stones':
           anchor.add(buildStoneCircle(mats, rand));
           break;
@@ -475,8 +646,13 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
     group.remove(chunk.root);
     chunk.root.traverse((o) => {
       const mesh = o as Mesh;
-      // Shared materials and the shared rock geometry are disposed at the end.
-      if (mesh.geometry && mesh.geometry !== rockGeo) mesh.geometry.dispose();
+      if (!mesh.geometry) return;
+      // Shared geometry is disposed once, at teardown. `rockGeo` is this module's;
+      // `userData.shared` marks clones of the authored pack, whose geometry and
+      // materials belong to a prototype every other village is also using — one
+      // hamlet streaming out would otherwise strip the meshes from all of them.
+      if (mesh.geometry === rockGeo || mesh.userData.shared === true) return;
+      mesh.geometry.dispose();
     });
     for (const fire of chunk.fires) fire.dispose();
     registry.removeOwner(chunk.key);
@@ -484,6 +660,14 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
   };
 
   const update = (position: Vector3, elapsed: number): void => {
+    // The pack landed after some cells were already built. Drop them so they come
+    // back with their villages; placement is deterministic, so each cell rebuilds
+    // into exactly what it would have been had the pack been there all along.
+    if (stale) {
+      stale = false;
+      for (const chunk of [...loaded.values()]) dropChunk(chunk);
+    }
+
     // Cells are corner-anchored (see `landmarkSiteFor`), so the containing cell
     // is floor, not round.
     const pcx = Math.floor(position.x / CELL);
@@ -558,6 +742,8 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
   };
 
   const dispose = (): void => {
+    // Stops a late-arriving pack from marking a torn-down streamer stale.
+    torndown = true;
     for (const chunk of [...loaded.values()]) dropChunk(chunk);
     pending.clear();
     rockGeo.dispose();
