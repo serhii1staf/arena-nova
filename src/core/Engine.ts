@@ -256,7 +256,9 @@ export class Engine {
       this.postfx.setSize(this.ctx.width, this.ctx.height);
     }
 
-    // 5) Render through the post-processing composer.
+    // 5) Render through the post-processing composer, matching its mood to the
+    //    scene's own conditions first.
+    this.postfx.setMood(this.scenes.current?.nightFactor ?? 0);
     this.renderer.info.reset();
     this.postfx.render(frameDelta);
 

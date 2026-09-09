@@ -13,7 +13,7 @@ import type { EngineContext, GameScene } from '../core/context.ts';
 import type { AudioManager } from '../core/AudioManager.ts';
 import { PlayerController } from '../player/PlayerController.ts';
 import { Avatar } from '../player/Avatar.ts';
-import { buildExterior, type ExteriorBuild } from '../world/Exterior.ts';
+import { buildExterior, type AtmosphereState, type ExteriorBuild } from '../world/Exterior.ts';
 import { buildDragon, type DragonBuild } from '../world/Dragon.ts';
 import { DayNight } from '../world/DayNight.ts';
 import { RemoteCrowd } from '../net/RemoteCrowd.ts';
@@ -30,6 +30,11 @@ export class ExteriorScene implements GameScene {
   readonly camera: PerspectiveCamera;
   godRaysSource: Mesh | null = null;
 
+  /** Drives the vignette and bloom after sunset. Read by the engine each frame. */
+  get nightFactor(): number {
+    return this.dayNight?.nightFactor ?? 0;
+  }
+
   private world!: ExteriorBuild;
   private dragon!: DragonBuild;
   private player!: PlayerController;
@@ -45,6 +50,12 @@ export class ExteriorScene implements GameScene {
   private crowd!: RemoteCrowd;
   private readonly net = gameSession();
   private readonly publisher = new LocalPublisher();
+  /** Reused each frame; the world only reads it. */
+  private readonly air: AtmosphereState = {
+    nightFactor: 0,
+    mist: 0,
+    air: new Color(0.68, 0.78, 0.76),
+  };
   private time = 0;
   private returning = false;
   /**
@@ -122,6 +133,10 @@ export class ExteriorScene implements GameScene {
 
     this.dayNight = new DayNight();
     this.scene.add(this.dayNight.group);
+    // Crepuscular rays through the treeline. The effect was already configured
+    // and switched on for the high and ultra tiers, but nothing outdoors ever
+    // named a source mesh, so it did nothing here.
+    this.godRaysSource = this.dayNight.sunMesh;
 
     this.player = new PlayerController(this.camera, ctx.input, {
       collide: (p) => this.world.collide(p),
@@ -217,7 +232,12 @@ export class ExteriorScene implements GameScene {
     });
 
     this.crowd.update(frameDelta);
-    this.world.update(this.time, frameDelta, p, this.dayNight.nightFactor);
+    // The fog colour is read back out after `applyTo` wrote it, so mist and motes
+    // take the colour of the air rather than carrying a palette of their own.
+    this.air.nightFactor = this.dayNight.nightFactor;
+    this.air.mist = this.dayNight.mistAmount;
+    this.air.air.copy(this.fog.color);
+    this.world.update(this.time, frameDelta, p, this.air);
     this.dragon.update(this.time, frameDelta);
   }
 

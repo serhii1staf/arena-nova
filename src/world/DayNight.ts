@@ -88,6 +88,30 @@ const FOG_BY_BIOME: Partial<Record<BiomeId, { multiplier: number; tint: Color }>
   snow: { multiplier: 1.9, tint: new Color(0.82, 0.87, 0.92) },
 };
 
+/**
+ * How much mist pools on the ground, per biome, before time of day is applied.
+ *
+ * Kept separate from `FOG_BY_BIOME` because the two answer different questions.
+ * Distance haze is about how much air is between you and a ridge; ground mist is
+ * about whether cold air settles where you are standing. A snowfield reads as
+ * clear at a distance but drifts at your feet, and a jungle is the reverse.
+ */
+const MIST_BY_BIOME: Record<BiomeId, number> = {
+  wetland: 1,
+  pine: 0.82,
+  jungle: 0.66,
+  snow: 0.55,
+  sakura: 0.44,
+  meadow: 0.3,
+  highland: 0.26,
+  beach: 0.16,
+  ocean: 0.12,
+  savanna: 0.1,
+};
+
+/** Shared, so the no-fog branch does not allocate a Color every frame. */
+const WHITE = new Color(1, 1, 1);
+
 function smoothStep(edge0: number, edge1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
   return t * t * (3 - 2 * t);
@@ -167,6 +191,26 @@ export class DayNight {
   nightFactor = 0;
   /** Current star visibility, exposed for diagnostics. */
   starOpacity = 0;
+  /**
+   * 0..1 density for the ground mist where the player is standing.
+   *
+   * Weighted heavily toward night and the golden hour: mist at midday reads as
+   * haze and just looks like a dirty screen, while the same amount at dusk is
+   * most of what makes a wood feel uneasy.
+   */
+  mistAmount = 0;
+
+  /**
+   * The sun disc, offered as a god-rays source.
+   *
+   * The effect was configured and enabled on the high and ultra tiers all along,
+   * but the open world never named a source mesh, so it silently did nothing
+   * outdoors — only the cathedral had rays. The disc already dims to zero opacity
+   * as it sets, so the rays fade themselves without extra bookkeeping.
+   */
+  get sunMesh(): Mesh {
+    return this.sunDisc;
+  }
 
   readonly sunDir = new Vector3(0, 1, 0);
   readonly moonDir = new Vector3(0, -1, 0);
@@ -329,7 +373,13 @@ export class DayNight {
     // Eased, so crossing a treeline is a gradual thickening rather than a step.
     const k = Math.min(1, frameDelta * 0.5);
     this.fogMultiplier += (targetMul - this.fogMultiplier) * k;
-    this.fogTint.lerp(local?.tint ?? new Color(1, 1, 1), k);
+    this.fogTint.lerp(local?.tint ?? WHITE, k);
+
+    // Ground mist: biome first, then time of day. Dawn and dusk get a lift of
+    // their own so the mist is at its thickest exactly when the light is lowest.
+    const targetMist =
+      MIST_BY_BIOME[biome] * (0.18 + this.nightFactor * 0.72 + golden * 0.45);
+    this.mistAmount += (Math.min(1, targetMist) - this.mistAmount) * k;
 
     this.sunDisc.position.copy(playerPos).addScaledVector(this.sunDir, SKY_RADIUS);
     this.moonDisc.position.copy(playerPos).addScaledVector(this.moonDir, SKY_RADIUS);

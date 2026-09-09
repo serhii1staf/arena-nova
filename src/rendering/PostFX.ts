@@ -31,6 +31,10 @@ export class PostFX {
   private readonly renderer: WebGLRenderer;
   private width = 1;
   private height = 1;
+  /** Held so the mood can be nudged per frame without rebuilding the stack. */
+  private bloom: BloomEffect | null = null;
+  private vignette: VignetteEffect | null = null;
+  private bloomBase = 0;
 
   constructor(renderer: WebGLRenderer) {
     this.renderer = renderer;
@@ -73,6 +77,9 @@ export class PostFX {
     const vignette = new VignetteEffect({ offset: 0.34, darkness: 0.62 });
 
     this.composer.addPass(new EffectPass(scene.camera, bloom, toneMapping, vignette));
+    this.bloom = bloom;
+    this.vignette = vignette;
+    this.bloomBase = q.bloom ? 0.95 : 0;
 
     if (q.smaa) {
       const smaa = new SMAAEffect({ preset: SMAAPreset.HIGH });
@@ -90,11 +97,37 @@ export class PostFX {
     this.composer.setSize(this.width, this.height);
   }
 
+  /**
+   * Darkens the frame and lifts the glow after sunset.
+   *
+   * Both are writes to effects already in the stack, so this is safe to call every
+   * frame — unlike `build`, which reallocates every render target and must never
+   * be used for something that changes continuously.
+   *
+   * `night` is 0..1. Closing the vignette in is what makes the dark feel like it
+   * is pressing on the edges of the view rather than the scene simply being dim.
+   */
+  setMood(night: number): void {
+    const n = Math.min(1, Math.max(0, night));
+    if (this.vignette) {
+      this.vignette.darkness = 0.62 + n * 0.3;
+      this.vignette.offset = 0.34 - n * 0.09;
+    }
+    if (this.bloom && this.bloomBase > 0) {
+      // A little more bloom after dark, and a lower threshold so the moon, the
+      // fireflies and the portal are what carries it.
+      this.bloom.intensity = this.bloomBase * (1 + n * 0.35);
+      this.bloom.luminanceMaterial.threshold = 0.72 - n * 0.22;
+    }
+  }
+
   render(deltaTime: number): void {
     this.composer.render(deltaTime);
   }
 
   dispose(): void {
+    this.bloom = null;
+    this.vignette = null;
     this.composer.dispose();
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "arena-nova",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Optimized 3D game — overgrown gothic cathedral lobby. Runs in the browser and as a native desktop app (Tauri). Multiplayer-ready.",
   "type": "module",
   "license": "MIT",
@@ -17,6 +17,7 @@
     "skins": "node scripts/debug-skins.mjs",
     "locomotion": "node scripts/debug-locomotion.mjs",
     "facing": "node scripts/debug-facing.mjs",
+    "atmosphere": "node scripts/debug-atmosphere.mjs",
     "deploy": "npm run build && wrangler deploy",
     "server:dev": "wrangler dev",
     "tauri": "tauri",

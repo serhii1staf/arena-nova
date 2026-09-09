@@ -22,6 +22,8 @@ import { createTerrain, type TerrainStreamer } from './Terrain.ts';
 import { Wind } from './Wind.ts';
 import { createWindParticles, type WindParticleField } from './WindParticles.ts';
 import { createFireflies, type FireflyField } from './Fireflies.ts';
+import { createGroundMist, type GroundMistField } from './GroundMist.ts';
+import { createPetals, type PetalField } from './Petals.ts';
 import { createWildlife, type WildlifeField } from './Wildlife.ts';
 import {
   resetSurfaceCache,
@@ -53,10 +55,10 @@ export interface ExteriorBuild {
    */
   skyMaterial: MeshBasicMaterial;
   /**
-   * Streams terrain/props around the player and advances wind, fires and the
-   * night-time swarm. `nightFactor` is 0 in daylight and 1 at full dark.
+   * Streams terrain/props around the player and advances wind, fires, the
+   * night-time swarm and the weather.
    */
-  update(elapsed: number, dt: number, playerPos: Vector3, nightFactor: number): void;
+  update(elapsed: number, dt: number, playerPos: Vector3, air: AtmosphereState): void;
   /** Builds the immediate surroundings before gameplay starts. */
   prime(): void;
   dispose(): void;
@@ -64,6 +66,22 @@ export interface ExteriorBuild {
   isAtPortal(x: number, y: number, z: number): boolean;
   /** Diagnostics for the HUD. */
   stats(): { chunks: number; pending: number; biome: string; animals: number };
+}
+
+/**
+ * What the sky is currently doing, handed to the world each frame.
+ *
+ * Grouped into one object rather than added as more positional parameters: the
+ * atmosphere is going to keep growing, and every addition would otherwise touch
+ * the interface, the implementation and every call site.
+ */
+export interface AtmosphereState {
+  /** 0 in daylight, 1 at full dark. */
+  nightFactor: number;
+  /** 0..1 ground-mist density for where the player is standing. */
+  mist: number;
+  /** Colour of the air, so mist and motes match the fog instead of fighting it. */
+  air: Color;
 }
 
 /** Re-exported so scenes can size fog and the camera to the world. */
@@ -134,6 +152,24 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     60,
   );
   group.add(fireflies.points);
+
+  // ---- Ground mist ------------------------------------------------------
+  // Fewer, larger patches than the other fields: these are metres across, so a
+  // high count buys overdraw rather than detail. Held to a modest ceiling even on
+  // ultra for that reason.
+  const mist: GroundMistField = createGroundMist(
+    Math.max(40, Math.min(190, Math.floor(settings.particleCount * 0.075))),
+    72,
+  );
+  group.add(mist.points);
+
+  // ---- Sakura petals (grove only) ---------------------------------------
+  const petals: PetalField = createPetals(
+    Math.max(80, Math.floor(settings.particleCount * 0.35)),
+    60,
+    wind,
+  );
+  group.add(petals.points);
 
   // ---- Wildlife ----------------------------------------------------------
   // Scaled by the quality tier, but never below a handful — an empty forest is
@@ -267,7 +303,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     elapsed: number,
     dt: number,
     playerPos: Vector3,
-    nightFactor: number,
+    air: AtmosphereState,
   ): void => {
     wind.update(dt, elapsed);
 
@@ -276,7 +312,9 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     ocean.position.set(playerPos.x, WORLD.waterLevel, playerPos.z);
     sky.position.set(playerPos.x, 0, playerPos.z);
     particles.update(playerPos);
-    fireflies.update(playerPos, elapsed, nightFactor);
+    fireflies.update(playerPos, elapsed, air.nightFactor);
+    mist.update(playerPos, elapsed, air.mist, air.air);
+    petals.update(playerPos, elapsed, surfaceBiomeAt(playerPos.x, playerPos.z));
     wildlife.update(dt, playerPos);
 
     terrain.update(playerPos);
@@ -308,6 +346,8 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     portal.dispose();
     particles.dispose();
     fireflies.dispose();
+    mist.dispose();
+    petals.dispose();
     wildlife.dispose();
     landmarks.dispose();
     scatter.dispose();

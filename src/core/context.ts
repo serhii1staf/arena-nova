@@ -33,6 +33,16 @@ export interface GameScene {
    */
   readonly godRaysSource: Mesh | null;
 
+  /**
+   * How dark it is in this scene, 0..1. Read once per frame so post-processing can
+   * close the vignette in and lift the glow after sunset. Scenes with no day cycle
+   * leave it undefined and are treated as daylight.
+   *
+   * Declared here rather than handing scenes a reference to the post stack: a
+   * scene should describe its own conditions, not reach into the renderer.
+   */
+  readonly nightFactor?: number;
+
   init(ctx: EngineContext): void | Promise<void>;
   /** Fixed-step logic update. `dt` is constant (GameConfig.fixedStep). */
   update(dt: number, elapsed: number): void;
