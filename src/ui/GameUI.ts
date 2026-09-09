@@ -1,6 +1,6 @@
 import type { Engine } from '../core/Engine.ts';
 import type { QualityTier } from '../core/QualityManager.ts';
-import { SettingsStore } from './Settings.ts';
+import { SettingsStore, type FpsMode } from './Settings.ts';
 import {
   checkForUpdate,
   installUpdate,
@@ -27,6 +27,7 @@ export class GameUI {
   private paused = false;
   private started = false;
   private lastEscapeAt = 0;
+  private hintTimer: number | null = null;
 
   constructor(engine: Engine) {
     this.engine = engine;
@@ -95,6 +96,22 @@ export class GameUI {
     this.engine.audio.unlock();
     // Give the fade a moment, then capture the mouse.
     window.setTimeout(() => this.engine.input.requestPointerLock(), 320);
+    this.scheduleHintFade();
+  }
+
+  /**
+   * The control hint is only useful for the first few seconds; leaving it on
+   * screen permanently just clutters the view. It fades out on its own and comes
+   * back briefly whenever the player returns from the menu.
+   */
+  private scheduleHintFade(): void {
+    const hint = $('hint');
+    if (!hint) return;
+    if (this.hintTimer !== null) window.clearTimeout(this.hintTimer);
+    hint.style.opacity = '1';
+    this.hintTimer = window.setTimeout(() => {
+      if (!this.paused) hint.style.opacity = '0';
+    }, 9000);
   }
 
   get hasStarted(): boolean {
@@ -152,6 +169,7 @@ export class GameUI {
     } else {
       $('settings')?.classList.remove('open');
       this.engine.input.requestPointerLock();
+      this.scheduleHintFade();
     }
   }
 
@@ -174,6 +192,19 @@ export class GameUI {
     if (lang) {
       lang.value = getLang();
       lang.addEventListener('change', () => setLang(lang.value as Lang));
+    }
+
+    const fps = $<HTMLSelectElement>('setFps');
+    const fpsNote = $('fpsNote');
+    if (fps) {
+      fps.value = v.fpsMode;
+      fps.addEventListener('change', () => {
+        const needsRestart = this.settings.setFpsMode(fps.value as FpsMode);
+        if (fpsNote) {
+          fpsNote.textContent = needsRestart ? t('fps.restart') : '';
+          fpsNote.classList.toggle('on', needsRestart);
+        }
+      });
     }
 
     const quality = $<HTMLSelectElement>('setQuality');

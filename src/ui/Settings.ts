@@ -1,5 +1,13 @@
 import type { Engine } from '../core/Engine.ts';
 import type { QualityTier } from '../core/QualityManager.ts';
+import { setNativeFpsMode } from './native.ts';
+
+/**
+ * Frame pacing. `vsync` follows the display (smoothest); a number caps the
+ * engine's own loop; `unlimited` removes the vsync ceiling entirely and needs a
+ * restart, because it depends on browser-engine flags set at process start.
+ */
+export type FpsMode = 'vsync' | '60' | '120' | '144' | '240' | 'unlimited';
 
 export interface GameSettings {
   quality: QualityTier;
@@ -7,6 +15,7 @@ export interface GameSettings {
   sfx: number; // 0..1
   sensitivity: number; // multiplier, 1 = default
   fov: number; // degrees
+  fpsMode: FpsMode;
 }
 
 const STORAGE_KEY = 'arena-nova.settings.v1';
@@ -17,6 +26,9 @@ const DEFAULTS: GameSettings = {
   sfx: 0.8,
   sensitivity: 1,
   fov: 68,
+  // Follow the display by default: it is by far the smoothest option, and
+  // rendering frames the monitor can't show only adds latency and heat.
+  fpsMode: 'vsync',
 };
 
 /**
@@ -62,7 +74,29 @@ export class SettingsStore {
     this.setMusic(this.values.music);
     this.setSfx(this.values.sfx);
     this.setSensitivity(this.values.sensitivity);
+    this.applyFpsMode();
     this.applyFov();
+  }
+
+  /**
+   * Applies the frame-pacing choice. Numeric modes take effect immediately via
+   * the engine's own limiter; `unlimited` only takes effect after a restart.
+   * Returns true when a restart is needed.
+   */
+  setFpsMode(mode: FpsMode): boolean {
+    this.values.fpsMode = mode;
+    this.save();
+    this.applyFpsMode();
+    void setNativeFpsMode(mode === 'unlimited' ? 'unlimited' : 'vsync');
+    return mode === 'unlimited';
+  }
+
+  private applyFpsMode(): void {
+    const mode = this.values.fpsMode;
+    // 'vsync' and 'unlimited' both leave the engine loop unthrottled; the
+    // difference lives in the browser-engine flags chosen at startup.
+    const limit = mode === 'vsync' || mode === 'unlimited' ? 0 : Number(mode);
+    this.engine.setFpsLimit(limit);
   }
 
   setQuality(tier: QualityTier): void {

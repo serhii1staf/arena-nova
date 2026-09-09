@@ -336,6 +336,15 @@
         font: inherit;
         font-size: 13px;
       }
+      .note {
+        display: none;
+        font-size: 12px;
+        color: #9df0b4;
+        margin: -6px 0 0 144px;
+      }
+      .note.on {
+        display: block;
+      }
       .field .val {
         text-align: right;
         font-variant-numeric: tabular-nums;
@@ -440,6 +449,18 @@
               <option value="ru">Русский</option>
             </select>
           </div>
+          <div class="field">
+            <label for="setFps" data-i18n="set.fps">Frame rate</label>
+            <select id="setFps">
+              <option value="vsync" data-i18n="fps.vsync">Match display (smoothest)</option>
+              <option value="60">60 FPS</option>
+              <option value="120">120 FPS</option>
+              <option value="144">144 FPS</option>
+              <option value="240">240 FPS</option>
+              <option value="unlimited" data-i18n="fps.unlimited">Unlimited (may tear)</option>
+            </select>
+          </div>
+          <div id="fpsNote" class="note"></div>
           <div class="field">
             <label for="setQuality" data-i18n="set.quality">Quality</label>
             <select id="setQuality">

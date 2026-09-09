@@ -29,6 +29,10 @@ const STRINGS = {
     'pause.fullscreen': 'Fullscreen',
 
     'set.language': 'Language',
+    'set.fps': 'Frame rate',
+    'fps.vsync': 'Match display (smoothest)',
+    'fps.unlimited': 'Unlimited (may tear)',
+    'fps.restart': 'Restart the game to apply',
     'set.quality': 'Quality',
     'set.music': 'Music',
     'set.sfx': 'Effects',
@@ -79,6 +83,10 @@ const STRINGS = {
     'pause.fullscreen': 'Во весь экран',
 
     'set.language': 'Язык',
+    'set.fps': 'Частота кадров',
+    'fps.vsync': 'По монитору (плавнее всего)',
+    'fps.unlimited': 'Без ограничения (возможны разрывы)',
+    'fps.restart': 'Перезапустите игру, чтобы применить',
     'set.quality': 'Качество',
     'set.music': 'Музыка',
     'set.sfx': 'Эффекты',

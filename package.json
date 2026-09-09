@@ -1,6 +1,6 @@
 {
   "name": "arena-nova",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Optimized 3D game — overgrown gothic cathedral lobby. Runs in the browser and as a native desktop app (Tauri). Multiplayer-ready.",
   "type": "module",
   "license": "MIT",

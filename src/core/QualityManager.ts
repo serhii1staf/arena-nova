@@ -80,6 +80,11 @@ const PRESETS: Record<QualityTier, QualitySettings> = {
 
 type ChangeListener = (settings: QualitySettings, tier: QualityTier) => void;
 
+/** Dynamic resolution moves in fixed steps so it can't thrash the render targets. */
+const RESOLUTION_STEP = 0.1;
+/** Minimum seconds between two resolution changes. */
+const RESIZE_COOLDOWN = 1.5;
+
 export class QualityManager {
   tier: QualityTier;
   settings: QualitySettings;
@@ -93,6 +98,7 @@ export class QualityManager {
   // Rolling FPS estimate.
   private fpsEMA = 60;
   private adaptCooldown = 0;
+  private resizeCooldown = 0;
 
   constructor(tier?: QualityTier) {
     this.tier = tier ?? QualityManager.detectTier();
@@ -168,32 +174,59 @@ export class QualityManager {
   }
 
   /**
-   * Feed the measured frame delta. Returns true when the effective resolution
-   * changed enough that the caller should resize the renderer/composer.
+   * Target frame rate used to judge whether we have headroom. Defaults to a
+   * 60 Hz budget and is updated once the real display rate is measured, so the
+   * thresholds stay meaningful on 144 Hz and 240 Hz screens.
+   */
+  private targetFps = 60;
+
+  setTargetFps(fps: number): void {
+    this.targetFps = Math.max(30, Math.min(1000, fps));
+  }
+
+  /** Resolution scale rounded to a discrete step (see `sampleFrame`). */
+  private quantise(v: number): number {
+    return Math.round(v / RESOLUTION_STEP) * RESOLUTION_STEP;
+  }
+
+  /**
+   * Feed the measured frame delta. Returns true only when the renderer actually
+   * needs resizing.
+   *
+   * Resizing is *expensive*: it reallocates the whole post-processing chain
+   * (HDR buffers, bloom mip pyramid, SMAA textures). Reporting a change on every
+   * frame of a smooth ease therefore caused constant reallocation and visible
+   * stutter — the higher the frame rate, the worse it got. So the scale is
+   * quantised to discrete steps and guarded by a cooldown: at most one resize
+   * per `RESIZE_COOLDOWN`, and only when the step genuinely changes.
    */
   sampleFrame(dt: number): boolean {
     if (dt <= 0) return false;
     const instFps = 1 / dt;
-    // Exponential moving average smooths out spikes.
     this.fpsEMA += (instFps - this.fpsEMA) * 0.05;
 
+    this.resizeCooldown -= dt;
     this.adaptCooldown -= dt;
+
     if (this.adaptCooldown <= 0) {
-      this.adaptCooldown = 0.5;
-      if (this.fpsEMA < 45) {
-        this.targetResolutionScale = Math.max(0.55, this.targetResolutionScale - 0.1);
-      } else if (this.fpsEMA > 58 && this.targetResolutionScale < 1) {
-        this.targetResolutionScale = Math.min(1, this.targetResolutionScale + 0.05);
+      this.adaptCooldown = 0.75;
+      // Judge against the actual target, not a hardcoded 60.
+      const low = this.targetFps * 0.72;
+      const high = this.targetFps * 0.92;
+      if (this.fpsEMA < low) {
+        this.targetResolutionScale = Math.max(0.55, this.targetResolutionScale - RESOLUTION_STEP);
+      } else if (this.fpsEMA > high && this.targetResolutionScale < 1) {
+        this.targetResolutionScale = Math.min(1, this.targetResolutionScale + RESOLUTION_STEP);
       }
     }
 
-    // Ease toward the target to avoid visible resolution "pops".
-    const prev = this.resolutionScale;
-    this.resolutionScale += (this.targetResolutionScale - this.resolutionScale) * 0.1;
-    if (Math.abs(this.resolutionScale - this.targetResolutionScale) < 0.005) {
-      this.resolutionScale = this.targetResolutionScale;
-    }
-    return Math.abs(this.resolutionScale - prev) > 0.01;
+    const wanted = this.quantise(this.targetResolutionScale);
+    if (wanted === this.quantise(this.resolutionScale)) return false;
+    if (this.resizeCooldown > 0) return false;
+
+    this.resolutionScale = wanted;
+    this.resizeCooldown = RESIZE_COOLDOWN;
+    return true;
   }
 
   get fps(): number {

@@ -57,6 +57,9 @@ export class CharacterModel {
   // ---- Cloak cloth simulation ----
   private static readonly CLOAK_COLS = 15;
   private static readonly CLOAK_ROWS = 11;
+  /** Cloth is simulated at a fixed 60 Hz regardless of render frame rate. */
+  private static readonly CLOTH_STEP = 1 / 60;
+  private clothAccumulator = 0;
   private cloakRest = new Float32Array(0);
   private cloakCurrent = new Float32Array(0);
   private cloakPrev = new Float32Array(0);
@@ -467,8 +470,23 @@ export class CharacterModel {
 
     // Cloth runs last, once this frame's arm pose is known, so the mantle reacts
     // to the limbs moving underneath it rather than lagging a frame behind.
-    this.updateLimbColliders();
-    this.simulateCloak(CharacterModel.scratchWind, turnRate, dt, this.idleTime);
+    //
+    // It is stepped at a fixed rate rather than once per rendered frame: the pass
+    // rebuilds vertex normals and re-uploads the buffer, so at a few hundred FPS
+    // it would burn CPU for motion nobody can see — and the simulation would
+    // behave differently depending on frame rate.
+    this.clothAccumulator += dt;
+    const step = CharacterModel.CLOTH_STEP;
+    let steps = 0;
+    while (this.clothAccumulator >= step && steps < 2) {
+      this.updateLimbColliders();
+      this.simulateCloak(CharacterModel.scratchWind, turnRate, step, this.idleTime);
+      this.clothAccumulator -= step;
+      steps++;
+    }
+    // If we fell far behind (tab was hidden), drop the backlog instead of
+    // catching up with a burst of expensive steps.
+    if (this.clothAccumulator > step * 4) this.clothAccumulator = 0;
   }
 
   dispose(): void {

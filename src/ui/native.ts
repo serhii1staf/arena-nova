@@ -153,6 +153,25 @@ export function invalidateWindowCentre(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Frame pacing
+// ---------------------------------------------------------------------------
+
+/**
+ * Stores the frame-pacing choice for the *next* launch. Uncapping needs Chromium
+ * flags that can only be set before the webview starts, so this can't take effect
+ * immediately — the caller should tell the player a restart is required.
+ */
+export async function setNativeFpsMode(mode: 'vsync' | 'unlimited'): Promise<void> {
+  if (!isNative()) return;
+  try {
+    const core = await import('@tauri-apps/api/core');
+    await core.invoke('set_fps_mode', { mode });
+  } catch {
+    /* command unavailable — the in-engine limiter still applies */
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Fullscreen
 // ---------------------------------------------------------------------------
 

@@ -145,9 +145,51 @@ export class Engine {
     this.rafId = requestAnimationFrame(this.tick);
   }
 
+  /**
+   * Optional frame-rate ceiling in milliseconds per frame (0 = no limit).
+   * Useful to stop the GPU rendering frames the display can never show, which
+   * only wastes power and adds input latency.
+   */
+  private targetFrameMs = 0;
+  private lastRenderAt = 0;
+
+  /** `fps` of 0 means "no in-engine limit" (display vsync still applies). */
+  setFpsLimit(fps: number): void {
+    this.targetFrameMs = fps > 0 ? 1000 / fps : 0;
+    this.quality.setTargetFps(fps > 0 ? fps : this.displayHz);
+  }
+
+  /** Measured refresh rate of the display, used for quality thresholds. */
+  private displayHz = 60;
+  private hzSamples: number[] = [];
+
+  private measureDisplayHz(frameDelta: number): void {
+    if (this.hzSamples.length >= 90 || frameDelta <= 0) return;
+    this.hzSamples.push(1 / frameDelta);
+    if (this.hzSamples.length === 90) {
+      // Median is robust against startup hitches.
+      const sorted = [...this.hzSamples].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)] ?? 60;
+      // Snap to the nearest common refresh rate.
+      const common = [60, 75, 90, 100, 120, 144, 165, 240, 360];
+      this.displayHz =
+        common.reduce((best, hz) => (Math.abs(hz - median) < Math.abs(best - median) ? hz : best), 60);
+      if (this.targetFrameMs === 0) this.quality.setTargetFps(this.displayHz);
+    }
+  }
+
   private readonly tick = (now: number): void => {
     if (!this.running) return;
     this.rafId = requestAnimationFrame(this.tick);
+
+    // Frame limiter: bail out early without touching the clock, so the skipped
+    // time is still accounted for on the next rendered frame.
+    //
+    // The slack matters: when the chosen cap equals the display refresh rate,
+    // a strict comparison would occasionally reject a frame that arrived a
+    // fraction early and cause a visible hitch, so allow a small margin.
+    if (this.targetFrameMs > 0 && now - this.lastRenderAt < this.targetFrameMs - 1.5) return;
+    this.lastRenderAt = now;
 
     // Apply a requested scene switch once the fade-out has covered the screen.
     if (this.switching) return;
@@ -182,6 +224,7 @@ export class Engine {
 
     let frameDelta = (now - this.lastTime) / 1000;
     this.lastTime = now;
+    this.measureDisplayHz(frameDelta);
     if (frameDelta > GameConfig.maxFrameDelta) frameDelta = GameConfig.maxFrameDelta;
 
     const scene = this.scenes.current;
@@ -228,17 +271,26 @@ export class Engine {
     this.postfx.render(0);
   }
 
+  /** Worst frame time seen since the last stats refresh (spike detector). */
+  private worstFrameMs = 0;
+
   private updateStats(frameDelta: number): void {
     if (!this.onStats) return;
+    this.worstFrameMs = Math.max(this.worstFrameMs, frameDelta * 1000);
     this.statsTimer += frameDelta;
     if (this.statsTimer < 0.5) return;
     this.statsTimer = 0;
     const info = this.renderer.info;
     const scale = Math.round(this.quality.currentResolutionScale * 100);
+    // Average frame time hides stutter; the worst frame in the window exposes it,
+    // which is what actually makes a high-FPS game feel bad.
+    const avgMs = 1000 / Math.max(1, this.quality.fps);
     this.onStats(
-      `${Math.round(this.quality.fps)} fps · ${this.quality.tier} · res ${scale}%\n` +
+      `${Math.round(this.quality.fps)} fps · ${avgMs.toFixed(1)} ms (peak ${this.worstFrameMs.toFixed(1)})\n` +
+        `${this.quality.tier} · res ${scale}% · ${this.displayHz}Hz\n` +
         `draws ${info.render.calls} · tris ${(info.render.triangles / 1000).toFixed(0)}k`,
     );
+    this.worstFrameMs = 0;
   }
 
   private resize(): void {
