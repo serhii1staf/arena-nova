@@ -11,15 +11,25 @@ import {
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
+  type Object3D,
   PointLight,
   Points,
   ShaderMaterial,
   Vector3,
 } from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import type { AssetManager } from '../core/AssetManager.ts';
+import { applyTriplanarUV } from './builders/geometry.ts';
 import { buildRock } from './Flora.ts';
 import type { PropRegistry } from './PropRegistry.ts';
-import { biomeAt, cellRandom, elevationAt, slopeAt, WORLD } from './WorldGen.ts';
+import {
+  cellRandom,
+  LANDMARK_CELL,
+  landmarkSiteFor,
+  surfaceBiomeAt,
+  surfaceHeightAt,
+  surfaceSlopeAt,
+} from './WorldGen.ts';
 
 /**
  * Landmarks
@@ -30,8 +40,12 @@ import { biomeAt, cellRandom, elevationAt, slopeAt, WORLD } from './WorldGen.ts'
  * stream in and out with the player like everything else.
  */
 
-/** Side of the placement cell in metres — roughly one landmark per this area. */
-const CELL = 420;
+/**
+ * Placement grid. Owned by WorldGen, because the terrain has to level a pad for
+ * each site — the two must agree or the props stop matching their ground.
+ */
+const CELL = LANDMARK_CELL;
+/** How many cells out landmarks stream. */
 const VIEW_CELLS = 2;
 
 type LandmarkKind = 'campfire' | 'camp' | 'ruin' | 'stones';
@@ -45,18 +59,37 @@ interface LandmarkChunk {
 }
 
 interface FireEffect {
-  light: PointLight;
-  uniforms: { uTime: { value: number } };
-  baseIntensity: number;
+  /** The flame's own node, used once to resolve its world position. */
+  object: Object3D;
+  /** World position of the flame, used to hand out lights from the pool. */
+  x: number;
+  y: number;
+  z: number;
   seed: number;
   /** Releases the ember particle buffers, which are unique per fire. */
   dispose(): void;
 }
 
+/**
+ * How many campfires can be lit at once.
+ *
+ * This is a hard pool rather than one light per fire, and that is a performance
+ * decision, not an aesthetic one: three.js bakes the light count into every
+ * shader program it compiles. Adding or removing a PointLight therefore
+ * invalidates and recompiles *every* material in the scene — which is what made
+ * the frame rate collapse the moment a landmark cell streamed in. With a fixed
+ * pool the count never changes after the first frame.
+ */
+const FIRE_LIGHT_POOL = 4;
+/** Beyond this a campfire's light reaches nothing, so it needn't hold a slot. */
+const LIGHT_ASSIGN_RANGE = 40;
+const FIRE_INTENSITY = 9;
+
 export interface LandmarkStreamer {
   group: Group;
   update(position: Vector3, elapsed: number): void;
-  pump(): number;
+  /** Build pending cells until `deadline` (a `performance.now()` stamp). */
+  pump(deadline: number): number;
   prime(position: Vector3, cells: number): void;
   dispose(): void;
 }
@@ -96,7 +129,12 @@ const FIRE_FRAG = /* glsl */ `
 `;
 
 /** Builds the ember particle system for one fire. */
-function buildEmbers(): { points: Points; uniforms: { uTime: { value: number } }; dispose(): void } {
+/**
+ * Ember particles for one fire. The material is passed in and shared across
+ * every fire in the world — a `ShaderMaterial` per campfire meant a fresh shader
+ * program compile for each landmark that streamed in.
+ */
+function buildEmbers(material: ShaderMaterial): { points: Points; dispose(): void } {
   const count = 40;
   const positions = new Float32Array(count * 3);
   const seeds = new Float32Array(count);
@@ -113,25 +151,9 @@ function buildEmbers(): { points: Points; uniforms: { uTime: { value: number } }
   geo.setAttribute('aSeed', new BufferAttribute(seeds, 1));
   geo.setAttribute('aScale', new BufferAttribute(scales, 1));
 
-  const uniforms = { uTime: { value: 0 } };
-  const mat = new ShaderMaterial({
-    uniforms,
-    vertexShader: FIRE_VERT,
-    fragmentShader: FIRE_FRAG,
-    transparent: true,
-    depthWrite: false,
-    blending: AdditiveBlending,
-  });
-  const points = new Points(geo, mat);
+  const points = new Points(geo, material);
   points.frustumCulled = false;
-  return {
-    points,
-    uniforms,
-    dispose: () => {
-      geo.dispose();
-      mat.dispose();
-    },
-  };
+  return { points, dispose: () => geo.dispose() };
 }
 
 interface Materials {
@@ -139,6 +161,7 @@ interface Materials {
   stone: MeshStandardMaterial;
   cloth: MeshStandardMaterial;
   flame: MeshBasicMaterial;
+  embers: ShaderMaterial;
 }
 
 /** A ring of stones with crossed logs and a flame billboard. */
@@ -153,8 +176,7 @@ function buildCampfire(mats: Materials): { group: Group; fire: FireEffect } {
     stone.translate(Math.cos(a) * 0.72, 0.1, Math.sin(a) * 0.72);
     ringParts.push(stone);
   }
-  const ring = mergeGeometries(ringParts, false);
-  for (const p of ringParts) p.dispose();
+  const ring = mergeStone(ringParts);
   if (ring) root.add(new Mesh(ring, mats.stone));
 
   // Crossed logs.
@@ -180,22 +202,14 @@ function buildCampfire(mats: Materials): { group: Group; fire: FireEffect } {
     root.add(flame);
   }
 
-  const embers = buildEmbers();
+  const embers = buildEmbers(mats.embers);
   root.add(embers.points);
 
-  const light = new PointLight(new Color(1.0, 0.62, 0.28), 9, 26, 2);
-  light.position.set(0, 1.1, 0);
-  root.add(light);
-
+  // No light here — lights come from the shared pool once the world position of
+  // this fire is known (see `assignFireLights`).
   return {
     group: root,
-    fire: {
-      light,
-      uniforms: embers.uniforms,
-      baseIntensity: 9,
-      seed: Math.random() * 10,
-      dispose: embers.dispose,
-    },
+    fire: { object: root, x: 0, y: 0, z: 0, seed: Math.random() * 10, dispose: embers.dispose },
   };
 }
 
@@ -216,6 +230,22 @@ function buildTent(mats: Materials): Group {
   pole.translate(0, 1.32, 0);
   root.add(new Mesh(pole, mats.wood));
   return root;
+}
+
+/**
+ * Merges stone parts and gives them world-projected UVs. Each primitive brings
+ * its own 0..1 UVs, so a merged ruin would show the stone texture at a different
+ * scale on every column. Triplanar projection puts it at one real-world scale
+ * across the whole structure.
+ */
+function mergeStone(parts: BufferGeometry[]): BufferGeometry | null {
+  const merged = mergeGeometries(
+    parts.map((p) => (p.index ? p.toNonIndexed() : p)),
+    false,
+  );
+  for (const p of parts) p.dispose();
+  if (!merged) return null;
+  return applyTriplanarUV(merged, 0.4);
 }
 
 /** Broken colonnade: standing stumps, toppled drums and rubble. */
@@ -246,8 +276,7 @@ function buildRuin(mats: Materials, rand: (n: number) => number): Group {
   lintel.translate(0, 5.2, 0);
   parts.push(lintel);
 
-  const merged = mergeGeometries(parts, false);
-  for (const p of parts) p.dispose();
+  const merged = mergeStone(parts);
   if (merged) {
     const mesh = new Mesh(merged, mats.stone);
     mesh.castShadow = true;
@@ -270,8 +299,7 @@ function buildStoneCircle(mats: Materials, rand: (n: number) => number): Group {
     stone.translate(Math.cos(a) * rad, h / 2, Math.sin(a) * rad);
     parts.push(stone);
   }
-  const merged = mergeGeometries(parts, false);
-  for (const p of parts) p.dispose();
+  const merged = mergeStone(parts);
   if (merged) {
     const mesh = new Mesh(merged, mats.stone);
     mesh.castShadow = true;
@@ -281,13 +309,28 @@ function buildStoneCircle(mats: Materials, rand: (n: number) => number): Group {
   return root;
 }
 
-export function createLandmarks(registry: PropRegistry): LandmarkStreamer {
+export function createLandmarks(assets: AssetManager, registry: PropRegistry): LandmarkStreamer {
   const group = new Group();
   group.name = 'Landmarks';
 
+  const stoneTex = assets.stone(1);
   const mats: Materials = {
-    wood: new MeshStandardMaterial({ color: new Color(0.3, 0.22, 0.15), roughness: 0.95, flatShading: true }),
-    stone: new MeshStandardMaterial({ color: new Color(0.52, 0.52, 0.5), roughness: 1, flatShading: true }),
+    wood: new MeshStandardMaterial({
+      color: new Color(0.3, 0.22, 0.15),
+      normalMap: stoneTex.normalMap,
+      roughnessMap: stoneTex.roughnessMap,
+      roughness: 0.95,
+    }),
+    // Textured, and darker than before. Ruins used to be an untextured 0.52 grey,
+    // which under the outdoor lighting rig came out as flat white slabs.
+    stone: new MeshStandardMaterial({
+      color: new Color(0.46, 0.46, 0.44),
+      map: stoneTex.map,
+      normalMap: stoneTex.normalMap,
+      roughnessMap: stoneTex.roughnessMap,
+      roughness: 1,
+      vertexColors: false,
+    }),
     cloth: new MeshStandardMaterial({
       color: new Color(0.55, 0.48, 0.36),
       roughness: 0.9,
@@ -303,12 +346,36 @@ export function createLandmarks(registry: PropRegistry): LandmarkStreamer {
       side: DoubleSide,
       toneMapped: false,
     }),
+    // One ember program for the whole world; `uTime` is global elapsed time, so
+    // every fire can share it and still flicker independently (the per-particle
+    // seed does that inside the shader).
+    embers: new ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: FIRE_VERT,
+      fragmentShader: FIRE_FRAG,
+      transparent: true,
+      depthWrite: false,
+      blending: AdditiveBlending,
+    }),
   };
   const rockGeo = buildRock(77, 1);
+
+  // Fixed pool of fire lights, added once so the scene's light count is stable
+  // from the first frame onwards and no material is ever recompiled mid-play.
+  const fireLights: PointLight[] = [];
+  for (let i = 0; i < FIRE_LIGHT_POOL; i++) {
+    const light = new PointLight(new Color(1.0, 0.62, 0.28), 0, 26, 2);
+    light.visible = true;
+    group.add(light);
+    fireLights.push(light);
+  }
 
   const loaded = new Map<string, LandmarkChunk>();
   const pending = new Map<string, { cx: number; cz: number; dist: number }>();
   const key = (cx: number, cz: number): string => `${cx}|${cz}`;
+  const scratch = new Vector3();
+  /** Reused each frame so light assignment allocates nothing. */
+  const nearestFires: Array<{ fire: FireEffect; d2: number }> = [];
 
   const buildChunk = (cx: number, cz: number): void => {
     const k = key(cx, cz);
@@ -317,21 +384,20 @@ export function createLandmarks(registry: PropRegistry): LandmarkStreamer {
     const rand = (n: number): number => cellRandom(cx * 31 + n, cz * 17 - n, 555);
     const chunk: LandmarkChunk = { key: k, cx, cz, root: new Group(), fires: [] };
 
-    // One candidate per cell, jittered inside it; some cells stay empty.
-    const x = (cx + 0.15 + rand(1) * 0.7) * CELL;
-    const z = (cz + 0.15 + rand(2) * 0.7) * CELL;
-
     const place = (): void => {
-      if (Math.abs(x) > WORLD.halfSize - 80 || Math.abs(z) > WORLD.halfSize - 80) return;
-      if (Math.hypot(x, z) < WORLD.plazaRadius * 2) return; // keep spawn clear
-      const h = elevationAt(x, z);
-      if (h < WORLD.waterLevel + 1.5) return; // not in the sea
-      if (slopeAt(x, z, 6) > 0.35) return; // needs reasonably flat ground
+      // Where a landmark goes — and whether the cell has one at all — is decided
+      // in WorldGen, because the terrain has to level a pad there. Duplicating
+      // the test here is how the props and their ground used to drift apart.
+      const site = landmarkSiteFor(cx, cz);
+      if (!site) return;
+      const { x, z } = site;
+      // Read the drawn surface rather than the analytic field: on the levelled
+      // pad they agree exactly, so nothing hovers at any view distance.
+      const h = surfaceHeightAt(x, z);
+      if (surfaceSlopeAt(x, z) > 0.35) return;
 
       const roll = rand(3);
-      if (roll < 0.3) return; // empty cell — landmarks should feel rare
-
-      const biome = biomeAt(x, z, h);
+      const biome = surfaceBiomeAt(x, z);
       let kind: LandmarkKind;
       if (roll < 0.52) kind = 'campfire';
       else if (roll < 0.68) kind = 'camp';
@@ -340,14 +406,14 @@ export function createLandmarks(registry: PropRegistry): LandmarkStreamer {
       // Snow and highland peaks get shelters rather than overgrown ruins.
       if ((biome === 'snow' || biome === 'highland') && kind === 'ruin') kind = 'camp';
 
-      const site = new Group();
-      site.position.set(x, h, z);
-      site.rotation.y = rand(4) * Math.PI * 2;
+      const anchor = new Group();
+      anchor.position.set(x, h, z);
+      anchor.rotation.y = rand(4) * Math.PI * 2;
 
       switch (kind) {
         case 'campfire': {
           const { group: fireGroup, fire } = buildCampfire(mats);
-          site.add(fireGroup);
+          anchor.add(fireGroup);
           chunk.fires.push(fire);
           // A couple of sitting stones around it.
           for (let i = 0; i < 3; i++) {
@@ -356,32 +422,48 @@ export function createLandmarks(registry: PropRegistry): LandmarkStreamer {
             const s = 0.5 + rand(i + 13) * 0.3;
             stone.position.set(Math.cos(a) * 1.9, s * 0.3, Math.sin(a) * 1.9);
             stone.scale.setScalar(s);
-            site.add(stone);
+            anchor.add(stone);
           }
-          registry.add(k, { x, z, r: 1.1, top: h + 0.4, solid: false });
+          registry.add(k, { x, z, r: 1.1, top: h + 0.4, blockTop: h + 0.4, solid: false });
           break;
         }
         case 'camp': {
           const { group: fireGroup, fire } = buildCampfire(mats);
           fireGroup.position.set(2.6, 0, 0);
-          site.add(fireGroup);
+          anchor.add(fireGroup);
           chunk.fires.push(fire);
           const tent = buildTent(mats);
           tent.position.set(-1.6, 0, 0.4);
-          site.add(tent);
-          registry.add(k, { x: x - 1.6, z: z + 0.4, r: 1.5, top: h + 1.3, solid: true });
+          anchor.add(tent);
+          registry.add(k, {
+            x: x - 1.6,
+            z: z + 0.4,
+            r: 1.5,
+            top: h + 1.3,
+            blockTop: h + 1.3,
+            solid: true,
+          });
           break;
         }
         case 'ruin':
-          site.add(buildRuin(mats, rand));
-          registry.add(k, { x, z, r: 1.0, top: h, solid: false });
+          anchor.add(buildRuin(mats, rand));
+          registry.add(k, { x, z, r: 1.0, top: h, blockTop: h, solid: false });
           break;
         case 'stones':
-          site.add(buildStoneCircle(mats, rand));
+          anchor.add(buildStoneCircle(mats, rand));
           break;
       }
 
-      chunk.root.add(site);
+      chunk.root.add(anchor);
+      // Resolve each flame's world position now, once: the light pool needs it
+      // every frame and fires never move.
+      anchor.updateMatrixWorld(true);
+      for (const fire of chunk.fires) {
+        fire.object.getWorldPosition(scratch);
+        fire.x = scratch.x;
+        fire.y = scratch.y;
+        fire.z = scratch.z;
+      }
     };
 
     place();
@@ -402,8 +484,10 @@ export function createLandmarks(registry: PropRegistry): LandmarkStreamer {
   };
 
   const update = (position: Vector3, elapsed: number): void => {
-    const pcx = Math.round(position.x / CELL);
-    const pcz = Math.round(position.z / CELL);
+    // Cells are corner-anchored (see `landmarkSiteFor`), so the containing cell
+    // is floor, not round.
+    const pcx = Math.floor(position.x / CELL);
+    const pcz = Math.floor(position.z / CELL);
 
     for (let dz = -VIEW_CELLS; dz <= VIEW_CELLS; dz++) {
       for (let dx = -VIEW_CELLS; dx <= VIEW_CELLS; dx++) {
@@ -417,29 +501,54 @@ export function createLandmarks(registry: PropRegistry): LandmarkStreamer {
       if (ring > VIEW_CELLS + 1) dropChunk(chunk);
     }
 
-    // Animate every visible fire: flicker the light and advance the embers.
+    // Embers everywhere share one uniform — one write per frame, not one per fire.
+    mats.embers.uniforms.uTime!.value = elapsed;
+
+    // Hand the light pool to the nearest fires. Anything further away than the
+    // light's own range contributes nothing anyway, so this is invisible.
+    nearestFires.length = 0;
     for (const chunk of loaded.values()) {
       for (const fire of chunk.fires) {
-        fire.uniforms.uTime.value = elapsed;
-        const flicker =
-          Math.sin(elapsed * 11 + fire.seed) * 0.18 + Math.sin(elapsed * 23 + fire.seed * 3) * 0.1;
-        fire.light.intensity = fire.baseIntensity * (1 + flicker);
+        const d2 =
+          (fire.x - position.x) * (fire.x - position.x) +
+          (fire.z - position.z) * (fire.z - position.z);
+        if (d2 > LIGHT_ASSIGN_RANGE * LIGHT_ASSIGN_RANGE) continue;
+        nearestFires.push({ fire, d2 });
       }
+    }
+    nearestFires.sort((a, b) => a.d2 - b.d2);
+
+    for (let i = 0; i < fireLights.length; i++) {
+      const light = fireLights[i]!;
+      const entry = nearestFires[i];
+      if (!entry) {
+        // Keep the light in the scene (the count must not change) but dark.
+        light.intensity = 0;
+        continue;
+      }
+      const { fire } = entry;
+      light.position.set(fire.x, fire.y + 1.1, fire.z);
+      const flicker =
+        Math.sin(elapsed * 11 + fire.seed) * 0.18 + Math.sin(elapsed * 23 + fire.seed * 3) * 0.1;
+      light.intensity = FIRE_INTENSITY * (1 + flicker);
     }
   };
 
-  const pump = (): number => {
+  const pump = (deadline: number): number => {
     if (pending.size === 0) return 0;
     const queue = [...pending.entries()].sort((a, b) => a[1].dist - b[1].dist);
-    const [k, want] = queue[0]!;
-    pending.delete(k);
-    buildChunk(want.cx, want.cz);
+    for (let i = 0; i < queue.length; i++) {
+      if (i > 0 && performance.now() >= deadline) break;
+      const [k, want] = queue[i]!;
+      pending.delete(k);
+      buildChunk(want.cx, want.cz);
+    }
     return pending.size;
   };
 
   const prime = (position: Vector3, cells: number): void => {
-    const pcx = Math.round(position.x / CELL);
-    const pcz = Math.round(position.z / CELL);
+    const pcx = Math.floor(position.x / CELL);
+    const pcz = Math.floor(position.z / CELL);
     for (let dz = -cells; dz <= cells; dz++) {
       for (let dx = -cells; dx <= cells; dx++) {
         buildChunk(pcx + dx, pcz + dz);
@@ -456,6 +565,9 @@ export function createLandmarks(registry: PropRegistry): LandmarkStreamer {
     mats.stone.dispose();
     mats.cloth.dispose();
     mats.flame.dispose();
+    mats.embers.dispose();
+    for (const light of fireLights) group.remove(light);
+    fireLights.length = 0;
   };
 
   return { group, update, pump, prime, dispose };

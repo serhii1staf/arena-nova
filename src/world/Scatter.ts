@@ -19,8 +19,17 @@ import {
   buildTreeFar,
   type TreeKind,
 } from './Flora.ts';
+import type { AssetManager } from '../core/AssetManager.ts';
+import { applyTriplanarTexture } from './builders/geometry.ts';
 import type { PropRegistry } from './PropRegistry.ts';
-import { biomeAt, biomeStyle, cellRandom, elevationAt, slopeAt, WORLD } from './WorldGen.ts';
+import {
+  biomeStyle,
+  cellRandom,
+  surfaceBiomeAt,
+  surfaceHeightAt,
+  surfaceSlopeAt,
+  WORLD,
+} from './WorldGen.ts';
 import type { Wind } from './Wind.ts';
 
 /** Must match the terrain chunk size so vegetation and ground load together. */
@@ -33,8 +42,8 @@ const CHUNK = 256;
 const GRASS_RADIUS = 1;
 const DETAIL_RADIUS = 1;
 const TREE_RADIUS = 2;
-/** Chunks populated per frame. */
-const BUILD_BUDGET = 1;
+/** Upper bound on chunks populated per frame; the real limit is the time budget. */
+const BUILD_BUDGET = 2;
 
 type Layer = 'tree' | 'bush' | 'fern' | 'flower' | 'grass' | 'rock' | 'log';
 
@@ -58,7 +67,8 @@ interface ScatterChunk {
 export interface ScatterStreamer {
   group: Group;
   update(position: Vector3): void;
-  pump(): number;
+  /** Populate pending chunks until `deadline` (a `performance.now()` stamp). */
+  pump(deadline: number): number;
   prime(position: Vector3, rings: number): void;
   dispose(): void;
 }
@@ -102,7 +112,11 @@ const TREE_KINDS: TreeKind[] = ['jungle', 'palm', 'sakura', 'pine', 'acacia', 'd
  * always regenerates identically — no state to save, and props line up perfectly
  * with the terrain because both read the same height field.
  */
-export function createScatter(registry: PropRegistry, wind: Wind): ScatterStreamer {
+export function createScatter(
+  assets: AssetManager,
+  registry: PropRegistry,
+  wind: Wind,
+): ScatterStreamer {
   const group = new Group();
   group.name = 'Vegetation';
 
@@ -136,7 +150,16 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
   const treeMat = makeMat(0.16, 2.5);
   const bushMat = makeMat(0.65, 0.1);
   const grassMat = makeMat(1.5, 0);
+
+  // Boulders and logs get a stone texture, blended triplanar in the shader.
+  //
+  // Baking a projection into the UV attribute does not work on a faceted lump:
+  // whichever axis each facet picks, the UVs jump at every facet edge, the GPU's
+  // derivative-based mip selection blows up along that seam and samples a far
+  // coarser mip — which draws a thin dark line around every facet. Blending the
+  // three projections per fragment has no seam anywhere by construction.
   const rockMat = makeMat(0, 0);
+  applyTriplanarTexture(rockMat, assets.stone(1).map, 0.7);
 
   const layerAssets: Record<Layer, { geos: BufferGeometry[]; material: MeshStandardMaterial }> = {
     tree: { geos: [], material: treeMat }, // chosen per biome
@@ -181,10 +204,11 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
         const z = gz * spacing + (r2 - 0.5) * spacing * 0.85;
         if (Math.abs(x) > WORLD.halfSize || Math.abs(z) > WORLD.halfSize) continue;
 
-        const h = elevationAt(x, z);
+        // Height of the ground *as drawn*, so nothing hovers or sinks.
+        const h = surfaceHeightAt(x, z);
         if (h < WORLD.waterLevel + 0.35) continue;
 
-        const style = biomeStyle(biomeAt(x, z, h));
+        const style = biomeStyle(surfaceBiomeAt(x, z));
         let density = 0;
         switch (layer) {
           case 'tree':
@@ -227,7 +251,7 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
         if (r3 > Math.min(1, density * 0.62)) continue;
 
         // Nothing grows on cliffs.
-        const slope = slopeAt(x, z, 3);
+        const slope = surfaceSlopeAt(x, z);
         const slopeLimit = layer === 'grass' || layer === 'rock' ? 1.3 : 0.85;
         if (slope > slopeLimit) continue;
 
@@ -267,6 +291,7 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
 
   const addInstances = (
     chunk: ScatterChunk,
+    label: string,
     geos: BufferGeometry[],
     material: MeshStandardMaterial,
     placements: Placement[],
@@ -281,6 +306,8 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
     buckets.forEach((bucket, gi) => {
       if (bucket.length === 0) return;
       const mesh = new InstancedMesh(geos[gi]!, material, bucket.length);
+      // Named so diagnostics can pick a layer out of the scene graph.
+      mesh.name = label;
       mesh.castShadow = shadows;
       mesh.receiveShadow = shadows;
       bucket.forEach((p, i) => {
@@ -311,9 +338,18 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
       for (const [kind, list] of perKind) {
         const geos = useFarLod ? treeGeosFar.get(kind) : treeGeos.get(kind);
         if (!geos) continue;
-        addInstances(chunk, geos, treeMat, list, ring <= 1, (p) => {
-          // Trunks block movement; radius scales with the tree.
-          registry.add(k, { x: p.x, z: p.z, r: 0.55 * p.scale, top: p.y, solid: true });
+        addInstances(chunk, `tree:${kind}`, geos, treeMat, list, ring <= 1, (p) => {
+          // Trunks block movement; radius scales with the tree. `top` stays at
+          // ground level (you can't stand on a trunk) while `blockTop` reaches
+          // well above head height so the trunk is solid all the way up.
+          registry.add(k, {
+            x: p.x,
+            z: p.z,
+            r: 0.55 * p.scale,
+            top: p.y,
+            blockTop: p.y + 8 * p.scaleY,
+            solid: true,
+          });
         });
       }
     }
@@ -328,21 +364,27 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
         layer === 'rock'
           ? (p: Placement) => {
               const size = p.scale * 1.5;
+              const top = p.y + size * 0.62;
+              // Boulders are climbable: `blockTop` equals `top`, so once you're
+              // up there you stop being pushed and start standing on it.
               registry.add(k, {
                 x: p.x,
                 z: p.z,
                 r: size * 0.72,
-                top: p.y + size * 0.62,
+                top,
+                blockTop: top,
                 solid: size > 1.7,
               });
             }
           : layer === 'log'
             ? (p: Placement) => {
+                const top = p.y + 0.9 * p.scale;
                 registry.add(k, {
                   x: p.x,
                   z: p.z,
                   r: 0.6 * p.scale,
-                  top: p.y + 0.9 * p.scale,
+                  top,
+                  blockTop: top,
                   solid: false,
                 });
               }
@@ -354,7 +396,7 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
           p.scaleY *= 1.2;
         }
       }
-      addInstances(chunk, assets.geos, assets.material, placements, shadows, collider);
+      addInstances(chunk, layer, assets.geos, assets.material, placements, shadows, collider);
     }
 
     loaded.set(k, chunk);
@@ -370,8 +412,10 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
   };
 
   const update = (position: Vector3): void => {
-    const pcx = Math.round(position.x / CHUNK);
-    const pcz = Math.round(position.z / CHUNK);
+    // Same `floor` rule as the terrain, so a vegetation chunk's ring matches the
+    // terrain ring underneath it and near chunks really do get near detail.
+    const pcx = Math.floor(position.x / CHUNK);
+    const pcz = Math.floor(position.z / CHUNK);
 
     for (let dz = -TREE_RADIUS; dz <= TREE_RADIUS; dz++) {
       for (let dx = -TREE_RADIUS; dx <= TREE_RADIUS; dx++) {
@@ -396,10 +440,11 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
 
   const lastCentre = new Vector3();
 
-  const pump = (): number => {
+  const pump = (deadline: number): number => {
     if (pending.size === 0) return 0;
     const queue = [...pending.entries()].sort((a, b) => a[1].dist - b[1].dist);
     for (let i = 0; i < BUILD_BUDGET && i < queue.length; i++) {
+      if (i > 0 && performance.now() >= deadline) break;
       const [k, want] = queue[i]!;
       pending.delete(k);
       const ring = Math.max(Math.abs(want.cx - lastCentre.x), Math.abs(want.cz - lastCentre.z));
@@ -409,8 +454,8 @@ export function createScatter(registry: PropRegistry, wind: Wind): ScatterStream
   };
 
   const prime = (position: Vector3, rings: number): void => {
-    const pcx = Math.round(position.x / CHUNK);
-    const pcz = Math.round(position.z / CHUNK);
+    const pcx = Math.floor(position.x / CHUNK);
+    const pcz = Math.floor(position.z / CHUNK);
     lastCentre.set(pcx, 0, pcz);
     for (let dz = -rings; dz <= rings; dz++) {
       for (let dx = -rings; dx <= rings; dx++) {

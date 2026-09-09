@@ -16,6 +16,14 @@ export interface Prop {
   top: number;
   /** Blocks movement at body height (trunks, boulders). */
   solid: boolean;
+  /**
+   * Height up to which the prop blocks movement. Distinct from `top` because
+   * the two are not the same thing for a tree: you can never stand on a trunk
+   * (`top` = ground level, so it never lifts the floor), yet it has to block you
+   * all the way up. Collapsing both into `top` meant every trunk was treated as
+   * "already standing on it" and pushed nobody.
+   */
+  blockTop: number;
 }
 
 const CELL = 16;

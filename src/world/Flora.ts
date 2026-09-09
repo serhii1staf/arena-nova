@@ -26,16 +26,32 @@ function makeRng(seed: number): () => number {
   return () => ((s = (s * 1664525 + 1013904223) >>> 0), s / 4294967295);
 }
 
-/** Attaches a flat vertex colour so parts can share one material when merged. */
-function paint(geo: BufferGeometry, c: Color): BufferGeometry {
+/**
+ * How much wind a woody part gives to. Trunks and branches keep a little so a
+ * tree reads as bending rather than as a rigid pole with a wobbling hat, but
+ * nothing like the foliage. Before this existed the sway was masked by height
+ * alone, so the bare trunk above the pivot swung as hard as the leaves — which
+ * is exactly the "the sticks are moving, not the leaves" complaint.
+ */
+const WOOD_SWAY = 0.22;
+
+/**
+ * Attaches a flat vertex colour so parts can share one material when merged,
+ * plus the wind-compliance weight the sway shader reads. Every part goes through
+ * here, which is what guarantees the attribute sets match at merge time.
+ */
+function paint(geo: BufferGeometry, c: Color, sway = 1): BufferGeometry {
   const n = geo.attributes.position.count;
   const arr = new Float32Array(n * 3);
+  const swayArr = new Float32Array(n);
   for (let i = 0; i < n; i++) {
     arr[i * 3] = c.r;
     arr[i * 3 + 1] = c.g;
     arr[i * 3 + 2] = c.b;
+    swayArr[i] = sway;
   }
   geo.setAttribute('color', new BufferAttribute(arr, 3));
+  geo.setAttribute('aSway', new BufferAttribute(swayArr, 1));
   return geo;
 }
 
@@ -117,14 +133,14 @@ export function buildJungleTree(seed: number): BufferGeometry {
 
   const h = 11 + rng() * 7;
   const { geo: trunk, top } = buildTrunk(h, 0.78, 0.06 + rng() * 0.1, rng() * 6.28, 0.58, 5);
-  parts.push(paint(trunk, bark));
+  parts.push(paint(trunk, bark, WOOD_SWAY));
 
   for (let i = 0; i < 3; i++) {
     const a = (i / 3) * Math.PI * 2 + rng() * 0.4;
     const root = new ConeGeometry(0.36, 2.1, 4);
     root.rotateX(Math.PI);
     root.translate(Math.cos(a) * 0.58, 1.05, Math.sin(a) * 0.58);
-    parts.push(paint(root, bark));
+    parts.push(paint(root, bark, WOOD_SWAY));
   }
 
   const branches = 2 + Math.floor(rng() * 2);
@@ -136,7 +152,7 @@ export function buildJungleTree(seed: number): BufferGeometry {
     br.rotateZ(0.75 + rng() * 0.25);
     br.rotateY(a);
     br.translate(top.x, h * 0.76, top.z);
-    parts.push(paint(br, bark));
+    parts.push(paint(br, bark, WOOD_SWAY));
   }
 
   // Overlapping lobes clustered around the crown, reaching down toward the
@@ -166,11 +182,11 @@ export function buildPalm(seed: number): BufferGeometry {
 
   const h = 8 + rng() * 4;
   const { geo: trunk, top } = buildTrunk(h, 0.3, 0.12 + rng() * 0.18, rng() * 6.28, 0.5, 6);
-  parts.push(paint(trunk, bark));
+  parts.push(paint(trunk, bark, WOOD_SWAY));
 
   const crown = new IcosahedronGeometry(0.36, 0);
   crown.translate(top.x, h, top.z);
-  parts.push(paint(crown, bark));
+  parts.push(paint(crown, bark, WOOD_SWAY));
 
   const fronds = 8;
   for (let i = 0; i < fronds; i++) {
@@ -208,7 +224,7 @@ export function buildSakura(seed: number): BufferGeometry {
 
   const h = 6.5 + rng() * 3.5;
   const { geo: trunk, top } = buildTrunk(h, 0.44, 0.16 + rng() * 0.16, rng() * 6.28, 0.5);
-  parts.push(paint(trunk, bark));
+  parts.push(paint(trunk, bark, WOOD_SWAY));
 
   // Wide, low branches — the classic sakura silhouette. They are kept short and
   // angled up so the blossom cloud below can swallow their tips; longer, flatter
@@ -223,7 +239,7 @@ export function buildSakura(seed: number): BufferGeometry {
     br.rotateZ(0.72 + rng() * 0.3);
     br.rotateY(a);
     br.translate(top.x, branchBase, top.z);
-    parts.push(paint(br, bark));
+    parts.push(paint(br, bark, WOOD_SWAY));
   }
 
   // A full, rounded blossom cloud that sits down *onto* the branches — a thin
@@ -253,7 +269,7 @@ export function buildPine(seed: number): BufferGeometry {
 
   const h = 12 + rng() * 9;
   const { geo: trunk, top } = buildTrunk(h, 0.36, 0.02 + rng() * 0.04, rng() * 6.28, 0.7, 6);
-  parts.push(paint(trunk, bark));
+  parts.push(paint(trunk, bark, WOOD_SWAY));
 
   const tiers = 5 + Math.floor(rng() * 3);
   for (let i = 0; i < tiers; i++) {
@@ -276,7 +292,7 @@ export function buildAcacia(seed: number): BufferGeometry {
 
   const h = 7 + rng() * 3;
   const { geo: trunk, top } = buildTrunk(h, 0.4, 0.1 + rng() * 0.12, rng() * 6.28, 0.62);
-  parts.push(paint(trunk, bark));
+  parts.push(paint(trunk, bark, WOOD_SWAY));
 
   const arms = 3 + Math.floor(rng() * 2);
   for (let i = 0; i < arms; i++) {
@@ -287,7 +303,7 @@ export function buildAcacia(seed: number): BufferGeometry {
     br.rotateZ(1.15 + rng() * 0.2);
     br.rotateY(a);
     br.translate(top.x, h * 0.72, top.z);
-    parts.push(paint(br, bark));
+    parts.push(paint(br, bark, WOOD_SWAY));
   }
 
   // Very flat canopy discs, layered into an umbrella.
@@ -309,7 +325,7 @@ export function buildDeadTree(seed: number): BufferGeometry {
 
   const h = 6 + rng() * 5;
   const { geo: trunk, top } = buildTrunk(h, 0.34, 0.08 + rng() * 0.14, rng() * 6.28, 0.75, 6);
-  parts.push(paint(trunk, wood));
+  parts.push(paint(trunk, wood, WOOD_SWAY));
 
   const limbs = 4 + Math.floor(rng() * 4);
   for (let i = 0; i < limbs; i++) {
@@ -320,7 +336,7 @@ export function buildDeadTree(seed: number): BufferGeometry {
     br.rotateZ(0.6 + rng() * 0.8);
     br.rotateY(a);
     br.translate(top.x, h * (0.45 + rng() * 0.5), top.z);
-    parts.push(paint(br, wood));
+    parts.push(paint(br, wood, WOOD_SWAY));
   }
   return mergeParts(parts);
 }
@@ -347,7 +363,7 @@ export function buildTreeFar(kind: TreeKind, seed: number): BufferGeometry {
   const h = kind === 'pine' ? 15 : kind === 'jungle' ? 13 : 8;
   const trunk = new CylinderGeometry(0.28, 0.5, h, 4, 1);
   trunk.translate(0, h / 2, 0);
-  parts.push(paint(trunk, bark));
+  parts.push(paint(trunk, bark, WOOD_SWAY));
 
   if (kind === 'dead') return mergeParts(parts);
 
@@ -526,5 +542,29 @@ export function buildRock(seed: number, detail = 1): BufferGeometry {
     p.setXYZ(i, v.x, v.y, v.z);
   }
   geo.computeVertexNormals();
-  return paint(geo, new Color(0.5, 0.5, 0.48));
+
+  // Per-vertex tint variation, and deliberately dark.
+  //
+  // The original flat 0.5 grey was why boulders read as blown-out white blobs:
+  // under a 1.4 hemisphere plus a 3.4 sun, a mid-grey albedo clips to white on
+  // every facet the sun catches. Real stone is much darker than people expect.
+  const n = p.count;
+  const colours = new Float32Array(n * 3);
+  const sways = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const px = p.getX(i);
+    const py = p.getY(i);
+    const pz = p.getZ(i);
+    // Two scales of variation so neighbouring facets differ without looking noisy.
+    const coarse = Math.sin(px * 1.7 + seed) * Math.cos(pz * 2.1 - seed * 0.7);
+    const fine = Math.sin(px * 6.3 - pz * 5.1 + seed * 2.3);
+    const t = Math.min(1, Math.max(0, 0.5 + coarse * 0.34 + fine * 0.16 + py * 0.08));
+    colours[i * 3] = 0.15 + t * 0.16;
+    colours[i * 3 + 1] = 0.15 + t * 0.155;
+    colours[i * 3 + 2] = 0.14 + t * 0.15;
+    sways[i] = 0;
+  }
+  geo.setAttribute('color', new BufferAttribute(colours, 3));
+  geo.setAttribute('aSway', new BufferAttribute(sways, 1));
+  return geo;
 }
