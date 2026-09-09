@@ -97,7 +97,16 @@ try {
         }
         if (o.name === 'Petals') petalVisible = o.visible;
       });
+      let auroraVisible = false;
+      let auroraAmount = 0;
+      dn.group.traverse((o) => {
+        if (o.name !== 'Aurora') return;
+        auroraVisible = o.visible;
+        auroraAmount = o.material.uniforms.uAmount.value;
+      });
       return {
+        auroraVisible,
+        auroraAmount: +auroraAmount.toFixed(3),
         t01: +dn.t01.toFixed(3),
         nightFactor: +dn.nightFactor.toFixed(3),
         mistAmount: +dn.mistAmount.toFixed(3),
@@ -115,6 +124,19 @@ try {
       };
     });
     await page.screenshot({ path: join(here, `atmo_${t.name}.png`) });
+    if (t.name === 'night') {
+      // Look up. An overhead effect cannot be judged from a frame aimed at the
+      // horizon, and the default view is aimed at the horizon.
+      await page.evaluate(() => {
+        window.arena.scene.player.pitch = 0.55;
+      });
+      await page.waitForTimeout(2500);
+      await page.screenshot({ path: join(here, 'atmo_sky.png') });
+      await page.evaluate(() => {
+        window.arena.scene.player.pitch = 0;
+      });
+      await page.waitForTimeout(1200);
+    }
     results.push({ name: t.name, ...state });
   }
 
@@ -171,10 +193,30 @@ try {
   console.log(`moon carries the night:      ${moonUp ? 'ok' : 'FAIL'}`);
   console.log(`stars come out:              ${stars ? 'ok' : 'FAIL'}`);
   console.log(`god-rays source present:     ${rays ? 'ok' : 'FAIL'}`);
+  // The aurora is gated on night and pulses, so the only firm expectations are
+  // that it is off in daylight and on at some strength after dark.
+  const auroraOffByDay = !noon.auroraVisible;
+  const auroraOnAtNight = night.auroraVisible && night.auroraAmount > 0.05;
+  console.log(
+    `aurora off at noon:          ${auroraOffByDay ? 'ok' : 'FAIL'} (amount ${noon.auroraAmount})`,
+  );
+  console.log(
+    `aurora up at night:          ${auroraOnAtNight ? 'ok' : 'FAIL'} (amount ${night.auroraAmount})`,
+  );
   console.log(`errors: ${errors.length}`);
   for (const e of errors.slice(0, 6)) console.log(' ', e);
 
-  const pass = darker && thicker && mistRises && duskMist && moonUp && stars && rays && !errors.length;
+  const pass =
+    darker &&
+    thicker &&
+    mistRises &&
+    duskMist &&
+    moonUp &&
+    stars &&
+    rays &&
+    auroraOffByDay &&
+    auroraOnAtNight &&
+    !errors.length;
   console.log('RESULT:', pass ? 'PASS' : 'FAIL');
   process.exitCode = pass ? 0 : 1;
 } finally {

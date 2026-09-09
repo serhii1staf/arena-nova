@@ -15,6 +15,7 @@ import {
   Vector3,
 } from 'three';
 import { surfaceBiomeAt, type BiomeId } from './WorldGen.ts';
+import { createAurora, type AuroraField } from './Aurora.ts';
 
 /**
  * DayNight
@@ -224,6 +225,7 @@ export class DayNight {
   private readonly haloUniforms: { uColor: { value: Color }; uOpacity: { value: number } };
   private readonly moonDisc: Mesh;
   private readonly stars: Points;
+  private readonly aurora: AuroraField;
   private readonly starUniforms: {
     uTime: { value: number };
     uOpacity: { value: number };
@@ -341,6 +343,9 @@ export class DayNight {
     this.stars.renderOrder = -1;
     this.stars.frustumCulled = false;
     this.group.add(this.stars);
+
+    this.aurora = createAurora();
+    this.group.add(this.aurora.mesh);
   }
 
   /** Advances the clock and recomputes the sky. Call once per rendered frame. */
@@ -400,6 +405,11 @@ export class DayNight {
     );
     this.group.position.set(0, 0, 0);
     this.stars.position.copy(playerPos);
+    // Aurora comes up with the stars but lags them slightly and is never quite
+    // steady, so it reads as weather rather than as a fixture of the sky.
+    const auroraAmount =
+      Math.pow(this.nightFactor, 1.8) * (0.55 + 0.45 * Math.sin(this.elapsed * 0.045));
+    this.aurora.update(playerPos, this.elapsed, auroraAmount);
 
     // The sun disc dims and reddens into the haze as it sets; the moon only shows
     // once the sky is dark enough for it to read.
@@ -461,6 +471,7 @@ export class DayNight {
   }
 
   dispose(): void {
+    this.aurora.dispose();
     this.sunGeo.dispose();
     this.moonGeo.dispose();
     this.haloGeo.dispose();
