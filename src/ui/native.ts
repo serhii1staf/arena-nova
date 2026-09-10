@@ -88,8 +88,21 @@ export async function prepareNative(): Promise<void> {
 let captureActive = false;
 let warpPending = false;
 let windowCentre: PhysicalPoint | null = null;
-/** Warps issued whose synthetic mouse event has not been discarded yet. */
-let pendingWarps = 0;
+/**
+ * When the outstanding warp stops being expected, as a `performance.now()` stamp.
+ *
+ * A deadline rather than a counter. A counter only goes back down when a landing
+ * is positively identified, so any landing that is missed — coalesced by the OS,
+ * or arriving a little outside the tolerance — left it permanently above zero, and
+ * from then on every mouse event near the middle of the window was discarded as a
+ * warp. The view would gradually stop responding in exactly the region the cursor
+ * spends most of its time. A deadline cannot leak in either direction: an
+ * unclaimed warp simply stops being expected.
+ */
+let warpExpectedUntil = 0;
+
+/** How long a warp stays expected. Comfortably longer than the IPC round trip. */
+const WARP_GRACE_MS = 250;
 
 /** Hides and confines the OS cursor. Safe to call repeatedly. */
 export async function beginNativeMouseCapture(): Promise<void> {
@@ -154,10 +167,10 @@ export async function recentreNativeCursor(force = false): Promise<void> {
     // real WM_MOUSEMOVE, and because this path deliberately avoids Pointer Lock
     // there is nothing to distinguish it from the player's own movement — so the
     // input layer has to be told to expect it and throw it away.
-    pendingWarps++;
+    warpExpectedUntil = performance.now() + WARP_GRACE_MS;
     await win.setCursorPosition(new PhysicalPositionCtor(windowCentre.x, windowCentre.y));
   } catch {
-    pendingWarps = Math.max(0, pendingWarps - 1);
+    warpExpectedUntil = 0;
     /* window moved or permission missing — ignore */
   } finally {
     warpPending = false;
@@ -174,14 +187,14 @@ export async function recentreNativeCursor(force = false): Promise<void> {
  * twisting to the left".
  */
 export function claimCursorWarp(): boolean {
-  if (pendingWarps <= 0) return false;
-  pendingWarps--;
+  if (!hasPendingCursorWarp()) return false;
+  warpExpectedUntil = 0;
   return true;
 }
 
 /** True when a warp has been issued and its mouse event has not arrived yet. */
 export function hasPendingCursorWarp(): boolean {
-  return pendingWarps > 0;
+  return performance.now() < warpExpectedUntil;
 }
 
 /** Invalidate the cached window centre (call when the window moves/resizes). */

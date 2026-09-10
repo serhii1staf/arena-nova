@@ -53,8 +53,7 @@ export class Input {
   /** Last cursor position, for measuring native-capture deltas ourselves. */
   private readonly lastPointer = new Vector2();
   private haveLastPointer = false;
-  /** A warp has been asked for; the next move is its landing, not the player's. */
-  private awaitingWarpLanding = false;
+
   /** True while the accumulated look delta came from a touch drag. */
   private lookFromTouch = false;
 
@@ -126,7 +125,6 @@ export class Input {
       this.nativeCapture = true;
       this.locked = true;
       this.haveLastPointer = false;
-      this.awaitingWarpLanding = false;
       document.documentElement.classList.add('mouse-captured');
       void beginNativeMouseCapture();
       return;
@@ -144,7 +142,6 @@ export class Input {
   private stopCapture(): void {
     document.documentElement.classList.remove('mouse-captured');
     this.haveLastPointer = false;
-    this.awaitingWarpLanding = false;
     if (isNative()) {
       this.nativeCapture = false;
       this.locked = false;
@@ -236,19 +233,30 @@ export class Input {
     this.haveLastPointer = true;
 
     // Swallow the event the warp itself produced: resync the reference position
-    // and emit nothing. Identified either by being the first event after a warp
-    // was requested, or by landing near the centre while one is still in flight —
-    // the first alone is not enough, because a real move can arrive while the warp
-    // is still on its way, and the second alone misses a warp that happens to land
-    // where a real movement would have.
+    // and emit nothing.
+    //
+    // A landing is identified by *where* it is, never by which event came first.
+    // The ordering test is not available to us: the warp is an async round trip
+    // through the OS, so the player's own movement can easily arrive while it is
+    // still on its way. Treating the first event after a request as the landing
+    // meant that real movement consumed the credit and cleared the flag — and then
+    // the actual warp arrived unguarded, carrying a full-margin jump back to the
+    // centre straight into the accumulated look. Pushing right put the cursor at
+    // the right edge, the warp pulled it back, and the view snapped left. That is
+    // the "moving right turns me left" report, and it survived the previous fix
+    // because that fix corrected the sign of the delta rather than what produced it.
+    //
+    // Only the position is trustworthy: the warp always targets the middle of the
+    // window, so an event landing there while a warp is outstanding is the warp.
+    // A genuine movement that happens to pass through the middle loses one small
+    // delta, which is imperceptible and, unlike the alternative, cannot invert.
     const w = window.innerWidth;
     const h = window.innerHeight;
-    if (this.awaitingWarpLanding || hasPendingCursorWarp()) {
+    if (hasPendingCursorWarp()) {
       const nearCentre =
         Math.abs(px - w * 0.5) < Input.WARP_LANDING_TOLERANCE &&
         Math.abs(py - h * 0.5) < Input.WARP_LANDING_TOLERANCE;
-      if (this.awaitingWarpLanding || nearCentre) {
-        this.awaitingWarpLanding = false;
+      if (nearCentre) {
         claimCursorWarp();
         return;
       }
@@ -271,10 +279,8 @@ export class Input {
       Math.abs(py - h * 0.5) / (h * 0.5),
     );
     if (offCentre > 0.72) {
-      this.awaitingWarpLanding = true;
       void recentreNativeCursor(true);
     } else if (offCentre > 0.5) {
-      this.awaitingWarpLanding = true;
       void recentreNativeCursor();
     }
   }

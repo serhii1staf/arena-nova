@@ -24,10 +24,14 @@ jobs:
         include:
           - platform: windows-latest
             args: ''
-          - platform: macos-latest
-            args: '--target universal-apple-darwin'
-          - platform: ubuntu-22.04
-            args: ''
+          # macOS and Linux are held back deliberately, not broken: both build and
+          # sign correctly, but shipping them means supporting them, and Windows is
+          # the only platform being tested by hand right now. Re-add the two entries
+          # below to publish for all three again.
+          # - platform: macos-latest
+          #   args: '--target universal-apple-darwin'
+          # - platform: ubuntu-22.04
+          #   args: ''
 
     runs-on: ${{ matrix.platform }}
     steps:
