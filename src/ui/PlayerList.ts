@@ -1,6 +1,7 @@
 import { gameSession } from '../net/session.ts';
 import { playerName } from '../net/identity.ts';
 import { savedSkin, resolveSkin, SKINS } from '../player/skins.ts';
+import { portraitFor } from './Portraits.ts';
 import { t } from './i18n.ts';
 
 /**
@@ -19,7 +20,10 @@ import { t } from './i18n.ts';
  * the frame.
  */
 
-/** A stable accent per character, so the same face always has the same colour. */
+/**
+ * A stable accent per character. Still used: it rings the portrait, and it is the
+ * fallback chip's fill for the moment before a portrait has been rendered.
+ */
 const CHIP_COLOURS = [
   '#54be78',
   '#5aa9d8',
@@ -39,10 +43,16 @@ function chipColour(skinId: string): string {
  * Latency to a bar count. Thresholds are generous on purpose: this is a game where
  * positions are interpolated over an 80 ms window, so 120 ms is genuinely fine and
  * showing it as a warning would just make players anxious about nothing.
+ *
+ * A ping of 0 means "not measured yet" — the first round trip takes about a second
+ * and a player who has only just joined has not completed one. Those get an unlit
+ * meter, not a full one: four bars for a connection nothing is known about is the
+ * one reading that could actually mislead.
  */
 function bars(ping: number, online: boolean): { lit: number; className: string } {
   if (!online) return { lit: 0, className: 'bars offline' };
-  const lit = ping <= 0 ? 4 : ping < 70 ? 4 : ping < 140 ? 3 : ping < 260 ? 2 : 1;
+  if (ping <= 0) return { lit: 0, className: 'bars' };
+  const lit = ping < 70 ? 4 : ping < 140 ? 3 : ping < 260 ? 2 : 1;
   return { lit, className: `bars lit${lit}` };
 }
 
@@ -51,8 +61,11 @@ interface Entry {
   name: string;
   skin: string;
   admin: boolean;
+  /** Round-trip time in ms; 0 when it is not known yet. */
   ping: number;
   self: boolean;
+  /** Rendered portrait, or null while it is still being drawn. */
+  portrait: string | null;
 }
 
 export class PlayerList {
@@ -82,17 +95,19 @@ export class PlayerList {
 
     const net = gameSession();
     const online = net.isOnline;
+    const local = savedSkin();
     const entries: Entry[] = [
       {
         id: net.localId || 'self',
         name: playerName(),
-        skin: savedSkin(),
+        skin: local,
         admin: net.isAdmin,
-        // Only our own latency is measurable from here; a remote player's ping to
-        // the server is not something this client can observe, and inventing a
-        // number for it would be a lie dressed as a feature.
+        // Ours is measured here from the pong; everyone else's arrives in the
+        // snapshot because each client reports its own. Same units, same meaning,
+        // so the two are displayed identically.
         ping: Math.round(net.ping),
         self: true,
+        portrait: portraitFor(local),
       },
     ];
     for (const p of net.remotePlayers.values()) {
@@ -101,13 +116,19 @@ export class PlayerList {
         name: p.name,
         skin: p.skin,
         admin: p.admin,
-        ping: -1,
+        ping: Math.round(p.ping),
         self: false,
+        portrait: portraitFor(p.skin),
       });
     }
     entries.sort((a, b) => (a.self ? -1 : b.self ? 1 : a.name.localeCompare(b.name)));
 
-    const signature = `${online}|${entries.map((e) => `${e.id}:${e.name}:${e.skin}:${e.admin}:${e.ping}`).join(',')}`;
+    // The portrait is part of the signature so the row is rebuilt once its picture
+    // finishes rendering — a few hundred milliseconds after the panel is first
+    // opened — and not on any frame after that.
+    const signature = `${online}|${entries
+      .map((e) => `${e.id}:${e.name}:${e.skin}:${e.admin}:${e.ping}:${e.portrait ? 1 : 0}`)
+      .join(',')}`;
     if (signature === this.signature) return;
     this.signature = signature;
 
@@ -118,12 +139,32 @@ export class PlayerList {
       const row = document.createElement('div');
       row.className = e.self ? 'playerRow self' : 'playerRow';
 
-      const chip = document.createElement('div');
-      chip.className = 'chip';
-      chip.style.setProperty('--chip', chipColour(e.skin));
-      chip.textContent = resolveSkin(e.skin).label.slice(0, 1);
-      chip.title = resolveSkin(e.skin).label;
-      row.append(chip);
+      const label = resolveSkin(e.skin).label;
+      if (e.portrait) {
+        // The character as they actually look, front on. One render per skin, done
+        // off the frame loop and cached for the session — see `Portraits.ts`.
+        const face = document.createElement('img');
+        face.className = 'portrait';
+        face.src = e.portrait;
+        face.width = 30;
+        face.height = 30;
+        // Decorative: the name beside it already identifies the player, and the
+        // character is named in the tooltip.
+        face.alt = '';
+        face.title = label;
+        face.style.setProperty('--chip', chipColour(e.skin));
+        row.append(face);
+      } else {
+        // Fallback while the portrait is still being drawn, or if this build has no
+        // authored models at all. Same size and position, so nothing jumps when the
+        // picture arrives.
+        const chip = document.createElement('div');
+        chip.className = 'chip';
+        chip.style.setProperty('--chip', chipColour(e.skin));
+        chip.textContent = label.slice(0, 1);
+        chip.title = label;
+        row.append(chip);
+      }
 
       const name = document.createElement('span');
       name.className = 'playerName';
@@ -140,10 +181,17 @@ export class PlayerList {
 
       const ping = document.createElement('span');
       ping.className = 'playerPing';
-      ping.textContent = e.self ? (online ? `${e.ping} ms` : t('players.offline')) : '—';
+      // Everyone gets a real number now. A dash means only that this player has not
+      // reported a round trip yet (they joined a moment ago, or they are on a build
+      // that never sent one), which is a different thing from being offline.
+      ping.textContent = !online
+        ? t('players.offline')
+        : e.ping > 0
+          ? `${e.ping} ms`
+          : '—';
       row.append(ping);
 
-      const b = bars(e.self ? e.ping : 0, online);
+      const b = bars(e.ping, online);
       const meter = document.createElement('span');
       meter.className = b.className;
       meter.append(

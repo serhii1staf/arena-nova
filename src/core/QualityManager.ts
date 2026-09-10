@@ -184,6 +184,31 @@ export class QualityManager {
     this.targetFps = Math.max(30, Math.min(1000, fps));
   }
 
+  /** Seconds of frame samples still to be ignored before adapting again. */
+  private warmup = 0;
+
+  /**
+   * Ignore frame timing for a moment, and forget what was measured before it.
+   *
+   * Called when the world is rebuilt from scratch. A scene switch is followed by a
+   * couple of seconds of streaming backlog whose frame times describe the loader,
+   * not the scene — and adapting to them is worse than useless: resolution walks
+   * down in steps while the hitching lasts, every step reallocating the whole post
+   * chain (which is itself a hitch), and because the average is a slow EMA the
+   * world then stays soft long after streaming has settled. Measured leaving the
+   * lobby: resolution fell to 0.7 and was still there fifteen seconds later.
+   *
+   * This only defers the decision. Once the window passes, a scene that genuinely
+   * cannot hold the frame rate is adapted to exactly as before.
+   */
+  beginWarmup(seconds = 2.5): void {
+    this.warmup = Math.max(this.warmup, seconds);
+    // The EMA is reset rather than left to decay, so the frames recorded during the
+    // hitch are not still dragging the average once adaptation resumes.
+    this.fpsEMA = this.targetFps;
+    this.adaptCooldown = Math.max(this.adaptCooldown, seconds);
+  }
+
   /** Resolution scale rounded to a discrete step (see `sampleFrame`). */
   private quantise(v: number): number {
     return Math.round(v / RESOLUTION_STEP) * RESOLUTION_STEP;
@@ -202,6 +227,16 @@ export class QualityManager {
    */
   sampleFrame(dt: number): boolean {
     if (dt <= 0) return false;
+
+    // A warm-up window discards the sample outright rather than feeding it to the
+    // EMA, because feeding it and merely postponing the decision would leave the
+    // average poisoned by exactly the frames that are not representative.
+    if (this.warmup > 0) {
+      this.warmup -= dt;
+      this.resizeCooldown -= dt;
+      return false;
+    }
+
     const instFps = 1 / dt;
     this.fpsEMA += (instFps - this.fpsEMA) * 0.05;
 

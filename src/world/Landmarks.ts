@@ -57,6 +57,12 @@ interface LandmarkChunk {
   cz: number;
   root: Group;
   fires: FireEffect[];
+  /**
+   * True when this cell wanted a village but the authored pack had not arrived, so
+   * it was built as a ruin instead. Only these cells have anything to gain from a
+   * rebuild once the pack lands.
+   */
+  awaitingPack: boolean;
 }
 
 interface FireEffect {
@@ -89,8 +95,11 @@ const FIRE_INTENSITY = 9;
 export interface LandmarkStreamer {
   group: Group;
   update(position: Vector3, elapsed: number): void;
-  /** Build pending cells until `deadline` (a `performance.now()` stamp). */
-  pump(deadline: number): number;
+  /**
+   * Build pending cells until `deadline` (a `performance.now()` stamp).
+   * `force` permits one build to start past the deadline; see `Terrain.pump`.
+   */
+  pump(deadline: number, force?: boolean): number;
   prime(position: Vector3, cells: number): void;
   dispose(): void;
 }
@@ -542,7 +551,14 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
     if (loaded.has(k)) return;
 
     const rand = (n: number): number => cellRandom(cx * 31 + n, cz * 17 - n, 555);
-    const chunk: LandmarkChunk = { key: k, cx, cz, root: new Group(), fires: [] };
+    const chunk: LandmarkChunk = {
+      key: k,
+      cx,
+      cz,
+      root: new Group(),
+      fires: [],
+      awaitingPack: false,
+    };
 
     const place = (): void => {
       // Where a landmark goes — and whether the cell has one at all — is decided
@@ -570,9 +586,12 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
       // Snow and highland peaks get shelters rather than overgrown ruins.
       if ((biome === 'snow' || biome === 'highland') && kind === 'ruin') kind = 'camp';
       // The pack loads asynchronously, so a cell built before it arrives falls
-      // back rather than leaving an empty terrace. Those cells are rebuilt once
-      // it lands (see `update`).
-      if (kind === 'village' && !props) kind = 'ruin';
+      // back rather than leaving an empty terrace. Recorded, because that fallback
+      // is the only reason a built cell would ever need rebuilding (see `update`).
+      if (kind === 'village' && !props) {
+        kind = 'ruin';
+        chunk.awaitingPack = true;
+      }
 
       const anchor = new Group();
       anchor.position.set(x, h, z);
@@ -660,12 +679,23 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
   };
 
   const update = (position: Vector3, elapsed: number): void => {
-    // The pack landed after some cells were already built. Drop them so they come
-    // back with their villages; placement is deterministic, so each cell rebuilds
-    // into exactly what it would have been had the pack been there all along.
+    // The pack landed after some cells were already built. Drop the ones that were
+    // waiting for it so they come back with their villages; placement is
+    // deterministic, so each rebuilds into exactly what it would have been had the
+    // pack been there all along.
+    //
+    // Only those cells. This used to drop every loaded cell, which meant the pack
+    // arriving a second or two after a scene switch re-queued the entire streamed
+    // set — and a village is the most expensive thing the world builds, measured at
+    // over 200 ms of CPU for one cell. Rebuilding campfires, camps and stone
+    // circles that the pack cannot change was pure cost, and it landed squarely in
+    // the window where the frame had no room for it. A cell only ever needs the
+    // pack if it downgraded a village for want of it.
     if (stale) {
       stale = false;
-      for (const chunk of [...loaded.values()]) dropChunk(chunk);
+      for (const chunk of [...loaded.values()]) {
+        if (chunk.awaitingPack) dropChunk(chunk);
+      }
     }
 
     // Cells are corner-anchored (see `landmarkSiteFor`), so the containing cell
@@ -718,11 +748,15 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
     }
   };
 
-  const pump = (deadline: number): number => {
+  const pump = (deadline: number, force = true): number => {
     if (pending.size === 0) return 0;
     const queue = [...pending.entries()].sort((a, b) => a[1].dist - b[1].dist);
+    // No count cap, only the clock: a cell is either a village — the most
+    // expensive thing the world builds — or empty, so a fixed count would be
+    // meaningless either way. `force` allows one build past the deadline, and only
+    // on the frame this streamer holds it; see `Terrain.pump`.
     for (let i = 0; i < queue.length; i++) {
-      if (i > 0 && performance.now() >= deadline) break;
+      if ((i > 0 || !force) && performance.now() >= deadline) break;
       const [k, want] = queue[i]!;
       pending.delete(k);
       buildChunk(want.cx, want.cz);

@@ -26,6 +26,7 @@ import { createGroundMist, type GroundMistField } from './GroundMist.ts';
 import { createPetals, type PetalField } from './Petals.ts';
 import { createPuddles, type PuddleField } from './Puddles.ts';
 import { createRain, type RainField } from './Rain.ts';
+import { createWaterfalls, type WaterfallField } from './Waterfalls.ts';
 import { createWildlife, type WildlifeField } from './Wildlife.ts';
 import {
   resetSurfaceCache,
@@ -45,6 +46,25 @@ interface Disposable {
  * rather than costing a visible stutter.
  */
 const STREAM_BUDGET_MS = 5;
+
+/**
+ * How much the near field may have queued before the distant layers stand down.
+ *
+ * Chosen to separate the two states that look alike in a queue length: walking
+ * across a chunk boundary leaves a chunk or two pending and is the normal case,
+ * while a scene switch leaves dozens and is the case where the frame has no room
+ * for a village.
+ */
+const NEAR_BACKLOG_GRACE = 3;
+
+/**
+ * Frames the distant layers may be held back before they are let through anyway.
+ *
+ * Roughly a second and a half at 60 Hz. Long enough to cover the streaming burst
+ * after a scene switch, short enough that a player walking continuously across a
+ * large world still sees villages appear.
+ */
+const FAR_STARVE_FRAMES = 90;
 
 export interface ExteriorBuild {
   group: Group;
@@ -67,7 +87,26 @@ export interface ExteriorBuild {
   spawn: { x: number; z: number; yaw: number };
   isAtPortal(x: number, y: number, z: number): boolean;
   /** Diagnostics for the HUD. */
-  stats(): { chunks: number; pending: number; biome: string; animals: number };
+  stats(): {
+    chunks: number;
+    pending: number;
+    biome: string;
+    animals: number;
+    /** Work still queued per streamer, so a backlog can be seen while it lasts. */
+    backlog: { terrain: number; scatter: number; landmarks: number; waterfalls: number };
+    /** Everything still queued, across every streamer. */
+    queued: number;
+    /**
+     * CPU milliseconds the last frame spent building world chunks, against the
+     * `STREAM_BUDGET_MS` it was allowed. The honest measure of streaming cost:
+     * it excludes rendering entirely, so it is not distorted by the GPU.
+     */
+    streamMs: number;
+    /** Where that time went, per streamer. Attributes a spike instead of guessing. */
+    cost: { terrain: number; scatter: number; landmarks: number; waterfalls: number };
+    /** CPU milliseconds `prime` took — the blocking part of a scene switch. */
+    primeMs: number;
+  };
 }
 
 /**
@@ -116,6 +155,12 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
   const landmarks: LandmarkStreamer = createLandmarks(assets, registry);
   group.add(landmarks.group);
 
+  // Falling water where the rivers run off the escarpments. Streamed like the
+  // rest of the world and derived from the same height field, so a fall is always
+  // attached to the cliff that produced it.
+  const waterfalls: WaterfallField = createWaterfalls();
+  group.add(waterfalls.group);
+
   // ---- Ocean: a single plane that follows the player ---------------------
   const ocean = (() => {
     const geo = track(new PlaneGeometry(1, 1));
@@ -130,7 +175,13 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
       }),
     );
     const mesh = new Mesh(geo, mat);
-    mesh.scale.set(4200, 1, 4200);
+    // Two triangles, so the size is free — and it needs to be this big. At 4200
+    // it reached 2.1 km from the player, which was past the horizon at the old
+    // ground level and is nothing like far enough now that you can stand on a
+    // 380 m summit: the sea's own edge showed up as a hard pale rectangle lying
+    // across the middle distance. 9000 matches the camera's far plane and stays
+    // just inside the sky dome, by which distance the haze has swallowed it.
+    mesh.scale.set(9000, 1, 9000);
     mesh.position.y = WORLD.waterLevel;
     group.add(mesh);
     return mesh;
@@ -333,6 +384,18 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
 
   // ---- Frame update -----------------------------------------------------
   const centre = new Vector3();
+  /** Work each streamer still had queued after the last pump. Diagnostics only. */
+  const backlog = { terrain: 0, scatter: 0, landmarks: 0, waterfalls: 0 };
+  /** Whose turn it is to be allowed one build past the shared deadline. */
+  let forceTurn = 0;
+  /** Frames the distant layers have been held back by the near-field backlog. */
+  let farStarved = 0;
+  /** Where the last frame's streaming time went, per streamer. Diagnostics only. */
+  const cost = { terrain: 0, scatter: 0, landmarks: 0, waterfalls: 0 };
+  /** CPU cost of the last frame's streaming step, in ms. Diagnostics only. */
+  let streamMs = 0;
+  /** CPU cost of `prime`, in ms — the synchronous part of the scene switch. */
+  let primeMs = 0;
 
   const update = (
     elapsed: number,
@@ -361,6 +424,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     terrain.update(playerPos);
     scatter.update(playerPos);
     landmarks.update(playerPos, elapsed);
+    waterfalls.update(playerPos, elapsed, air.air);
 
     // Streaming shares one time budget per frame, spent in priority order:
     // ground first (nothing may be missing under the player), then vegetation,
@@ -368,19 +432,84 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     // cost swings by an order of magnitude depending on LOD and how much of the
     // height lattice is already cached, so it either wasted headroom or blew the
     // frame. This is what the visible hitching while running came down to.
-    const deadline = performance.now() + STREAM_BUDGET_MS;
-    terrain.pump(deadline);
-    scatter.pump(deadline);
-    landmarks.pump(deadline);
+    const streamStart = performance.now();
+    const deadline = streamStart + STREAM_BUDGET_MS;
+    // One streamer per frame may overrun the budget by a single build; the other
+    // three stop at the deadline. The turn rotates, so every layer still makes
+    // guaranteed progress even while the ground is eating the whole budget.
+    //
+    // Each streamer used to take that liberty unconditionally, and the four of them
+    // are pumped from one shared deadline — so a frame whose budget terrain had
+    // already spent still went on to start a vegetation chunk, a landmark cell and
+    // a waterfall scan, each of which runs to completion once begun. Four
+    // unbounded builds on top of an exhausted budget, on every frame, for as long
+    // as the backlog lasted: measured at 150 ms on a single frame against a 5 ms
+    // budget, which is what the drop leaving the lobby actually was.
+    //
+    // Terrain is first in the rotation as well as first in priority, because it is
+    // the one layer whose absence is not cosmetic.
+    forceTurn = (forceTurn + 1) % 4;
+    let mark = streamStart;
+    backlog.terrain = terrain.pump(deadline, forceTurn === 0);
+    cost.terrain = (mark = performance.now()) - streamStart;
+    backlog.scatter = scatter.pump(deadline, forceTurn === 1);
+    const afterScatter = performance.now();
+    cost.scatter = afterScatter - mark;
+
+    // The priority order above was only ever a comment. In practice all four
+    // streamers were pumped from the same budget on the same frame, so a village
+    // several hundred metres away competed with the ground under the player — and a
+    // village is by far the most expensive single thing the world builds, measured
+    // at over 200 ms of CPU against a 5 ms budget, where the worst terrain chunk in
+    // the same run cost 11 ms.
+    //
+    // A time budget cannot help with that on its own: it decides whether a build
+    // may *start*, never how long it takes, and a village that starts with 0.1 ms
+    // of budget left still runs to completion. So the far layers stand down
+    // entirely while the near field has a real backlog behind it, which is the
+    // state that only happens for a second or two after the world is rebuilt.
+    //
+    // The threshold is a backlog, not simply "anything queued": walking briskly
+    // keeps a chunk or two on the queue almost permanently, and gating on that
+    // would starve the distant scenery for the whole session rather than for the
+    // moment it is in the way.
+    // Standing down has to have a floor under it. On hardware slow enough that the
+    // near field takes hundreds of frames to drain, an unconditional gate would
+    // hold the distant scenery back for as long as the player kept walking, so
+    // after a while the far layers get a frame regardless of the backlog. Measured
+    // under a software rasteriser at about one frame a second, where the gate
+    // otherwise never opened at all.
+    farStarved++;
+    const nearBacklogged =
+      farStarved < FAR_STARVE_FRAMES &&
+      (backlog.terrain > NEAR_BACKLOG_GRACE || backlog.scatter > NEAR_BACKLOG_GRACE);
+    if (!nearBacklogged) farStarved = 0;
+    // A deadline already in the past, with no force, makes a pump a no-op that
+    // still reports what it has waiting.
+    const farDeadline = nearBacklogged ? 0 : deadline;
+    backlog.landmarks = landmarks.pump(farDeadline, !nearBacklogged && forceTurn === 2);
+    const afterLandmarks = performance.now();
+    cost.landmarks = afterLandmarks - afterScatter;
+    backlog.waterfalls = waterfalls.pump(farDeadline, !nearBacklogged && forceTurn === 3);
+    cost.waterfalls = performance.now() - afterLandmarks;
+    // What the streaming step actually cost, against the budget it was given.
+    // Measured rather than assumed: the budget is advisory, every streamer is
+    // allowed to finish the build it has started, and how far past the deadline
+    // that carries it is the whole question. GPU-independent, so this number means
+    // the same thing on real hardware and under a software rasteriser.
+    streamMs = performance.now() - streamStart;
 
     portal.update(elapsed);
   };
 
   const prime = (): void => {
+    const t0 = performance.now();
     const start = new Vector3(0, 0, 0);
     terrain.prime(start, 2);
     scatter.prime(start, 1);
     landmarks.prime(start, 1);
+    waterfalls.prime(start, 1);
+    primeMs = performance.now() - t0;
   };
 
   const dispose = (): void => {
@@ -392,6 +521,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     rain.dispose();
     puddles.dispose();
     wildlife.dispose();
+    waterfalls.dispose();
     landmarks.dispose();
     scatter.dispose();
     terrain.dispose();
@@ -427,6 +557,13 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
       pending: terrain.pendingChunks(),
       biome: surfaceBiomeAt(centre.x, centre.z),
       animals: wildlife.count(),
+      // Everything still waiting to be built, per streamer. `pending` above stays
+      // as it was — terrain only — because the existing probes assert on it.
+      backlog: { ...backlog },
+      queued: backlog.terrain + backlog.scatter + backlog.landmarks + backlog.waterfalls,
+      streamMs,
+      cost: { ...cost },
+      primeMs,
     }),
   };
 }

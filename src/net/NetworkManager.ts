@@ -1,4 +1,5 @@
 import { NullTransport, WebSocketTransport } from './transports.ts';
+import { ownerToken } from './identity.ts';
 import type {
   ConnectionState,
   InputCommand,
@@ -21,6 +22,11 @@ export class RemotePlayer {
   skin: string;
   /** Set by the server for the holder of the reserved name. */
   admin = false;
+  /**
+   * That player's round-trip time in ms, measured on their machine and relayed by
+   * the server. 0 until they have reported one.
+   */
+  ping = 0;
   x = 0;
   y = 0;
   z = 0;
@@ -209,6 +215,9 @@ export class NetworkManager {
         rp.skin = s.skin;
         if (skinChanged) for (const h of this.skinHandlers) h(rp);
       }
+      // Outside the identity branch above: latency moves on its own, without the
+      // name or the character ever changing.
+      rp.ping = Number.isFinite(s.ping) ? (s.ping as number) : 0;
       rp.push({ ...s, t });
     }
   }
@@ -221,8 +230,16 @@ export class NetworkManager {
     await this.transport.connect();
   }
 
+  /**
+   * Announces identity. Also used as an update: the server treats a second `join`
+   * as a change of name or character rather than a new player.
+   *
+   * The owner token rides along so the server can recognise the holder of the
+   * reserved name across reconnects. It says nothing about rights — the server
+   * still decides, and still answers in `welcome`.
+   */
   join(name: string, skin: string): void {
-    this.transport.send({ type: 'join', name, skin });
+    this.transport.send({ type: 'join', name, skin, owner: ownerToken() });
   }
 
   sendInput(x: number, y: number, z: number, yaw: number): void {
@@ -234,6 +251,10 @@ export class NetworkManager {
       z,
       yaw,
       t: performance.now() + this.timeOffset,
+      // Our own measurement, piggybacked so the room can show everyone's latency
+      // and not just their own. See `InputCommand.ping` for why it goes here and
+      // not in a message of its own.
+      ping: Math.round(this.ping),
     };
     this.transport.send({ type: 'input', cmd });
   }

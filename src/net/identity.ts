@@ -11,9 +11,60 @@
  */
 
 const STORAGE_KEY = 'arena.name';
+const OWNER_KEY = 'arena.owner';
 
 /** Longest name the UI can lay out, and what the server clamps to. */
 export const MAX_NAME = 18;
+
+/**
+ * A stable per-install token, used only to prove continuity of *this* install
+ * across reconnects.
+ *
+ * The reserved name is meant to stay with whoever claimed it, which means the
+ * server has to recognise that claimant again on a later connection. It used to
+ * remember the connection id, which is generated fresh for every socket — so the
+ * name could be claimed exactly once per room, ever, and after that even its
+ * owner was refused. This is the missing half: something that survives a reload.
+ *
+ * It is not a password and it is not asked for. It identifies an install, and it
+ * only ever matters for the one reserved name; every other name is first-come and
+ * ignores it entirely.
+ */
+export function ownerToken(): string {
+  try {
+    const existing = localStorage.getItem(OWNER_KEY);
+    // Length-checked rather than merely present: the value has to be long enough
+    // to be worth treating as an identity, and this also rejects anything left
+    // over from an earlier, shorter scheme.
+    if (existing && existing.length >= 32) return existing;
+  } catch {
+    /* storage unavailable */
+  }
+  const fresh = mintToken();
+  try {
+    localStorage.setItem(OWNER_KEY, fresh);
+  } catch {
+    /* ignore: a session with no storage simply cannot hold the reserved name */
+  }
+  return fresh;
+}
+
+/** 32 hex characters, from the platform CSPRNG where there is one. */
+function mintToken(): string {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === 'function') {
+    return c.randomUUID().replace(/-/g, '') + c.randomUUID().replace(/-/g, '');
+  }
+  if (c && typeof c.getRandomValues === 'function') {
+    const bytes = new Uint8Array(24);
+    c.getRandomValues(bytes);
+    return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  // Last resort. Weak, and only reached on a platform with no crypto at all.
+  let out = '';
+  while (out.length < 48) out += Math.random().toString(16).slice(2);
+  return out.slice(0, 48);
+}
 
 const listeners = new Set<(name: string) => void>();
 

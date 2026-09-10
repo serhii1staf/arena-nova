@@ -15,9 +15,16 @@ try {
   // Software rendering here is slow; give screenshots room instead of failing.
   page.setDefaultTimeout(180000);
   const errors = [];
-  page.on('pageerror', (e) => errors.push(e.message));
+  // The headless browser has no audio device and no user gesture to grant pointer
+  // lock, and says so on most runs. Neither is the page misbehaving, and counting
+  // them made this probe fail at random on a world that was well inside budget —
+  // the same filter the village and atmosphere probes already carry.
+  const ignorable = /AudioContext|audio device|Pointer Lock/i;
+  page.on('pageerror', (e) => {
+    if (!ignorable.test(e.message)) errors.push(e.message);
+  });
   page.on('console', (m) => {
-    if (m.type() === 'error') errors.push(m.text());
+    if (m.type() === 'error' && !ignorable.test(m.text())) errors.push(m.text());
   });
 
   await page.goto(url, { waitUntil: 'load' });

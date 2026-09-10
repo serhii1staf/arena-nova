@@ -1,6 +1,6 @@
 {
   "name": "arena-nova",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Optimized 3D game — overgrown gothic cathedral lobby. Runs in the browser and as a native desktop app (Tauri). Multiplayer-ready.",
   "type": "module",
   "license": "MIT",
@@ -13,6 +13,9 @@
     "smoke": "node scripts/smoke.mjs",
     "perf": "node scripts/debug-world.mjs",
     "ground": "node scripts/debug-ground.mjs",
+    "grass": "node scripts/debug-grass.mjs",
+    "terrain": "node scripts/debug-terrain.mjs",
+    "transition": "node scripts/debug-transition.mjs",
     "sky": "node scripts/debug-sky.mjs",
     "skins": "node scripts/debug-skins.mjs",
     "locomotion": "node scripts/debug-locomotion.mjs",
@@ -22,11 +25,13 @@
     "village": "node scripts/debug-village.mjs",
     "start": "node scripts/debug-start.mjs",
     "admin": "node scripts/debug-admin.mjs",
+    "net": "node scripts/debug-net.mjs",
     "deploy": "npm run build && wrangler deploy",
     "server:dev": "wrangler dev",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:local": "tauri build --config src-tauri/tauri.local.json"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

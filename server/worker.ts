@@ -73,7 +73,16 @@ interface Attached extends PlayerSnapshot {
   seen: number;
   /** Granted only by `claimName`, never by anything the client sends. */
   admin: boolean;
+  /**
+   * Latency the client reported for itself, in ms, clamped. Held here with the
+   * rest of the player state so it survives hibernation like everything else —
+   * an instance field would be lost the moment the room went idle.
+   */
+  ping: number;
 }
+
+/** Nothing sensible is above this, and it keeps the number printable. */
+const MAX_REPORTED_PING = 5000;
 
 /** Snapshots are broadcast at most this often (ms) — 20 Hz. */
 const BROADCAST_INTERVAL = 50;
@@ -88,6 +97,17 @@ const MAX_PLAYERS = 16;
  */
 const RESERVED_NAME = 'Kairozun';
 const OWNER_KEY = 'reserved:owner';
+/**
+ * Shortest value accepted as an owner token.
+ *
+ * This is also how a record written by the previous scheme is recognised. That
+ * scheme stored the *connection* id, which is regenerated for every socket, so
+ * the reserved name could be claimed once per room and never again — the owner
+ * came back with a new id, failed to match the stored one, and was refused along
+ * with everybody else. Any stored value shorter than this is therefore a dead
+ * record from that scheme and is treated as unclaimed rather than as a rival.
+ */
+const MIN_OWNER_TOKEN = 32;
 
 export class GameRoom {
   private readonly state: DurableObjectState;
@@ -123,6 +143,8 @@ export class GameRoom {
       y: 0,
       z: 0,
       yaw: 0,
+      // Unmeasured, not "perfect": the client has not completed a round trip yet.
+      ping: 0,
       seen: Date.now(),
     };
     server.serializeAttachment(attached);
@@ -145,9 +167,21 @@ export class GameRoom {
    * hibernating and being evicted — an in-memory flag would hand the name to
    * whoever happened to reconnect first after an idle period.
    *
-   * Admin is decided here and only here. The client is never asked.
+   * What is recorded is the claimant's *install* token, not their connection id.
+   * The connection id is minted per socket, so recording it meant the owner could
+   * never prove continuity: they reconnected, presented a new id, and were refused
+   * from their own name. The token is the only thing on either side of the wire
+   * that outlives a socket.
+   *
+   * Admin is decided here and only here. The client is never asked, and the token
+   * grants nothing by itself — it is compared against a record the server wrote.
    */
-  private async claimName(ws: CfWebSocket, attached: Attached, wanted: string): Promise<void> {
+  private async claimName(
+    ws: CfWebSocket,
+    attached: Attached,
+    wanted: string,
+    token: string | null,
+  ): Promise<void> {
     if (wanted.toLowerCase() !== RESERVED_NAME.toLowerCase()) {
       if (attached.admin) {
         // Gave up the reserved name, so the rights go with it.
@@ -157,16 +191,29 @@ export class GameRoom {
       return;
     }
 
-    const owner = (await this.state.storage.get<string>(OWNER_KEY)) ?? null;
-    if (owner === null) {
-      await this.state.storage.put(OWNER_KEY, attached.id);
-    } else if (owner !== attached.id) {
-      // Taken by someone else: refuse the name and say so.
+    const refuse = (): void => {
       attached.name = `${wanted}_${attached.id.slice(0, 4)}`;
       attached.admin = false;
       ws.serializeAttachment(attached);
       this.send(ws, { type: 'nameRejected', name: wanted, reason: 'reserved' });
       this.broadcast(true);
+    };
+
+    // No usable token means no way to be recognised again, so there is nothing to
+    // record and nothing to grant. Refusing is the safe direction: granting would
+    // hand the name to any client that simply omitted the field.
+    if (token === null) {
+      refuse();
+      return;
+    }
+
+    const stored = (await this.state.storage.get<string>(OWNER_KEY)) ?? null;
+    const claimed = stored !== null && stored.length >= MIN_OWNER_TOKEN;
+    if (!claimed) {
+      // Unclaimed, or holding a dead record from the connection-id scheme.
+      await this.state.storage.put(OWNER_KEY, token);
+    } else if (stored !== token) {
+      refuse();
       return;
     }
 
@@ -197,11 +244,11 @@ export class GameRoom {
           String(msg.name ?? 'Player')
             .replace(/[\u0000-\u001f\u007f]/g, '')
             .slice(0, 24) || 'Player';
-        // The reserved name is claimed once, permanently, by whoever takes it
-        // first, and it carries admin rights. Resolved asynchronously against
-        // durable storage, so the rest of the join is applied immediately and the
-        // decision is delivered when it is known.
-        void this.claimName(ws, attached, wanted);
+        // The install token, which is only ever consulted for the reserved name.
+        // Constrained to a hex-ish shape and a sane length before it can be
+        // written to storage or compared against it.
+        const rawToken = String(msg.owner ?? '').replace(/[^a-z0-9]/gi, '');
+        const token = rawToken.length >= MIN_OWNER_TOKEN ? rawToken.slice(0, 96) : null;
         attached.name = wanted;
         // Skins are ids from a fixed client-side list, so a short allow-listed
         // string is all that is needed; anything odd falls back on the client.
@@ -209,6 +256,15 @@ export class GameRoom {
         attached.seen = Date.now();
         ws.serializeAttachment(attached);
         this.broadcast(true);
+        // Only now the reserved name, which is claimed once and permanently by
+        // whoever takes it first. Resolved asynchronously against durable storage,
+        // so the rest of the join is already applied and delivered by the time the
+        // decision is known.
+        //
+        // Fired *after* the writes above, not before: a refusal renames the player,
+        // and some of its paths do not await anything at all. Started first, those
+        // would be undone by the very assignments they were meant to override.
+        void this.claimName(ws, attached, wanted, token);
         break;
       }
 
@@ -231,6 +287,15 @@ export class GameRoom {
         attached.z = clamp(cmd.z, -4000, 4000);
         attached.y = clamp(Number.isFinite(cmd.y) ? cmd.y : attached.y, -200, 1200);
         attached.yaw = clamp(cmd.yaw, -100, 100);
+        // Latency is self-reported — nobody else can measure it — so it is treated
+        // like every other client-supplied number here: taken only if it is finite,
+        // rounded, and clamped into a range that cannot be used to push nonsense
+        // (NaN, Infinity, a negative or a nine-digit value) into every other
+        // player's UI. An absent field leaves the last known value alone rather
+        // than resetting it, so one odd frame does not blank the readout.
+        if (Number.isFinite(cmd.ping)) {
+          attached.ping = clamp(Math.round(cmd.ping as number), 0, MAX_REPORTED_PING);
+        }
         attached.seen = Date.now();
         ws.serializeAttachment(attached);
         this.broadcast(false);
@@ -285,6 +350,9 @@ export class GameRoom {
         y: a.y,
         z: a.z,
         yaw: a.yaw,
+        // `?? 0` because an attachment written by an older build of this worker
+        // has no such field, and those sockets survive a deploy.
+        ping: a.ping ?? 0,
       });
     }
 

@@ -117,8 +117,11 @@ let pending: Promise<PropSet | null> | null = null;
  * coordinate into [-1, 1]. The symptom was a village whose geometry spanned
  * exactly minus one to one metre and therefore sat a metre through the ground,
  * while looking almost right because the clamp is proportional.
+ *
+ * Exported because every meshopt-compressed pack hits this, not just this one —
+ * `GrassModels` loads a second pack and needs the same first step.
  */
-function dequantize(geo: BufferGeometry): void {
+export function dequantize(geo: BufferGeometry): void {
   for (const name of Object.keys(geo.attributes)) {
     const attr = geo.attributes[name] as BufferAttribute;
     if (!attr.normalized && attr.array instanceof Float32Array) continue;
@@ -319,18 +322,40 @@ export function mergeAuthored(root: Object3D): Mesh[] {
 
     // Bake the placement. The prototypes were already dequantised and given a
     // uniform attribute set at load, so nothing here has to touch attributes.
+    //
+    // The index is kept. `mergeGeometries` merges indexed inputs by offsetting
+    // their indices, so expanding each part with `toNonIndexed` first was
+    // triplicating every vertex only to hand the result to something that did not
+    // need it — and it is not a cheap triplication: an authored house is eight to
+    // twelve thousand triangles, so a hamlet went through a few hundred thousand
+    // vertices of allocate-and-copy, twice over, on the frame that built it. That
+    // was measured as the single most expensive thing the world does, at over
+    // 200 ms of CPU for one village, which is what made stepping out of the lobby
+    // drop the frame rate.
     const geo = mesh.geometry.clone();
     geo.applyMatrix4(mesh.matrixWorld);
-    const flat = geo.index ? geo.toNonIndexed() : geo;
-    if (flat !== geo) geo.dispose();
 
     let list = byMaterial.get(material);
     if (!list) byMaterial.set(material, (list = []));
-    list.push(flat);
+    list.push(geo);
   });
 
   const out: Mesh[] = [];
   for (const [material, parts] of byMaterial) {
+    // `mergeGeometries` requires the parts to agree on whether they are indexed.
+    // The pack is one file and comes out uniform, so this is normally free; the
+    // fallback exists because a silent `null` here would delete a village.
+    const indexed = parts.filter((p) => p.index !== null).length;
+    if (indexed !== 0 && indexed !== parts.length) {
+      for (let i = 0; i < parts.length; i++) {
+        const p = parts[i]!;
+        if (p.index === null) continue;
+        const flat = p.toNonIndexed();
+        p.dispose();
+        parts[i] = flat;
+      }
+    }
+
     const merged = parts.length === 1 ? parts[0]! : mergeGeometries(parts, false);
     if (parts.length > 1) {
       for (const p of parts) p.dispose();

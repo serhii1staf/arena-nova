@@ -26,6 +26,10 @@ import {
  * Sits inside the sky dome and outside anything else, is additive, and writes no
  * depth — so terrain and mountains occlude it correctly while it never occludes
  * anything itself.
+ *
+ * *When* there is a display is not decided here. `DayNight` owns the schedule —
+ * most nights have none — and this module only draws whatever strength it is
+ * handed, right down to nothing at all.
  */
 
 /** Radius of the curtain ring, well inside the sky dome. */
@@ -123,7 +127,10 @@ const FRAG = /* glsl */ `
 
 export interface AuroraField {
   mesh: Mesh;
-  /** `amount` is 0..1; the whole thing switches off in daylight. */
+  /**
+   * `amount` is 0..1. At zero the mesh hides itself and returns immediately, so
+   * daylight and the nights with no display both cost nothing.
+   */
   update(centre: Vector3, elapsed: number, amount: number): void;
   dispose(): void;
 }

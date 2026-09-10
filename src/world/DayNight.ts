@@ -14,7 +14,7 @@ import {
   SphereGeometry,
   Vector3,
 } from 'three';
-import { surfaceBiomeAt, type BiomeId } from './WorldGen.ts';
+import { cellRandom, surfaceBiomeAt, type BiomeId } from './WorldGen.ts';
 import { createAurora, type AuroraField } from './Aurora.ts';
 import { Weather } from './Weather.ts';
 
@@ -119,6 +119,45 @@ function smoothStep(edge0: number, edge1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
+// ---------------------------------------------------------------------------
+// Aurora schedule
+// ---------------------------------------------------------------------------
+
+/**
+ * Share of nights that carry a display. Around two in five, so one is typically
+ * two or three nights away — often enough to be worth looking up on a clear
+ * night, rare enough that finding one is a find rather than a fixture.
+ */
+const AURORA_NIGHTS = 0.4;
+/**
+ * Salt for the schedule hash. Arbitrary but fixed: changing it reshuffles which
+ * nights have a display for every player.
+ */
+const AURORA_SALT = 7331;
+/** A display night peaks somewhere in this band. */
+const AURORA_MIN_STRENGTH = 0.38;
+const AURORA_MAX_STRENGTH = 1;
+
+/**
+ * How strong night `index` is, or 0 for a night with no display at all.
+ *
+ * Hashed from the night index rather than rolled when the night begins. The
+ * amount is recomputed from scratch every frame, so a fresh roll would flicker
+ * and a stored roll would be one more piece of state to keep in step with the
+ * clock; a hash gives the same answer every time it is asked, in any order, from
+ * any starting point — including after the clock is driven forwards or back.
+ *
+ * Strength comes out of the *same* number that decides whether there is a
+ * display, remapped across the band below the threshold. Nothing to keep in
+ * agreement, and a weak showing is as likely as one that fills the sky.
+ */
+function auroraStrengthFor(index: number): number {
+  const r = cellRandom(index, 0, AURORA_SALT);
+  if (r >= AURORA_NIGHTS) return 0;
+  const t = r / AURORA_NIGHTS;
+  return AURORA_MIN_STRENGTH + t * (AURORA_MAX_STRENGTH - AURORA_MIN_STRENGTH);
+}
+
 const STAR_VERT = /* glsl */ `
   attribute float aSize;
   attribute float aPhase;
@@ -187,12 +226,51 @@ export class DayNight {
   /** Everything that has to sit far away and follow the camera. */
   readonly group = new Group();
 
+  /**
+   * Days since the world began, fractional. This is the clock; everything else
+   * about time of day is derived from it.
+   *
+   * Its fractional part is the time of day (`t01`) and its whole part is which
+   * day we are on, which is what the aurora schedule keys off. Kept as one
+   * number rather than a time plus a day counter so the two can never disagree,
+   * and public because it *is* the clock: something that wants to look at three
+   * consecutive nights advances this rather than waiting ten minutes a night.
+   */
+  clock = 0;
+
   /** 0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 = sunset. */
-  t01: number;
+  get t01(): number {
+    return this.clock - Math.floor(this.clock);
+  }
+
+  /** Jumps to a time of day within the current day, leaving the date alone. */
+  set t01(v: number) {
+    this.clock = Math.floor(this.clock) + (((v % 1) + 1) % 1);
+  }
+
+  /**
+   * Which night we are in, counting from the world's first.
+   *
+   * Offset by half a day so the index turns over at noon. A night straddles
+   * midnight, so counting whole days would put the small hours in a different
+   * night from the evening before them — and an aurora scheduled per night would
+   * switch off half way through it.
+   */
+  get nightIndex(): number {
+    return Math.floor(this.clock + 0.5);
+  }
+
   /** 0 in full daylight, 1 in full dark. Drives fireflies and stars. */
   nightFactor = 0;
   /** Current star visibility, exposed for diagnostics. */
   starOpacity = 0;
+  /**
+   * What tonight's display peaks at, 0 on a night that has none. Constant for
+   * the whole of one night; see `auroraStrengthFor`.
+   */
+  auroraStrength = 0;
+  /** What the aurora is doing right now, 0..1. Exposed beside `starOpacity`. */
+  auroraAmount = 0;
   /**
    * 0..1 density for the ground mist where the player is standing.
    *
@@ -262,6 +340,8 @@ export class DayNight {
   private readonly fogTint = new Color();
   private readonly scratch = new Color();
   private elapsed = 0;
+  /** Night the cached `auroraStrength` was computed for; -1 before the first. */
+  private scheduledNight = -1;
 
   /** `startAt` is a time of day in the same 0..1 units; defaults to mid-morning. */
   constructor(startAt = 0.34) {
@@ -370,7 +450,7 @@ export class DayNight {
   /** Advances the clock and recomputes the sky. Call once per rendered frame. */
   update(frameDelta: number, playerPos: Vector3): void {
     this.elapsed += frameDelta;
-    this.t01 = (this.t01 + frameDelta / DAY_LENGTH) % 1;
+    this.clock += frameDelta / DAY_LENGTH;
     this.starUniforms.uTime.value = this.elapsed;
 
     // Sun arc: tilted so noon is high but not straight overhead, which keeps
@@ -434,11 +514,33 @@ export class DayNight {
     );
     this.group.position.set(0, 0, 0);
     this.stars.position.copy(playerPos);
-    // Aurora comes up with the stars but lags them slightly and is never quite
-    // steady, so it reads as weather rather than as a fixture of the sky.
-    const auroraAmount =
-      Math.pow(this.nightFactor, 1.8) * (0.55 + 0.45 * Math.sin(this.elapsed * 0.045));
-    this.aurora.update(playerPos, this.elapsed, auroraAmount);
+
+    // Aurora. Most nights have none — which ones do, and how strong, is hashed
+    // from the night index, so the answer is stable however the clock moves. Only
+    // recomputed when the night turns over, which is also what keeps the strength
+    // constant for the whole of one night.
+    if (this.nightIndex !== this.scheduledNight) {
+      this.scheduledNight = this.nightIndex;
+      this.auroraStrength = auroraStrengthFor(this.scheduledNight);
+    }
+    if (this.auroraStrength <= 0 || this.nightFactor <= 0.02) {
+      // A quiet night, or daylight. The field is told once that it is off, hides
+      // itself, and is not touched again until a display night comes round — same
+      // shape as the fireflies skipping themselves in daylight, and for the same
+      // reason: no uniform writes and no draw call.
+      if (this.auroraAmount > 0) this.aurora.update(playerPos, this.elapsed, 0);
+      this.auroraAmount = 0;
+    } else {
+      // Ramped rather than switched. `nightFactor` already climbs over dusk and
+      // falls over dawn, and putting a smoothstep on top of it means the display
+      // starts after the stars are out and is gone before the sky pales — about
+      // twenty seconds each way at this day length. The breathing on top keeps it
+      // from ever being steady, so it reads as weather.
+      const ramp = smoothStep(0.08, 0.75, this.nightFactor);
+      const breathe = 0.72 + 0.28 * Math.sin(this.elapsed * 0.045);
+      this.auroraAmount = this.auroraStrength * ramp * breathe;
+      this.aurora.update(playerPos, this.elapsed, this.auroraAmount);
+    }
 
     // The sun disc dims and reddens into the haze as it sets; the moon only shows
     // once the sky is dark enough for it to read.

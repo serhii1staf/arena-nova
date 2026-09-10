@@ -219,6 +219,10 @@ export class Engine {
           this.switching = false;
           this.lastTime = performance.now();
           this.accumulator = 0;
+          // The new scene streams its surroundings in over the next couple of
+          // seconds. Those frames time the loader, not the scene, so they are not
+          // allowed to drive dynamic resolution — see `beginWarmup`.
+          this.quality.beginWarmup();
           this.onTransition?.('in');
         });
       return;

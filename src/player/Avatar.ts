@@ -24,7 +24,17 @@ let manifestPromise: Promise<CharacterManifest | null> | null = null;
  * Reads `public/models/character.json`. Shipped with `enabled: false`, so a
  * clean install resolves to `null` here and never requests a model that isn't
  * there. Cached: the file is read once per session.
+ *
+ * Exported because the character library has a second consumer now — the player
+ * list renders a portrait of each skin — and both have to agree on the same
+ * height, facing and enabled flag. Two readers of one cached promise means one
+ * request, and no chance of the portrait being framed for a different rig than
+ * the one walking around.
  */
+export function loadCharacterManifest(): Promise<CharacterManifest | null> {
+  return loadManifest();
+}
+
 function loadManifest(): Promise<CharacterManifest | null> {
   manifestPromise ??= (async () => {
     try {

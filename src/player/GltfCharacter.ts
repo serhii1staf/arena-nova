@@ -57,7 +57,15 @@ export interface CharacterManifest {
   runClipSpeed?: number;
 }
 
-interface CharacterSource {
+/**
+ * A prepared model, shared by every instance of that character.
+ *
+ * Exported so a caller that only wants to look at the figure — the player list's
+ * portraits — can clone the prototype without spinning up a mixer and a set of
+ * actions it would never advance. Geometry and materials in here belong to the
+ * cache: clone the object graph, never dispose what it points at.
+ */
+export interface CharacterSource {
   /** Prototype scene: already scaled, footed and flagged. Cloned per instance. */
   prototype: Object3D;
   clips: AnimationClip[];

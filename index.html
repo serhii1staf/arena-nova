@@ -185,10 +185,27 @@
         background: rgba(90, 200, 130, 0.12);
       }
       /*
-       * The character chip. A true portrait would mean rendering each player's
-       * model to a texture off-screen every time somebody joins or changes skin;
-       * this is the same information — which of the seven characters they are — for
-       * no draw calls at all.
+       * The character portrait: an actual front view of the model that player is
+       * wearing, rendered once per character and reused by every row wearing it.
+       * There are only seven characters and a portrait never changes, so this is a
+       * handful of one-off 64x64 draws for the whole session — see
+       * src/ui/Portraits.ts. The accent from the chip below survives as the ring,
+       * so a character is still identifiable at a glance.
+       */
+      .portrait {
+        flex: 0 0 auto;
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+        background: radial-gradient(120% 120% at 50% 15%, rgba(255, 255, 255, 0.16), transparent 70%),
+          rgba(8, 24, 15, 0.85);
+        box-shadow: inset 0 0 0 1px var(--chip, #2c6b46);
+        object-fit: cover;
+      }
+      /*
+       * Fallback for the moment before a portrait has been rendered, and for a
+       * build with no authored models. Same footprint, so nothing shifts when the
+       * picture lands.
        */
       .chip {
         display: grid;

@@ -71,8 +71,12 @@ export interface TerrainStreamer {
   /**
    * Build pending chunks until `deadline` (a `performance.now()` timestamp).
    * Returns work remaining.
+   *
+   * `force` allows exactly one build to start even if the deadline has already
+   * passed, which is what guarantees progress on a frame that was slow before
+   * streaming even began. It is granted to one streamer per frame, in turn.
    */
-  pump(deadline: number): number;
+  pump(deadline: number, force?: boolean): number;
   /** Force-build everything within `rings` of a point (used before play starts). */
   prime(position: Vector3, rings: number): void;
   loadedChunks(): number;
@@ -106,6 +110,8 @@ function buildChunkGeometry(cx: number, cz: number, segments: number): BufferGeo
   const normals = new Float32Array(total * 3);
   const colors = new Float32Array(total * 3);
   const uvs = new Float32Array(total * 2);
+  /** How much of the grass texture's colour survives at each vertex. */
+  const chroma = new Float32Array(total);
 
   const tmp = new Color();
   const lowC = new Color();
@@ -149,11 +155,22 @@ function buildChunkGeometry(cx: number, cz: number, segments: number): BufferGeo
       lowC.copy(style.ground);
       highC.copy(style.groundAlt);
       rockC.copy(style.rock);
-      const band = Math.min(1, Math.max(0, (h - WORLD.waterLevel) / 90));
+      // The height ramp spans the world's actual altitude range. It used to
+      // saturate at 96 m, which was the top of the map when it was written; with
+      // peaks past 350 m that put every mountain flank at the same tint.
+      const band = Math.min(1, Math.max(0, (h - WORLD.waterLevel) / 210));
       tmp.copy(lowC).lerp(highC, band);
       const slope = Math.hypot(nx, nz) / (2 * SURFACE_STEP);
-      const steep = Math.min(1, slope * 1.35);
-      tmp.lerp(rockC, steep * 0.85);
+      // Rock appears on faces, not on slopes. The ramp deliberately starts at
+      // about 24° and reaches full stone near 58°: the previous version began at
+      // zero, so a gentle snowfield came out half slate-grey, while a genuine
+      // cliff was never more than four fifths rock.
+      const steep = Math.min(1, Math.max(0, (slope - 0.45) / 1.15));
+      tmp.lerp(rockC, steep * 0.95);
+      // Snow, scree and any steep face stop borrowing the grass texture's green
+      // (see `BiomeStyle.chroma`). Without this the vertex colour is fighting a
+      // saturated green multiply it cannot win: the snow line was a lawn.
+      chroma[i] = style.chroma * (1 - steep * 0.85);
       // Large-scale mottling so big areas never read as one flat colour.
       const mottle = 0.88 + ((Math.sin(wx * 0.013) + Math.cos(wz * 0.011)) * 0.5 + 0.5) * 0.22;
       colors[i * 3] = tmp.r * mottle;
@@ -192,6 +209,7 @@ function buildChunkGeometry(cx: number, cz: number, segments: number): BufferGeo
     colors[s * 3 + 2] = colors[src + 2]!;
     uvs[s * 2] = uvs[gridIndex * 2]!;
     uvs[s * 2 + 1] = uvs[gridIndex * 2 + 1]!;
+    chroma[s] = chroma[gridIndex]!;
     return s++;
   };
 
@@ -227,6 +245,7 @@ function buildChunkGeometry(cx: number, cz: number, segments: number): BufferGeo
   geo.setAttribute('normal', new BufferAttribute(normals, 3));
   geo.setAttribute('color', new BufferAttribute(colors, 3));
   geo.setAttribute('uv', new BufferAttribute(uvs, 2));
+  geo.setAttribute('aChroma', new BufferAttribute(chroma, 1));
   geo.setIndex(indices);
   geo.computeBoundingSphere();
   return geo;
@@ -265,6 +284,49 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
     roughness: 1,
     metalness: 0,
   });
+
+  /**
+   * Lets the ground texture contribute relief without contributing colour.
+   *
+   * The detail map is a lush green grass, and a standard material multiplies it
+   * by the vertex colour. Multiplication cannot brighten or shift a hue, so above
+   * the tree line the biome colours were powerless: a snowfield rendered as a
+   * bright green lawn, and every cliff face as moss. Grading each vertex's
+   * texture toward its own luminance keeps the grain, the normal map and the
+   * roughness exactly as they were, and lets the palette decide the colour.
+   *
+   * Done with `onBeforeCompile` on the one shared material rather than with a
+   * second material: this is a two-line change to the map fetch, and a separate
+   * rock material would double the streamed world's draw calls.
+   */
+  material.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        '#include <common>\nattribute float aChroma;\nvarying float vChroma;',
+      )
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvChroma = aChroma;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vChroma;')
+      .replace(
+        '#include <map_fragment>',
+        /* glsl */ `
+        #ifdef USE_MAP
+          vec4 groundTexel = texture2D( map, vMapUv );
+          float groundLum = dot( groundTexel.rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+          // Normalised against the map's own mean luminance (about 0.24 in linear
+          // light — it is a mid-green), then pulled back toward 1. Plain
+          // luminance would be a 0.24 multiply, so a snowfield asking for 0.9
+          // white would render at 0.2 and read as wet slate. This way the grain
+          // still modulates the surface but the average multiply is unity, and
+          // the palette gets to decide how bright the ground is.
+          float groundDetail = mix( 1.0, clamp( groundLum * 4.1, 0.0, 2.0 ), 0.45 );
+          groundTexel.rgb = mix( vec3( groundDetail ), groundTexel.rgb, vChroma );
+          diffuseColor *= groundTexel;
+        #endif
+        `,
+      );
+  };
 
   /**
    * Wet ground, done by darkening the surface and taking the edge off its
@@ -376,16 +438,21 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
     }
   };
 
-  const pump = (deadline: number): number => {
+  const pump = (deadline: number, force = true): number => {
     if (pending.size === 0) return 0;
     // Nearest first, so the ground under the player always exists.
     const queue = [...pending.entries()].sort((a, b) => a[1].dist - b[1].dist);
     for (let i = 0; i < BUILD_BUDGET && i < queue.length; i++) {
       // A time budget, not just a count: chunk cost varies with LOD and with how
       // much of the height lattice is already cached, so a fixed count either
-      // wastes headroom or blows the frame. Always build at least one, otherwise
-      // a slow frame could stall streaming forever.
-      if (i > 0 && performance.now() >= deadline) break;
+      // wastes headroom or blows the frame.
+      //
+      // `force` is the guarantee of progress: the streamer it is granted to may
+      // start one build even with the budget already gone, so a run of slow frames
+      // cannot stall streaming forever. It used to be unconditional here and in
+      // every other streamer, which meant four of them each overran the shared
+      // budget by a whole chunk on the same frame — see `Exterior.update`.
+      if ((i > 0 || !force) && performance.now() >= deadline) break;
       const [k, want] = queue[i]!;
       pending.delete(k);
       buildChunk(want.cx, want.cz, want.ring);

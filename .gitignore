@@ -10,6 +10,9 @@ dist-ssr/
 src-tauri/target/
 src-tauri/gen/
 
+# Local state from `wrangler dev`
+.wrangler/
+
 # Editor / OS
 .DS_Store
 .vscode/*
