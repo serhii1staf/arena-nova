@@ -5,8 +5,11 @@ import {
   Group,
   Mesh,
   MeshStandardMaterial,
+  Vector2,
   Vector3,
+  type Texture,
 } from 'three';
+import type { SnowTrackMap } from './SnowTracks.ts';
 import type { AssetManager } from '../core/AssetManager.ts';
 import type { QualitySettings } from '../core/QualityManager.ts';
 import {
@@ -48,6 +51,19 @@ const BUILD_BUDGET = 4;
 /** How far chunk edges drop, to hide cracks between differing LOD levels. */
 const SKIRT_DEPTH = 26;
 
+/**
+ * Where the fresh-snow line sits with the barest cover, and where it reaches when
+ * cover is total, in metres.
+ *
+ * The ceiling is the permanent snow line: a dusting only freshens ground that is
+ * white anyway, which is what a light fall on a range actually does. The floor is
+ * just above the sea, so a long hard winter can bring snow all the way down — and
+ * because the shader interpolates between the two, everything in between happens
+ * on its own, in the right order, with the summits going first.
+ */
+const SNOW_CEILING = WORLD.snowLine;
+const SNOW_FLOOR = WORLD.waterLevel + 6;
+
 interface Chunk {
   key: string;
   cx: number;
@@ -68,6 +84,11 @@ export interface TerrainStreamer {
    * material, so this is two property writes for the entire streamed world.
    */
   setWetness(amount: number): void;
+  /**
+   * How much snow is lying, 0..1, plus the map of tracks walked through it.
+   * As cheap as `setWetness` and for the same reason: one shared material.
+   */
+  setSnow(cover: number, tracks: SnowTrackMap | null): void;
   /**
    * Build pending chunks until `deadline` (a `performance.now()` timestamp).
    * Returns work remaining.
@@ -299,15 +320,110 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
    * second material: this is a two-line change to the map fetch, and a separate
    * rock material would double the streamed world's draw calls.
    */
+  /**
+   * Lying snow, and the tracks walked through it.
+   *
+   * Held on the material rather than passed per chunk: every chunk in the world
+   * shares this one material, so a whole mountain range turns white for the cost
+   * of four uniform writes. The alternative — a second snow material, or a
+   * coverage attribute baked into each chunk's geometry — would either double the
+   * streamed world's draw calls or make snowfall require rebuilding the terrain.
+   *
+   * `uSnowCover` is how far down the range the snowline has crept, 0..1, and the
+   * shader turns that into coverage per fragment from the fragment's own height
+   * and slope. That is the whole reason one scalar is enough: snow settling high
+   * first and creeping down is exactly what an altitude ramp against a rising
+   * threshold produces, and it costs no memory and no streaming work at all.
+   */
+  const snowUniforms = {
+    uSnowCover: { value: 0 },
+    /** Where the tracks map is centred, and how many metres across it is. */
+    uTrackOrigin: { value: new Vector2() },
+    uTrackExtent: { value: 1 },
+    uTrackMap: { value: null as Texture | null },
+  };
+
   material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, snowUniforms);
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
-        '#include <common>\nattribute float aChroma;\nvarying float vChroma;',
+        '#include <common>\nattribute float aChroma;\nvarying float vChroma;\nvarying vec3 vSurfaceWorld;\nvarying vec3 vSurfaceUp;',
       )
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvChroma = aChroma;');
+      .replace(
+        '#include <begin_vertex>',
+        /* glsl */ `
+        #include <begin_vertex>
+        vChroma = aChroma;
+        vSurfaceWorld = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
+        // The *world* normal, carried separately. three's own \`vNormal\` is in view
+        // space, so its y is "towards the top of the screen" rather than "up" — a
+        // slope test built on it changes answer as the camera turns, which showed
+        // up as snow that came and went depending on which way you were facing.
+        vSurfaceUp = normalize( mat3( modelMatrix ) * normal );
+        `,
+      );
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying float vChroma;')
+      .replace(
+        '#include <common>',
+        /* glsl */ `
+        #include <common>
+        varying float vChroma;
+        varying vec3 vSurfaceWorld;
+        varying vec3 vSurfaceUp;
+        uniform float uSnowCover;
+        uniform vec2 uTrackOrigin;
+        uniform float uTrackExtent;
+        uniform sampler2D uTrackMap;
+
+        /**
+         * How much snow is lying on this fragment, 0..1.
+         *
+         * Three things decide it, and all three are read from the surface itself
+         * rather than stored anywhere. Height, because snow settles at altitude
+         * first and the line creeps down as more falls. Slope, because snow does
+         * not cling to a cliff — that is why real mountains show bare rock on
+         * their faces and white on their shoulders, and it is most of what makes
+         * a covering read as snow rather than as white paint. And the tracks map,
+         * so walking through it leaves it behind.
+         */
+        float snowAt( vec3 world, vec3 surfaceNormal ) {
+          if ( uSnowCover <= 0.001 ) return 0.0;
+
+          // The height the cover has reached. At full cover it comes down to the
+          // valley floor; with a dusting it only touches the summits.
+          float snowHeight = mix( ${SNOW_CEILING.toFixed(1)}, ${SNOW_FLOOR.toFixed(1)}, uSnowCover );
+          float lying = smoothstep( snowHeight, snowHeight + 42.0, world.y );
+
+          // Steepness, from the surface normal. Snow holds to about 50 degrees and
+          // sheds above that. Deliberately not called "flat": that is an
+          // interpolation qualifier in GLSL ES 3.0, and using it as an identifier
+          // fails to compile — which the snow probe is what caught.
+          float holds = smoothstep( 0.62, 0.86, surfaceNormal.y );
+          lying *= holds;
+
+          // Broken up so a covering has a shape. Without this the snowline is a
+          // clean contour ring around every hill, which is the one thing that
+          // never happens outdoors — wind strips ridges and fills hollows.
+          float drift =
+            sin( world.x * 0.021 ) * cos( world.z * 0.019 ) * 0.5 +
+            sin( world.x * 0.006 + world.z * 0.008 ) * 0.5;
+          lying = clamp( lying + drift * 0.16 * ( 1.0 - uSnowCover ), 0.0, 1.0 );
+
+          // Tracks. The map is a single channel of "how trodden", in world space
+          // around the player, so a footprint has to be looked up rather than
+          // baked — the ground it sits on may be streamed away and rebuilt.
+          vec2 uv = ( world.xz - uTrackOrigin ) / uTrackExtent + 0.5;
+          if ( all( greaterThan( uv, vec2( 0.0 ) ) ) && all( lessThan( uv, vec2( 1.0 ) ) ) ) {
+            float trodden = texture2D( uTrackMap, uv ).r;
+            // Compressed rather than erased: a boot pushes snow aside and exposes
+            // what is underneath, it does not clear the ground.
+            lying *= 1.0 - trodden * 0.82;
+          }
+          return lying;
+        }
+        `,
+      )
       .replace(
         '#include <map_fragment>',
         /* glsl */ `
@@ -324,8 +440,51 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
           groundTexel.rgb = mix( vec3( groundDetail ), groundTexel.rgb, vChroma );
           diffuseColor *= groundTexel;
         #endif
+
+        float snowLying = snowAt( vSurfaceWorld, normalize( vSurfaceUp ) );
+        if ( snowLying > 0.0 ) {
+          // Fresh snow is close to white but not at it: pure white clips the
+          // moment the sun is on it and the shape of the ground disappears. The
+          // ground's own grain is kept at a fraction of its strength, which is
+          // what stops a slope reading as flat card.
+          vec3 snowColour = vec3( 0.88, 0.91, 0.96 ) * ( 0.9 + groundDetail * 0.1 );
+          diffuseColor.rgb = mix( diffuseColor.rgb, snowColour, snowLying );
+        }
+        `,
+      )
+      // Snow is rough and not remotely metallic, and it has to say so *after* the
+      // wetness has set both — otherwise a snowfield in the rain came out as
+      // polished slate, since wet ground lowers roughness and lifts metalness.
+      .replace(
+        '#include <roughnessmap_fragment>',
+        /* glsl */ `
+        #include <roughnessmap_fragment>
+        roughnessFactor = mix( roughnessFactor, 0.94, snowLying );
+        `,
+      )
+      .replace(
+        '#include <metalnessmap_fragment>',
+        /* glsl */ `
+        #include <metalnessmap_fragment>
+        metalnessFactor = mix( metalnessFactor, 0.0, snowLying );
         `,
       );
+  };
+
+  /**
+   * Publishes the lying-snow depth. Two writes for the entire streamed world.
+   */
+  const setSnow = (cover: number, tracks: SnowTrackMap | null): void => {
+    snowUniforms.uSnowCover.value = Math.min(1, Math.max(0, cover));
+    // Mirrored where a probe can see it. The uniform itself lives inside a
+    // compiled program and is not readable from outside, so without this there is
+    // no way to tell "the value never arrived" from "the ground was already white".
+    material.userData.snowCover = snowUniforms.uSnowCover.value;
+    if (tracks) {
+      snowUniforms.uTrackMap.value = tracks.texture;
+      snowUniforms.uTrackOrigin.value.copy(tracks.origin);
+      snowUniforms.uTrackExtent.value = tracks.extent;
+    }
   };
 
   /**
@@ -482,6 +641,7 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
     group,
     update,
     setWetness,
+    setSnow,
     pump,
     prime,
     loadedChunks: () => loaded.size,

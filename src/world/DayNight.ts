@@ -14,7 +14,7 @@ import {
   SphereGeometry,
   Vector3,
 } from 'three';
-import { cellRandom, surfaceBiomeAt, type BiomeId } from './WorldGen.ts';
+import { cellRandom, surfaceBiomeAt, WORLD, type BiomeId } from './WorldGen.ts';
 import { createAurora, type AuroraField } from './Aurora.ts';
 import { Weather } from './Weather.ts';
 
@@ -98,6 +98,43 @@ const FOG_BY_BIOME: Partial<Record<BiomeId, { multiplier: number; tint: Color }>
  * about whether cold air settles where you are standing. A snowfield reads as
  * clear at a distance but drifts at your feet, and a jungle is the reverse.
  */
+/**
+ * How fast lying snow builds up in a full storm, and how fast it goes in full sun,
+ * as a fraction of total cover per second.
+ *
+ * Melting is the faster of the two on purpose. Snow that accumulated as easily as
+ * it thawed would leave the range white almost permanently, because a front passes
+ * far more often than a whole clear day does — and permanent snow says nothing. The
+ * asymmetry is what makes a covering read as weather that happened rather than as
+ * a texture that was always there.
+ */
+/**
+ * The colour of air over snow: cold, desaturated, faintly blue.
+ *
+ * Slightly blue rather than neutral grey on purpose. Snow is bright enough that
+ * the light bouncing off it dominates what fills the shadows, and that light has
+ * been through ice — which is why photographs of snow have blue shadows and why
+ * neutral grey haze over a snowfield reads as smog.
+ */
+const SNOW_AIR = new Color(0.82, 0.86, 0.92);
+
+const SNOW_SETTLE_RATE = 0.022;
+const SNOW_MELT_RATE = 0.03;
+
+/**
+ * Altitudes between which precipitation turns from rain to snow, in metres.
+ *
+ * A band rather than a line: at the bottom it is all rain, at the top all snow,
+ * and in between both are drawn at partial strength, which is what sleet is. A
+ * hard threshold would make the transition pop as the player walked uphill.
+ *
+ * The band sits below `WORLD.snowLine` because that constant marks where the
+ * terrain is *permanently* white; weather turns to snow well before that, which is
+ * exactly what puts fresh snow on ground that is normally bare.
+ */
+const FREEZE_LOW = WORLD.snowLine * 0.52;
+const FREEZE_HIGH = WORLD.snowLine * 0.92;
+
 const MIST_BY_BIOME: Record<BiomeId, number> = {
   wetland: 1,
   pine: 0.82,
@@ -296,6 +333,27 @@ export class DayNight {
    */
   wetness = 0;
 
+  /**
+   * How hard it is snowing where the player is standing, 0..1.
+   *
+   * Separate from `rainAmount` rather than a sign on it, because the two are
+   * drawn by different fields and can legitimately be non-zero within a few
+   * hundred metres of each other — sleet at the treeline is rain below and snow
+   * above, and the player walks between them.
+   */
+  snowAmount = 0;
+
+  /**
+   * How much snow is lying, 0..1. Not a depth in metres: it is how far down the
+   * mountains the snowline has crept, which is what the eye actually reads.
+   *
+   * Slow in both directions and deliberately asymmetric — a night of snowfall
+   * accumulates less than a clear afternoon melts — so a fall builds up over
+   * minutes and a thaw takes longer still. A value that could swing inside a
+   * minute would have the mountains flickering white as fronts passed.
+   */
+  snowCover = 0;
+
   private readonly weather = new Weather();
 
   /**
@@ -447,6 +505,21 @@ export class DayNight {
     this.group.add(this.aurora.mesh);
   }
 
+  /**
+   * How much of the precipitation at a given height falls as snow, 0..1.
+   *
+   * Altitude carries almost all of it, because a lapse rate is the one part of
+   * this the player can act on: they can climb. Night adds a little, so a shower
+   * that arrives as rain in the afternoon can arrive as snow after dark at the
+   * same spot — which is a cheap way to make the same terrain read differently
+   * across a day, and is also what really happens.
+   */
+  private freezingAt(height: number): number {
+    const lift = this.nightFactor * 26;
+    const t = (height + lift - FREEZE_LOW) / (FREEZE_HIGH - FREEZE_LOW);
+    return Math.min(1, Math.max(0, t));
+  }
+
   /** Advances the clock and recomputes the sky. Call once per rendered frame. */
   update(frameDelta: number, playerPos: Vector3): void {
     this.elapsed += frameDelta;
@@ -485,15 +558,37 @@ export class DayNight {
       MIST_BY_BIOME[biome] * (0.18 + this.nightFactor * 0.72 + golden * 0.45);
     this.mistAmount += (Math.min(1, targetMist) - this.mistAmount) * k;
 
-    // Rain, and the ground remembering it. The read of `this.rainAmount` is the
-    // published value rather than the local one on purpose (see the field).
+    // Precipitation. One weather system decides *whether* it is falling; how
+    // cold it is decides what it falls as. Rain and snow are the same front seen
+    // at two temperatures, so they share a source and split — which is also why
+    // they can never both be at full strength, and why climbing through a shower
+    // turns it to snow around you rather than starting a second storm.
     this.weather.update(frameDelta, this.elapsed, biome);
-    this.rainAmount = this.weather.rain;
+    const falling = this.weather.rain;
+    const freezing = this.freezingAt(playerPos.y);
+    this.rainAmount = falling * (1 - freezing);
+    this.snowAmount = falling * freezing;
+
+    // The ground remembering the rain. The read of `this.rainAmount` is the
+    // published value rather than the local one on purpose (see the field).
     const rain = this.rainAmount;
     // Soaks about ten times faster than it dries.
     const soak = rain > this.wetness ? 0.5 : 0.045;
     this.wetness += (rain - this.wetness) * Math.min(1, frameDelta * soak);
     if (this.wetness < 0.002) this.wetness = 0;
+
+    // Lying snow. Accumulates from the whole front, not from what happens to be
+    // falling at the player's own altitude: the summits are above the freezing
+    // line whatever the valley is doing, and it is the summits this is for. Where
+    // it actually settles is the terrain shader's decision (see `Terrain`), which
+    // reads this depth against each fragment's own height and slope — so one
+    // scalar covers a whole mountain range without a texture or a second pass.
+    const settling = falling * SNOW_SETTLE_RATE;
+    // Melt is driven by the sun being up, not by the hour: an overcast noon melts
+    // far less than a clear one, and the sun elevation already carries both.
+    const thaw = Math.max(0, this.sunDir.y) * (1 - falling * 0.75) * SNOW_MELT_RATE;
+    this.snowCover += (settling - thaw) * frameDelta;
+    this.snowCover = Math.min(1, Math.max(0, this.snowCover));
 
     this.sunDisc.position.copy(playerPos).addScaledVector(this.sunDir, SKY_RADIUS);
     this.moonDisc.position.copy(playerPos).addScaledVector(this.moonDir, SKY_RADIUS);
@@ -583,8 +678,23 @@ export class DayNight {
 
     blend(t.hemi.color, NIGHT.hemiSky, DAY.hemiSky, GOLDEN.hemiSky);
     blend(t.hemi.groundColor, NIGHT.hemiGround, DAY.hemiGround, GOLDEN.hemiGround);
+    // Snow changes what the ground bounces back.
+    //
+    // The hemisphere light's lower colour is the world's own reflected light, and
+    // it is a dark green because the world is a jungle. Snow is the most
+    // reflective surface in the scene and it is not green, so leaving that term
+    // alone lit every snowfield from below with green — which is most of why the
+    // first working version still read as bleached grass rather than as snow, even
+    // once the surface itself was white. Brighter as well as cooler, because snow
+    // returns several times more light than soil does.
+    const bounce = Math.min(1, this.snowCover * 0.9 + this.snowAmount * 0.3);
+    if (bounce > 0.001) t.hemi.groundColor.lerp(SNOW_AIR, bounce * 0.8);
     t.hemi.intensity =
-      NIGHT.hemiIntensity + (DAY.hemiIntensity - NIGHT.hemiIntensity) * day - gold * 0.25;
+      (NIGHT.hemiIntensity + (DAY.hemiIntensity - NIGHT.hemiIntensity) * day - gold * 0.25) *
+      // Snow returns several times more light than soil, so the ambient term rises
+      // with it. Applied here rather than beside the colour above because this is
+      // where the intensity is decided; multiplying it earlier would be overwritten.
+      (1 + bounce * 0.22);
 
     blend(t.fog.color, NIGHT.fog, DAY.fog, GOLDEN.fog);
     // Canopy tint, applied as a multiply so it deepens rather than replaces.
@@ -593,9 +703,27 @@ export class DayNight {
       1 - (1 - this.fogTint.g) * 0.7,
       1 - (1 - this.fogTint.b) * 0.7,
     ));
+    // Snow takes the colour out of the air.
+    //
+    // Without this the snow looked wrong for a reason that was nothing to do with
+    // the snow: the daytime haze is a warm green-teal, tuned for a jungle, and it
+    // is composited over everything in view. A white slope seen through it comes
+    // out pale green, so the ground read as bleached grass rather than as snow
+    // however white the surface itself was made.
+    //
+    // Driven by lying cover as well as by what is falling, because a clear day
+    // over a snowfield has the same cold cast — light bouncing off snow is what
+    // produces it, and that outlasts the front by hours. Fog density is lifted at
+    // the same time: falling snow genuinely shortens the view, and it is the one
+    // cheap way to hide the streaming edge during a storm.
+    const chill = Math.min(1, this.snowAmount * 0.8 + this.snowCover * 0.55);
+    if (chill > 0.001) {
+      t.fog.color.lerp(SNOW_AIR, chill * 0.75);
+    }
+
     const baseDensity =
       NIGHT.fogDensity + (DAY.fogDensity - NIGHT.fogDensity) * day + gold * 0.00035;
-    t.fog.density = baseDensity * this.fogMultiplier;
+    t.fog.density = baseDensity * this.fogMultiplier * (1 + this.snowAmount * 0.85);
 
     t.background.copy(t.fog.color);
     blend(t.skyMaterial.color, NIGHT.skyTint, DAY.skyTint, GOLDEN.skyTint);

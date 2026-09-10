@@ -55,10 +55,14 @@ export class ExteriorScene implements GameScene {
     nightFactor: 0,
     mist: 0,
     rain: 0,
+    snow: 0,
+    snowCover: 0,
     wetness: 0,
     air: new Color(0.68, 0.78, 0.76),
   };
   private time = 0;
+  /** Which foot the next print belongs to, so a trail is a pair of tracks. */
+  private leftFoot = false;
   private returning = false;
   /**
    * How far the shadow-casting lights sit from the player. A directional light's
@@ -208,7 +212,18 @@ export class ExteriorScene implements GameScene {
       frameDelta,
     );
 
-    if (this.player.consumeFootstep()) this.audio.footstep(this.player.speed01);
+    if (this.player.consumeFootstep()) {
+      this.audio.footstep(this.player.speed01);
+      // Stamped from the same flag that plays the sound, so a print appears exactly
+      // when a foot lands rather than on a timer that drifts against the stride.
+      // Offset to the side the foot actually falls on, alternating, or a run leaves
+      // one central furrow instead of a pair of tracks.
+      const f = this.player.feetPosition;
+      this.leftFoot = !this.leftFoot;
+      const side = this.leftFoot ? -0.16 : 0.16;
+      const yaw = this.player.viewYaw;
+      this.world.markSnow(f.x + Math.cos(yaw) * side, f.z - Math.sin(yaw) * side);
+    }
     if (this.player.consumeJumped()) this.audio.jump();
     if (this.player.consumeLanded()) this.audio.land();
 
@@ -239,6 +254,8 @@ export class ExteriorScene implements GameScene {
     this.air.nightFactor = this.dayNight.nightFactor;
     this.air.mist = this.dayNight.mistAmount;
     this.air.rain = this.dayNight.rainAmount;
+    this.air.snow = this.dayNight.snowAmount;
+    this.air.snowCover = this.dayNight.snowCover;
     this.air.wetness = this.dayNight.wetness;
     this.air.air.copy(this.fog.color);
     this.world.update(this.time, frameDelta, p, this.air);

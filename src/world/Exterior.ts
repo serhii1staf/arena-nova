@@ -26,6 +26,8 @@ import { createGroundMist, type GroundMistField } from './GroundMist.ts';
 import { createPetals, type PetalField } from './Petals.ts';
 import { createPuddles, type PuddleField } from './Puddles.ts';
 import { createRain, type RainField } from './Rain.ts';
+import { createSnow, type SnowField } from './Snow.ts';
+import { createSnowTracks, type SnowTrackMap } from './SnowTracks.ts';
 import { createWaterfalls, type WaterfallField } from './Waterfalls.ts';
 import { createWildlife, type WildlifeField } from './Wildlife.ts';
 import {
@@ -83,6 +85,10 @@ export interface ExteriorBuild {
   update(elapsed: number, dt: number, playerPos: Vector3, air: AtmosphereState): void;
   /** Builds the immediate surroundings before gameplay starts. */
   prime(): void;
+  /** Records a footfall in the lying snow at a world position. */
+  markSnow(x: number, z: number): void;
+  /** Mean trodden value of the snow-tracks map, 0..1. Diagnostics only. */
+  snowTrodden(): number;
   dispose(): void;
   spawn: { x: number; z: number; yaw: number };
   isAtPortal(x: number, y: number, z: number): boolean;
@@ -123,6 +129,13 @@ export interface AtmosphereState {
   mist: number;
   /** 0..1 how hard it is raining. 0 switches the whole weather field off. */
   rain: number;
+  /** 0..1 how hard it is snowing where the player is. */
+  snow: number;
+  /**
+   * 0..1 how much snow is lying. Where it settles is the terrain's decision, from
+   * each fragment's own height and slope — this is only how far the line has crept.
+   */
+  snowCover: number;
   /**
    * 0..1 how wet the ground is. Lags `rain` in both directions, so it is a
    * separate number rather than something the world could derive: the ground is
@@ -244,6 +257,23 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     wind,
   );
   group.add(rain.points);
+
+  // ---- Snow --------------------------------------------------------------
+  // Fewer flakes than raindrops over a wider box. A flake is visible for ten
+  // times as long as a drop — it falls at about a tenth the speed — so the same
+  // count reads as a far denser fall, and the box has to be wider because the
+  // wind carries snow much further sideways before it lands.
+  const snowExtent = rainExtent * 1.25;
+  const snow: SnowField = createSnow(
+    Math.max(200, Math.floor(settings.particleCount * 0.55)),
+    snowExtent,
+    wind,
+  );
+  group.add(snow.points);
+
+  // Tracks walked through lying snow. Null when there is no 2D canvas to draw on,
+  // which is not an error: the snow simply stays smooth.
+  const snowTracks: SnowTrackMap | null = createSnowTracks();
 
   // ---- Puddles -----------------------------------------------------------
   // A handful of patches, one instanced draw call. Kept low deliberately: each
@@ -417,8 +447,13 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     // material the day/night cycle just wrote it into, so a reflection can never
     // end up brighter than the sky it is supposed to be reflecting.
     rain.update(playerPos, elapsed, air.rain, air.air);
+    snow.update(playerPos, elapsed, air.snow, air.air);
     puddles.update(playerPos, elapsed, air.wetness, air.rain, skyMaterial.color);
     terrain.setWetness(air.wetness);
+    // The tracks map follows the player and heals as snow falls; the terrain reads
+    // both the depth and the map from the one shared material.
+    snowTracks?.update(playerPos.x, playerPos.z, air.snow, dt);
+    terrain.setSnow(air.snowCover, snowTracks);
     wildlife.update(dt, playerPos);
 
     terrain.update(playerPos);
@@ -519,6 +554,8 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     mist.dispose();
     petals.dispose();
     rain.dispose();
+    snow.dispose();
+    snowTracks?.dispose();
     puddles.dispose();
     wildlife.dispose();
     waterfalls.dispose();
@@ -549,6 +586,8 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     skyMaterial,
     update,
     prime,
+    markSnow: (x, z) => snowTracks?.stamp(x, z),
+    snowTrodden: () => snowTracks?.coverage() ?? 0,
     dispose,
     spawn: { x: 0, z: spawnZ, yaw: Math.PI },
     isAtPortal: (x, y, z) => portal.contains(x, y, z),

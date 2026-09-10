@@ -16,6 +16,7 @@
     "grass": "node scripts/debug-grass.mjs",
     "terrain": "node scripts/debug-terrain.mjs",
     "transition": "node scripts/debug-transition.mjs",
+    "snow": "node scripts/debug-snow.mjs",
     "sky": "node scripts/debug-sky.mjs",
     "skins": "node scripts/debug-skins.mjs",
     "locomotion": "node scripts/debug-locomotion.mjs",
