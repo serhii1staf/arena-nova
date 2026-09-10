@@ -54,6 +54,8 @@ export class ExteriorScene implements GameScene {
   private readonly air: AtmosphereState = {
     nightFactor: 0,
     mist: 0,
+    rain: 0,
+    wetness: 0,
     air: new Color(0.68, 0.78, 0.76),
   };
   private time = 0;
@@ -236,6 +238,8 @@ export class ExteriorScene implements GameScene {
     // take the colour of the air rather than carrying a palette of their own.
     this.air.nightFactor = this.dayNight.nightFactor;
     this.air.mist = this.dayNight.mistAmount;
+    this.air.rain = this.dayNight.rainAmount;
+    this.air.wetness = this.dayNight.wetness;
     this.air.air.copy(this.fog.color);
     this.world.update(this.time, frameDelta, p, this.air);
     this.dragon.update(this.time, frameDelta);

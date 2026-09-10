@@ -64,6 +64,11 @@ export interface TerrainStreamer {
   /** Queue/unload chunks around a position. Call every frame. */
   update(position: Vector3): void;
   /**
+   * How wet the ground looks, 0..1. Cheap on purpose: every chunk shares one
+   * material, so this is two property writes for the entire streamed world.
+   */
+  setWetness(amount: number): void;
+  /**
    * Build pending chunks until `deadline` (a `performance.now()` timestamp).
    * Returns work remaining.
    */
@@ -261,6 +266,37 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
     metalness: 0,
   });
 
+  /**
+   * Wet ground, done by darkening the surface and taking the edge off its
+   * roughness rather than by adding a second material or a wetness map.
+   *
+   * That is what water on soil actually does optically — it fills the pores, so
+   * less light scatters back out and the remaining reflection gets sharper — and
+   * it costs nothing here, because all the chunks share this one material and its
+   * vertex colours are multiplied by `material.color`. A wet variant of the
+   * material would have doubled the terrain's draw calls to say the same thing.
+   *
+   * The ramp itself lives in the weather state; this only applies the result.
+   */
+  const DRY_TINT = new Color(1, 1, 1);
+  const WET_TINT = new Color(0.6, 0.62, 0.64);
+  /** Starts out of range so the first call always writes. */
+  let wetness = -1;
+
+  const setWetness = (amount: number): void => {
+    const a = Math.min(1, Math.max(0, amount));
+    // Drying is a slow ramp, so most frames ask for a value indistinguishable
+    // from the last one. Nothing is allocated either way; this just skips work.
+    if (Math.abs(a - wetness) < 0.002) return;
+    wetness = a;
+    material.color.copy(DRY_TINT).lerp(WET_TINT, a);
+    material.roughness = 1 - a * 0.42;
+    // A touch of metalness sharpens the sheen the sun leaves on wet ground.
+    // Kept small: with no environment map on the terrain, metalness mostly eats
+    // diffuse light, and any more than this reads as mud turning to plastic.
+    material.metalness = a * 0.1;
+  };
+
   const loaded = new Map<string, Chunk>();
   /** Chunks we want, sorted by distance when drained. */
   const pending = new Map<string, { cx: number; cz: number; ring: number; dist: number }>();
@@ -378,6 +414,7 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
   return {
     group,
     update,
+    setWetness,
     pump,
     prime,
     loadedChunks: () => loaded.size,

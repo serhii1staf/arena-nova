@@ -16,6 +16,7 @@ import {
 } from 'three';
 import { surfaceBiomeAt, type BiomeId } from './WorldGen.ts';
 import { createAurora, type AuroraField } from './Aurora.ts';
+import { Weather } from './Weather.ts';
 
 /**
  * DayNight
@@ -202,6 +203,24 @@ export class DayNight {
   mistAmount = 0;
 
   /**
+   * 0..1 rain intensity where the player is standing. Owned by `Weather`, which
+   * sits here beside the mist and fog tables because it answers the same kind of
+   * question: what is the sky doing, and how does this biome change the answer.
+   */
+  rainAmount = 0;
+
+  /**
+   * 0..1 how wet the ground is. Lags the rain in both directions — soaks in a
+   * couple of seconds, takes most of a minute to dry — which is what stops the
+   * world flipping between wet and dry as a shower passes over. Deliberately
+   * read back through `rainAmount`, so forcing that value in a diagnostic soaks
+   * the ground too instead of leaving it dry under a downpour.
+   */
+  wetness = 0;
+
+  private readonly weather = new Weather();
+
+  /**
    * The sun disc, offered as a god-rays source.
    *
    * The effect was configured and enabled on the high and ultra tiers all along,
@@ -385,6 +404,16 @@ export class DayNight {
     const targetMist =
       MIST_BY_BIOME[biome] * (0.18 + this.nightFactor * 0.72 + golden * 0.45);
     this.mistAmount += (Math.min(1, targetMist) - this.mistAmount) * k;
+
+    // Rain, and the ground remembering it. The read of `this.rainAmount` is the
+    // published value rather than the local one on purpose (see the field).
+    this.weather.update(frameDelta, this.elapsed, biome);
+    this.rainAmount = this.weather.rain;
+    const rain = this.rainAmount;
+    // Soaks about ten times faster than it dries.
+    const soak = rain > this.wetness ? 0.5 : 0.045;
+    this.wetness += (rain - this.wetness) * Math.min(1, frameDelta * soak);
+    if (this.wetness < 0.002) this.wetness = 0;
 
     this.sunDisc.position.copy(playerPos).addScaledVector(this.sunDir, SKY_RADIUS);
     this.moonDisc.position.copy(playerPos).addScaledVector(this.moonDir, SKY_RADIUS);

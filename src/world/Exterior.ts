@@ -24,6 +24,8 @@ import { createWindParticles, type WindParticleField } from './WindParticles.ts'
 import { createFireflies, type FireflyField } from './Fireflies.ts';
 import { createGroundMist, type GroundMistField } from './GroundMist.ts';
 import { createPetals, type PetalField } from './Petals.ts';
+import { createPuddles, type PuddleField } from './Puddles.ts';
+import { createRain, type RainField } from './Rain.ts';
 import { createWildlife, type WildlifeField } from './Wildlife.ts';
 import {
   resetSurfaceCache,
@@ -80,6 +82,14 @@ export interface AtmosphereState {
   nightFactor: number;
   /** 0..1 ground-mist density for where the player is standing. */
   mist: number;
+  /** 0..1 how hard it is raining. 0 switches the whole weather field off. */
+  rain: number;
+  /**
+   * 0..1 how wet the ground is. Lags `rain` in both directions, so it is a
+   * separate number rather than something the world could derive: the ground is
+   * still dark and puddled for a while after the last drop falls.
+   */
+  wetness: number;
   /** Colour of the air, so mist and motes match the fog instead of fighting it. */
   air: Color;
 }
@@ -170,6 +180,31 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     wind,
   );
   group.add(petals.points);
+
+  // ---- Rain --------------------------------------------------------------
+  // `drawDistance` is otherwise unused outdoors (the streamer sizes the view by
+  // ring count instead), and it is exactly the right number for this: how far out
+  // the weather box needs to reach. A smaller box on a weak device holds the same
+  // number of drops closer in, so the rain stays as dense as it looks on ultra.
+  const rainExtent = Math.max(22, Math.min(58, settings.drawDistance * 0.16));
+  const rain: RainField = createRain(
+    Math.max(240, Math.floor(settings.particleCount * 0.9)),
+    rainExtent,
+    wind,
+  );
+  group.add(rain.points);
+
+  // ---- Puddles -----------------------------------------------------------
+  // A handful of patches, one instanced draw call. Kept low deliberately: each
+  // one is metres across, so more of them buys overlapping water rather than
+  // more convincing water, and they are the only part of the weather that costs
+  // triangles at all.
+  const puddles: PuddleField = createPuddles(
+    Math.max(6, Math.min(26, Math.round(settings.particleCount / 180))),
+    assets.sky(),
+    rainExtent * 1.15,
+  );
+  group.add(puddles.mesh);
 
   // ---- Wildlife ----------------------------------------------------------
   // Scaled by the quality tier, but never below a handful — an empty forest is
@@ -315,6 +350,12 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     fireflies.update(playerPos, elapsed, air.nightFactor);
     mist.update(playerPos, elapsed, air.mist, air.air);
     petals.update(playerPos, elapsed, surfaceBiomeAt(playerPos.x, playerPos.z));
+    // Weather. The puddles take the sky dome's own tint, read straight off the
+    // material the day/night cycle just wrote it into, so a reflection can never
+    // end up brighter than the sky it is supposed to be reflecting.
+    rain.update(playerPos, elapsed, air.rain, air.air);
+    puddles.update(playerPos, elapsed, air.wetness, air.rain, skyMaterial.color);
+    terrain.setWetness(air.wetness);
     wildlife.update(dt, playerPos);
 
     terrain.update(playerPos);
@@ -348,6 +389,8 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     fireflies.dispose();
     mist.dispose();
     petals.dispose();
+    rain.dispose();
+    puddles.dispose();
     wildlife.dispose();
     landmarks.dispose();
     scatter.dispose();
