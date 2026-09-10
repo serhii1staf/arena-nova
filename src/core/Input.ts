@@ -203,6 +203,11 @@ export class Input {
 
   private onMouseMove(e: MouseEvent): void {
     if (!this.locked) return;
+    // A mouse event that arrives while the window is not focused is not the
+    // player's: it is the tail of a queue, or another application's pointer
+    // crossing the window. Acting on it would turn the view and, in the native
+    // shell, warp the OS cursor back into a game nobody is looking at.
+    if (this.nativeCapture && !document.hasFocus()) return;
 
     if (!this.nativeCapture) {
       // Pointer Lock: the cursor does not move, and `movementX/Y` is the raw

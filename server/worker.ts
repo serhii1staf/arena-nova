@@ -59,6 +59,11 @@ interface ResponseInitWithSocket extends ResponseInit {
 export interface Env {
   ASSETS: Fetcher;
   GAME_ROOM: DurableObjectNamespace;
+  /**
+   * The admin password, as a Worker secret. Optional in the type because a
+   * deployment that has not set it must still run — with nobody as admin.
+   */
+  ADMIN_PASSWORD?: string;
 }
 
 // --- Room state --------------------------------------------------------------
@@ -126,10 +131,43 @@ const MIN_OWNER_TOKEN = 32;
 
 export class GameRoom {
   private readonly state: DurableObjectState;
+  private readonly env: Env;
   private lastBroadcast = 0;
 
-  constructor(state: DurableObjectState) {
+  constructor(state: DurableObjectState, env: Env) {
     this.state = state;
+    // Needed for the admin secret. A Durable Object is handed the environment by
+    // the runtime, so this is the only way the room can read a binding.
+    this.env = env;
+  }
+
+  /**
+   * Whether a supplied password grants admin.
+   *
+   * Admin is a *secret*, not a name. It used to be granted to whoever claimed the
+   * reserved name, which meant anybody who saw that name in the player list — it is
+   * shown there, with a badge — could simply type it and take the panel. Names are
+   * public by construction and can never be a credential.
+   *
+   * The secret lives in a Worker binding, so it exists only on the server: it is
+   * not in the client bundle, not in this repository, and cannot be read back out
+   * of Cloudflare. If the binding is unset, nobody is admin — failing closed is the
+   * only safe direction for an authorisation check.
+   *
+   * Compared in constant time with respect to the *contents*. A plain `===` on
+   * strings can return early at the first differing byte, which leaks how much of
+   * a guess was correct and turns a search over the whole space into a search one
+   * character at a time. Length is allowed to leak; that is not useful on its own.
+   */
+  private grantsAdmin(supplied: string): boolean {
+    const secret = this.env.ADMIN_PASSWORD;
+    if (!secret || supplied.length === 0) return false;
+    if (supplied.length !== secret.length) return false;
+    let diff = 0;
+    for (let i = 0; i < secret.length; i++) {
+      diff |= supplied.charCodeAt(i) ^ secret.charCodeAt(i);
+    }
+    return diff === 0;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -197,14 +235,7 @@ export class GameRoom {
     wanted: string,
     token: string | null,
   ): Promise<void> {
-    if (wanted.toLowerCase() !== RESERVED_NAME.toLowerCase()) {
-      if (attached.admin) {
-        // Gave up the reserved name, so the rights go with it.
-        attached.admin = false;
-        ws.serializeAttachment(attached);
-      }
-      return;
-    }
+    if (wanted.toLowerCase() !== RESERVED_NAME.toLowerCase()) return;
 
     const refuse = (): void => {
       attached.name = `${wanted}_${attached.id.slice(0, 4)}`;
@@ -240,10 +271,10 @@ export class GameRoom {
       await this.state.storage.put(OWNER_KEY, owners);
     }
 
+    // The name is granted; rights are not, and are not touched here. Whatever the
+    // password decided in the join handler stands.
     attached.name = wanted;
-    attached.admin = true;
     ws.serializeAttachment(attached);
-    this.send(ws, { type: 'welcome', id: attached.id, t: Date.now(), admin: true });
     this.broadcast(true);
   }
 
@@ -277,11 +308,33 @@ export class GameRoom {
         // string is all that is needed; anything odd falls back on the client.
         attached.skin = String(msg.skin ?? 'captain').replace(/[^a-z0-9-]/gi, '').slice(0, 24) || 'captain';
         attached.seen = Date.now();
+
+        // Admin, decided here and only here, from the password and nothing else.
+        //
+        // The name is now irrelevant to it: any name with the right secret is
+        // admin, and the reserved name without it is just a name. That is the whole
+        // point of the change — the previous rule handed the panel to anyone who
+        // read the badge in the player list and typed what it said.
+        const wasAdmin = attached.admin === true;
+        attached.admin = this.grantsAdmin(String(msg.pass ?? ''));
         ws.serializeAttachment(attached);
+        // Tell the client, but only when the answer changed. `welcome` is what the
+        // client watches for its rights, and re-sending it on every identity update
+        // would have it re-running the grant path for no reason.
+        if (attached.admin !== wasAdmin) {
+          this.send(ws, {
+            type: 'welcome',
+            id: attached.id,
+            t: Date.now(),
+            admin: attached.admin,
+          });
+        }
         this.broadcast(true);
-        // Only now the reserved name, which is claimed once and permanently by
-        // whoever takes it first. Resolved asynchronously against durable storage,
-        // so the rest of the join is already applied and delivered by the time the
+
+        // The reserved name, which is now purely about who may *be called* that —
+        // it carries no rights. Claimed by up to a few installs and refused past
+        // that, as before. Resolved asynchronously against durable storage, so the
+        // rest of the join is already applied and delivered by the time the
         // decision is known.
         //
         // Fired *after* the writes above, not before: a refusal renames the player,

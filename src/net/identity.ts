@@ -49,6 +49,36 @@ export function ownerToken(): string {
   return fresh;
 }
 
+const ADMIN_PASS_KEY = 'arena.adminPass';
+
+/**
+ * The admin password this install will present, or an empty string.
+ *
+ * Stored locally so it is typed once rather than on every launch, which is what
+ * makes it usable at all — it is long by design. It is only ever *sent*: nothing
+ * reads it back to decide anything, because a client deciding its own rights is a
+ * suggestion rather than a permission. The server compares it against a secret it
+ * alone holds and answers in `welcome`.
+ */
+export function adminPassword(): string {
+  try {
+    return localStorage.getItem(ADMIN_PASS_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/** Saves the password, or clears it when given something blank. */
+export function saveAdminPassword(raw: string): void {
+  const clean = raw.trim();
+  try {
+    if (clean) localStorage.setItem(ADMIN_PASS_KEY, clean);
+    else localStorage.removeItem(ADMIN_PASS_KEY);
+  } catch {
+    /* storage unavailable — the password simply will not persist */
+  }
+}
+
 /** 32 hex characters, from the platform CSPRNG where there is one. */
 function mintToken(): string {
   const c = globalThis.crypto;

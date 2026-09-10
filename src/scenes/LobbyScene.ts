@@ -162,6 +162,7 @@ export class LobbyScene implements GameScene {
     // frozen — a skin change requested from a first-person view never completed
     // and its particle cloud was never released.
     this.character.object.visible = this.player.thirdPerson;
+    this.character.scaleBody(this.player.bodyScale);
     this.character.update(
       this.player.renderPosition,
       this.player.viewYaw,

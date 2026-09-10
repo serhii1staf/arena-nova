@@ -132,7 +132,13 @@ const SNOW_MELT_RATE = 0.03;
  * terrain is *permanently* white; weather turns to snow well before that, which is
  * exactly what puts fresh snow on ground that is normally bare.
  */
-const FREEZE_LOW = WORLD.snowLine * 0.52;
+/**
+ * Lowered from 0.52. At that fraction the band began around 148 m, which almost no
+ * routine play reaches — a front arriving while the player was anywhere near the
+ * plaza came down entirely as rain, so falling snow was something you had to go
+ * mountaineering to witness even though the covering on the peaks was working.
+ */
+const FREEZE_LOW = WORLD.snowLine * 0.34;
 const FREEZE_HIGH = WORLD.snowLine * 0.92;
 
 const MIST_BY_BIOME: Record<BiomeId, number> = {
@@ -520,6 +526,26 @@ export class DayNight {
     return Math.min(1, Math.max(0, t));
   }
 
+  /**
+   * Pinned weather, or `null` to let the sky decide again.
+   *
+   * Exists because weather is a slow function of time, biome and altitude, which is
+   * exactly right for play and useless for looking at something on purpose: waiting
+   * for a front to arrive at the altitude you happen to be standing at is not a
+   * workflow. The admin panel and the diagnostics both need to hold a state still.
+   */
+  private forced: { rain: number; snow: number; cover: number } | null = null;
+
+  /** Holds the weather at fixed values, or releases it when given `null`. */
+  forceWeather(state: { rain: number; snow: number; cover: number } | null): void {
+    this.forced = state;
+  }
+
+  /** True while the weather is pinned, so a UI can show it. */
+  get weatherForced(): boolean {
+    return this.forced !== null;
+  }
+
   /** Advances the clock and recomputes the sky. Call once per rendered frame. */
   update(frameDelta: number, playerPos: Vector3): void {
     this.elapsed += frameDelta;
@@ -589,6 +615,16 @@ export class DayNight {
     const thaw = Math.max(0, this.sunDir.y) * (1 - falling * 0.75) * SNOW_MELT_RATE;
     this.snowCover += (settling - thaw) * frameDelta;
     this.snowCover = Math.min(1, Math.max(0, this.snowCover));
+
+    // A pin overrides the result rather than the inputs. Doing it here, at the end,
+    // means everything above still runs and stays consistent — so releasing the pin
+    // returns to a plausible state instead of one frozen from minutes ago.
+    if (this.forced) {
+      this.rainAmount = this.forced.rain;
+      this.snowAmount = this.forced.snow;
+      this.snowCover = this.forced.cover;
+      if (this.forced.rain > this.wetness) this.wetness = this.forced.rain;
+    }
 
     this.sunDisc.position.copy(playerPos).addScaledVector(this.sunDir, SKY_RADIUS);
     this.moonDisc.position.copy(playerPos).addScaledVector(this.moonDir, SKY_RADIUS);

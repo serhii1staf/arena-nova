@@ -200,6 +200,9 @@ export class ExteriorScene implements GameScene {
     // frozen — a skin change requested from a first-person view never completed
     // and its particle cloud was never released.
     this.character.object.visible = this.player.thirdPerson;
+    // Admin body scale. Cheap: a comparison inside the avatar, and nothing at all
+    // for a normal session where it stays at 1.
+    this.character.scaleBody(this.player.bodyScale);
     this.character.update(
       this.player.renderPosition,
       this.player.viewYaw,

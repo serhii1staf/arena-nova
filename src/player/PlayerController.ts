@@ -163,7 +163,13 @@ export class PlayerController {
 
     // Flight replaces gravity entirely rather than cancelling it out: hovering by
     // applying an equal upward force fights the ground snap every step and jitters.
-    if (this.flying) {
+    //
+    // Noclip takes the same branch. It has to: the walking branch applies gravity
+    // and only clears the fall state inside the ground clamp, so a player who can
+    // pass through the floor without flight controls accelerates downward forever,
+    // loses `isGrounded`, flips to the falling animation and cannot jump back. Free
+    // vertical control is not a bonus feature of noclip, it is what makes it usable.
+    if (this.flying || this.noclip) {
       const climb = (this.input.consumeJump() ? 1 : 0) - (this.input.sprint ? 0 : 0);
       // Space rises, Ctrl/C descends; sprint stays a speed modifier while flying.
       const rise = this.input.flyDown ? -1 : climb > 0 || this.input.flyUp ? 1 : 0;
@@ -173,9 +179,13 @@ export class PlayerController {
       this.position.y += this.velocity.y * dt;
       if (!this.noclip) this.world.collide(this.position);
       // Never below the ground, even in flight — falling through the world is not
-      // a feature anyone asked for.
-      const floorY = this.world.floorHeightAt(this.position.x, this.position.z);
-      if (this.position.y < floorY) this.position.y = floorY;
+      // a feature anyone asked for. Unless noclip is on, which is precisely a
+      // request for it: the whole point of passing through walls is being able to
+      // go under the map, and this clamp is why noclip only ever worked sideways.
+      if (!this.noclip) {
+        const floorY = this.world.floorHeightAt(this.position.x, this.position.z);
+        if (this.position.y < floorY) this.position.y = floorY;
+      }
       this.grounded = false;
       this.airborneFor = 0;
       this.isGrounded = true; // keep the walk cycle rather than a permanent fall
@@ -289,8 +299,13 @@ export class PlayerController {
     this.camera.quaternion.setFromEuler(this.euler);
 
     // Interpolated feet, then eye pivot.
+    //
+    // The eye rises with the body. Without this, growing left the camera at normal
+    // head height inside a giant's chest and shrinking left it floating above a
+    // doll — which is most of why the size commands appeared to do nothing even
+    // once the avatar itself was scaled.
     this.renderPosition.lerpVectors(this.prevPosition, this.position, alpha);
-    const pivotY = this.renderPosition.y + cfg.eyeHeight;
+    const pivotY = this.renderPosition.y + cfg.eyeHeight * this.bodyScale;
 
     if (this.camDist < 0.4) {
       // First person.
@@ -299,7 +314,7 @@ export class PlayerController {
       // Third person: dolly back along the view direction, but stop short of
       // anything solid so the camera never ends up inside a rock or wall.
       this.viewDir.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
-      const blocks = this.world.blocksCamera?.bind(this.world);
+      const blocks = this.noclip ? undefined : this.world.blocksCamera?.bind(this.world);
       let dist = this.camDist;
       if (blocks) {
         const steps = 8;
@@ -319,8 +334,13 @@ export class PlayerController {
         pivotY - this.viewDir.y * dist,
         this.renderPosition.z - this.viewDir.z * dist,
       );
-      const camFloor = this.world.floorHeightAt(this.camScratch.x, this.camScratch.z) + 0.45;
-      if (this.camScratch.y < camFloor) this.camScratch.y = camFloor;
+      // Both camera clamps are lifted under noclip, or the third-person view keeps
+      // being shoved back above the surface while the body is under it — you would
+      // be inside the terrain looking at it from outside.
+      if (!this.noclip) {
+        const camFloor = this.world.floorHeightAt(this.camScratch.x, this.camScratch.z) + 0.45;
+        if (this.camScratch.y < camFloor) this.camScratch.y = camFloor;
+      }
       this.camera.position.copy(this.camScratch);
     }
   }

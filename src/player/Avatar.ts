@@ -12,6 +12,8 @@ export interface CharacterAvatar {
   dispose(): void;
 }
 
+
+
 function manifestUrl(): string {
   // Relative to the document, so the same build works over http(s) and from the
   // file:// origin used inside the native shell.
@@ -183,10 +185,31 @@ export class Avatar implements CharacterAvatar {
     if (previous === this.procedural) this.procedural = null;
   }
 
+  /**
+   * Uniform body scale, applied to the active rig's own root.
+   *
+   * Kept here rather than left to the caller because the container must not be
+   * scaled — see `scaleAvatar`. Re-applied after a skin swap by `update`, since the
+   * new rig arrives at its own natural size.
+   */
+  scaleBody(scale: number): void {
+    this.wantScale = Math.max(0.05, scale);
+  }
+
+  private wantScale = 1;
+
   update(pos: Vector3, yaw: number, s: LocomotionState, dt: number): void {
     // The active rig positions its own root; the container stays at the origin
     // so its transform never double-applies.
     this.active.update(pos, yaw, s, dt);
+
+    // Scale after the rig has positioned itself, and every frame rather than on
+    // change: the rig rewrites its own root transform each update, and a swap
+    // replaces the object outright, so a one-off write would be silently undone.
+    // Applied to the root's scale only — the position it just wrote is left alone,
+    // which is what keeps the body under the camera instead of flung away from it.
+    const root = this.active.object;
+    if (root.scale.x !== this.wantScale) root.scale.setScalar(this.wantScale);
 
     if (this.swap) {
       this.swap.setCentre(pos);

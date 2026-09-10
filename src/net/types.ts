@@ -65,7 +65,11 @@ export type ClientMessage =
    * ignored for every other name. Optional, so a client that never sends it
    * behaves exactly as before except that it cannot hold the reserved name.
    */
-  | { type: 'join'; name: string; skin: string; owner?: string }
+  /**
+   * `pass` is the admin secret, and the only thing that grants rights. Optional,
+   * and absent for almost every player. Never echoed back in any message.
+   */
+  | { type: 'join'; name: string; skin: string; owner?: string; pass?: string }
   | { type: 'input'; cmd: InputCommand }
   /**
    * Round-trip probe. `t` is the client's own clock and is echoed back untouched,

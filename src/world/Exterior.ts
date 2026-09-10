@@ -295,7 +295,10 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
 
   // ---- Portal monolith at spawn -----------------------------------------
   const plazaY = surfaceHeightAt(0, 0);
-  const portalPos = new Vector3(0, plazaY + 3.4, 0);
+  // High enough that the vortex clears the plaza. At 3.4 the quad is 7.4 tall, so
+  // its bottom edge sat 0.3 m *under* the ground and the terrain depth-clipped the
+  // additive surface along a dead-straight horizontal line at the point of contact.
+  const portalPos = new Vector3(0, plazaY + 4.1, 0);
   const portal: PortalBuild = (() => {
     const stoneTex = assets.stone(1);
     const mat = track(

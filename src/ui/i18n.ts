@@ -15,6 +15,11 @@ const STRINGS = {
     'start.loading': 'Loading…',
     'start.play': 'Play',
     'start.name': 'Your name',
+    'start.pass': 'Admin password (optional)',
+    'admin.snowHeavy': 'Heavy snow',
+    'admin.snowLight': 'Light snow',
+    'admin.rainHeavy': 'Heavy rain',
+    'admin.weatherAuto': 'Weather: auto',
 
     'players.title': 'Players',
     'players.admin': 'ADMIN',
@@ -98,6 +103,11 @@ const STRINGS = {
     'start.loading': 'Загрузка…',
     'start.play': 'Играть',
     'start.name': 'Ваше имя',
+    'start.pass': 'Пароль администратора (необязательно)',
+    'admin.snowHeavy': 'Сильный снег',
+    'admin.snowLight': 'Слабый снег',
+    'admin.rainHeavy': 'Сильный дождь',
+    'admin.weatherAuto': 'Погода: авто',
 
     'players.title': 'Игроки',
     'players.admin': 'АДМИН',

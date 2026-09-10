@@ -127,8 +127,21 @@ async function boot(): Promise<void> {
   });
 
   // Alt-tabbing away should hand the cursor back to the OS.
-  window.addEventListener('blur', () => {
+  //
+  // Three events, not one, because in the native shell they do not all fire and
+  // the consequence of missing one is the worst kind: the desktop app confines and
+  // re-centres the real OS pointer, so a capture that outlives the switch leaves
+  // the mouse apparently stuck inside a window the player is no longer using.
+  // `blur` is the normal path, `visibilitychange` catches being minimised or
+  // hidden without a focus change, and `pagehide` catches teardown. Releasing is
+  // idempotent, so firing two of them costs nothing.
+  const handBackCursor = (): void => {
     if (engine.input.locked) engine.input.releasePointerLock();
+  };
+  window.addEventListener('blur', handBackCursor);
+  window.addEventListener('pagehide', handBackCursor);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) handBackCursor();
   });
 
   // Expose a small surface for the console and the automated smoke test.

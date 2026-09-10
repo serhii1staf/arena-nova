@@ -1,5 +1,5 @@
 import { NullTransport, WebSocketTransport } from './transports.ts';
-import { ownerToken } from './identity.ts';
+import { adminPassword, ownerToken } from './identity.ts';
 import type {
   ConnectionState,
   InputCommand,
@@ -239,7 +239,16 @@ export class NetworkManager {
    * still decides, and still answers in `welcome`.
    */
   join(name: string, skin: string): void {
-    this.transport.send({ type: 'join', name, skin, owner: ownerToken() });
+    const pass = adminPassword();
+    this.transport.send({
+      type: 'join',
+      name,
+      skin,
+      owner: ownerToken(),
+      // Omitted entirely when empty, so an ordinary player's join frame carries no
+      // trace of the field at all.
+      ...(pass ? { pass } : {}),
+    });
   }
 
   sendInput(x: number, y: number, z: number, yaw: number): void {

@@ -143,6 +143,17 @@ export function isNativeMouseCaptured(): boolean {
 export async function recentreNativeCursor(force = false): Promise<void> {
   const win = cachedWindow;
   if (!win || !PhysicalPositionCtor) return;
+  // Never move the OS cursor while the game is not the focused window.
+  //
+  // This is the one operation in the app that reaches outside its own window, and
+  // it must not happen when the player is somewhere else: the effect is that the
+  // pointer is yanked back into a game they are not looking at, which reads as the
+  // mouse being locked by another application. `blur` already drops capture, but
+  // that is not sufficient on its own — a warp is an async round trip, so one
+  // issued a frame before the switch lands *after* capture ended, and any later
+  // stray mouse event would queue another. Checking at the point of use closes
+  // both, and costs one property read.
+  if (!captureActive || !document.hasFocus()) return;
   if (warpPending && !force) return;
   warpPending = true;
   try {

@@ -10,7 +10,7 @@ import {
 } from './native.ts';
 import { applyTranslations, getLang, onLangChange, setLang, t, type Lang } from './i18n.ts';
 import { SKINS, savedSkin, saveSkin } from '../player/skins.ts';
-import { savedName, saveName } from '../net/identity.ts';
+import { savedName, saveName, saveAdminPassword } from '../net/identity.ts';
 import { PlayerList } from './PlayerList.ts';
 import { AdminPanel } from './AdminPanel.ts';
 
@@ -156,6 +156,16 @@ export class GameUI {
     const field = $<HTMLInputElement>('nameInput');
     const chosen = saveName(field?.value ?? '');
     if (field) field.value = chosen;
+
+    // The admin password, committed at the same moment for the same reason: the
+    // first `join` has to carry it, or rights would only arrive on some later
+    // re-announcement. Cleared from the DOM immediately afterwards so it is not
+    // sitting in the page for the rest of the session.
+    const pass = $<HTMLInputElement>('passInput');
+    if (pass) {
+      saveAdminPassword(pass.value);
+      pass.value = '';
+    }
 
     this.started = true;
     $('start')?.classList.add('hidden');

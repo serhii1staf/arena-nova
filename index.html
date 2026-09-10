@@ -573,6 +573,27 @@
         letter-spacing: 0.04em;
         outline: none;
       }
+      #passField {
+        margin-top: 10px;
+      }
+      #passInput {
+        width: 232px;
+        padding: 9px 12px;
+        border: 1px solid rgba(90, 200, 130, 0.22);
+        border-radius: 9px;
+        background: rgba(6, 20, 12, 0.55);
+        color: #cfeedd;
+        font: inherit;
+        font-size: 12px;
+        text-align: center;
+        outline: none;
+      }
+      #passInput:focus {
+        border-color: rgba(90, 200, 130, 0.5);
+      }
+      #passInput::placeholder {
+        color: rgba(150, 200, 165, 0.38);
+      }
       #nameInput::placeholder {
         color: rgba(150, 200, 165, 0.5);
       }
@@ -883,6 +904,24 @@
         <div id="playSpinner" class="spinner" aria-hidden="true"></div>
       </div>
       <div id="nameNote" role="status" aria-live="polite"></div>
+      <!--
+        Admin password. Blank for almost everyone, so it is deliberately quiet and
+        below the fold of attention rather than a second field competing with the
+        name. `type="password"` matters here: this is the only credential the game
+        has, and it should not be readable over a shoulder or in a screen recording.
+      -->
+      <div id="passField">
+        <input
+          id="passInput"
+          type="password"
+          maxlength="64"
+          autocomplete="current-password"
+          spellcheck="false"
+          aria-label="Admin password"
+          placeholder="Admin password (optional)"
+          data-i18n-placeholder="start.pass"
+        />
+      </div>
       <div id="startHint" data-i18n="start.preparing">Preparing the ruins…</div>
       <div id="version"></div>
     </div>

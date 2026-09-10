@@ -69,23 +69,51 @@ const PORTAL_FRAG = /* glsl */ `
 
   void main() {
     vec2 c = vUv * 2.0 - 1.0;
-    // Elliptical mask: the portal is taller than wide.
-    float r = length(vec2(c.x, c.y * 0.92));
-    if (r > 1.0) discard;
 
-    float ang = atan(c.y, c.x);
-    // Spiral coordinates: angle shifts with radius and time → vortex.
-    vec2 sp = vec2(ang / 3.14159 * 2.0 + r * 2.4 - uTime * 0.35, r * 3.0 - uTime * 0.6);
+    // Elliptical mask, squashed *inside* the quad rather than past its edge.
+    //
+    // This was 0.92, which stretches the ellipse to |c.y| = 1.087 — 8.7% beyond the
+    // plane's own top and bottom. At the quad edge the mask was therefore still
+    // open across the middle 39% of the width, and the geometry cut it off there:
+    // two dead-straight horizontal bands across the top and bottom of the vortex.
+    // Above 1.0 the ellipse closes before the edge does, so the boundary is the
+    // mask's, which is round.
+    float r = length(vec2(c.x, c.y * 1.06));
+
+    // The feathered rim, computed first and used as the early-out.
+    //
+    // Alpha has to reach zero *before* any hard boundary — the aurora does the same
+    // thing at the open ends of its cylinder, and for the same reason: discarding
+    // at a place where alpha is still finite is a visible edge. It doubles as the
+    // cheap exit: everything below is over a hundred ALU ops with a dozen
+    // transcendentals, and this shader covers a large part of the screen when you
+    // walk up to it, which is what made merely looking at the portal cost frames.
+    float rim = smoothstep(1.0, 0.66, r);
+    if (rim <= 0.002) discard;
+
+    // Spiral coordinates. The angular term is wrapped to a whole number of noise
+    // periods so the field closes on itself across the atan branch cut.
+    //
+    // atan jumps from +PI to -PI along the negative x axis. Feeding that straight
+    // into the noise lattice moved the sample point by 8.8 units across a surface
+    // that is geometrically continuous, so the filaments could not match up: one
+    // hard straight radial band from the core to the rim, exactly the seam the
+    // aurora used to have down the sky. Whole numbers are the fix in both places —
+    // here the angle is normalised to 0..1 and multiplied by an integer, so a full
+    // turn is an integer number of lattice cells and the two sides of the cut land
+    // on the same value.
+    float turns = (atan(c.y, c.x) / 6.2831853) + 0.5;
+    vec2 sp = vec2(turns * 6.0 + r * 2.4 - uTime * 0.35, r * 3.0 - uTime * 0.6);
     float n = fbm(sp * 2.2);
 
-    // Bright core, filaments in the mid-field, soft feathered rim.
+    // Bright core and filaments in the mid-field.
     float core = smoothstep(0.55, 0.0, r);
-    float rim = smoothstep(1.0, 0.72, r);
     float filaments = smoothstep(0.35, 0.95, n) * rim;
 
     vec3 col = mix(uColorA, uColorB, clamp(n * 1.3, 0.0, 1.0));
     col += vec3(0.9, 1.0, 0.85) * core * 1.5;
     float alpha = clamp(core * 0.95 + filaments * 0.85, 0.0, 1.0) * rim;
+    if (alpha <= 0.003) discard;
     gl_FragColor = vec4(col, alpha);
   }
 `;
@@ -197,8 +225,20 @@ export function buildPortal(opts: {
     return along < 1.3 && across < halfW && Math.abs(y - position.y) < halfH + 0.6;
   };
 
+  /**
+   * Period the clock is wrapped to, in seconds.
+   *
+   * The two scroll rates in the shader are 0.35 and 0.6 per second, and 20 s is the
+   * shortest time that makes both an exact number of noise cells (7 and 12), so the
+   * field is continuous across the wrap. Without a wrap the lattice coordinate
+   * climbs without bound and `fract(sin(...))` decorrelates: after a few minutes of
+   * uptime the hash stops behaving like noise and axis-aligned banding appears —
+   * more straight lines, only for players who had been in the room a while.
+   */
+  const TIME_PERIOD = 20;
+
   const update = (elapsed: number): void => {
-    uniforms.uTime.value = elapsed;
+    uniforms.uTime.value = elapsed % TIME_PERIOD;
     light.intensity = 22 + Math.sin(elapsed * 2.3) * 6;
   };
 

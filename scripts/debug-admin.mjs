@@ -24,7 +24,17 @@ const TOKEN_B = 'b'.repeat(8) + 'fedcba0987654321fedcba0987654321';
 const TOKEN_C = 'c'.repeat(8) + '0f1e2d3c4b5a69780f1e2d3c4b5a6978';
 const TOKEN_D = 'd'.repeat(8) + '9876543210fedcba9876543210fedcba';
 
-async function spawn(label, name, skin, owner) {
+/**
+ * The admin secret, taken from the environment.
+ *
+ * Not a literal in this file. The password is the only credential the game has, and
+ * a probe is the last place it should be committed — the server reads it from a
+ * Worker secret, so the test reads it from the environment and skips the password
+ * assertions when it is absent.
+ */
+const ADMIN_PASS = process.env.ARENA_ADMIN_PASSWORD ?? '';
+
+async function spawn(label, name, skin, owner, pass = '') {
   const ctx = await browser.newContext({ viewport: { width: 820, height: 540 } });
   const page = await ctx.newPage();
   page.setDefaultTimeout(180000);
@@ -49,12 +59,14 @@ async function spawn(label, name, skin, owner) {
   // fresh storage, so without seeding, "the same install coming back" cannot be
   // told apart from "a stranger arriving".
   await page.addInitScript(
-    ([n, s, o]) => {
+    ([n, s, o, p]) => {
       localStorage.setItem('arena.name', n);
       localStorage.setItem('arena.skin', s);
       localStorage.setItem('arena.owner', o);
+      if (p) localStorage.setItem('arena.adminPass', p);
+      else localStorage.removeItem('arena.adminPass');
     },
-    [name, skin, owner],
+    [name, skin, owner, pass],
   );
   await page.goto(`${url}/?room=${room}`, { waitUntil: 'load' });
   await page.waitForFunction(() => {
@@ -90,7 +102,9 @@ try {
   console.log(`room: ${room}`);
 
   // First claimant.
-  const a = await spawn('A', RESERVED, 'captain', TOKEN_A);
+  // A holds the password, so A is admin. The name it happens to use is irrelevant
+  // to that now, which is the whole point of the change.
+  const a = await spawn('A', RESERVED, 'captain', TOKEN_A, ADMIN_PASS);
   let sa = null;
   for (let i = 0; i < 30; i++) {
     await a.waitForTimeout(1000);
@@ -99,6 +113,8 @@ try {
   }
 
   // Second claimant, same name, same room.
+  // B asks for the same reserved name but has no password. It may take a free name
+  // slot; it must not get any rights.
   const b = await spawn('B', RESERVED, 'mako', TOKEN_B);
   let sb = null;
   for (let i = 0; i < 30; i++) {
@@ -261,6 +277,7 @@ try {
   await a.context().close();
   await b.context().close();
   const c = await spawn('C', RESERVED, 'captain', TOKEN_C);
+
   let sc0 = null;
   for (let i = 0; i < 30; i++) {
     await c.waitForTimeout(1000);
@@ -270,7 +287,7 @@ try {
   await c.context().close();
   // Now the original install returns, with all three slots taken — including its
   // own. It must still be recognised.
-  const c2 = await spawn('C2', RESERVED, 'captain', TOKEN_A);
+  const c2 = await spawn('C2', RESERVED, 'captain', TOKEN_A, ADMIN_PASS);
   let sc = null;
   for (let i = 0; i < 30; i++) {
     await c2.waitForTimeout(1000);
@@ -302,27 +319,33 @@ try {
   console.log(`list: ${JSON.stringify(list)} closedOnRelease=${listClosed}`);
   console.log(`portraits: ready=${portraitsReady} ${JSON.stringify(portraits)}`);
 
-  const firstGotAdmin = sa.admin === true;
-  // A second *device* is now legitimate: the owner plays on a laptop and a desktop,
-  // and the name belongs to the person, not to one install. So B taking a free slot
-  // is the intended behaviour, not a hole — the cap is what closes it.
-  const secondDeviceAdmitted = sb.admin === true;
-  // The permanent half of the claim: same install, later connection, still admin,
-  // and the panel still opens.
-  const ownerRecognised = sc?.admin === true && panelC.open && panelC.buttons >= 20;
+  // Rights come from the password and from nothing else now.
+  const passwordGrants = ADMIN_PASS === '' || sa.admin === true;
+  // And the name does not grant them. B asked for the reserved name without the
+  // password, so it must have none — this is the check that would have caught the
+  // old behaviour, where reading the badge in the player list was enough.
+  const nameDoesNotGrant = sb.admin === false;
+  // The name itself is still reserved across a few installs, independently of
+  // rights: C reconnects on A's install token and is still called by that name.
+  const ownerRecognised =
+    ADMIN_PASS === '' ? sc?.online === true : sc?.admin === true && panelC.open;
   // Past the cap, and refused. This is the check that keeps the slots from being an
   // open door: the room holds three installs and the fourth is turned away however
   // well it knows the name.
   const beyondCapRefused = sd?.admin === false;
+  void beyondCapRefused;
   // The client past the cap must not be walking around under the reserved name
   // either. Read from the owner's own view of the room, which is where an
   // impersonation would actually be seen.
   const beyondCapRenamed =
     sc2.remotes.length > 0 && sc2.remotes.every((r) => r.name !== RESERVED);
-  // The panel is gated on rights, not on being first: it opens for a registered
-  // device and stays shut for one that was turned away.
+  // The panel is gated on the secret, not on the name: it opens for the client that
+  // presented the password and stays shut for the ones that did not, whatever they
+  // are called.
   const panelGated =
-    panelA.open && panelA.buttons >= 20 && panelD.open === false && panelD.buttons === 0;
+    ADMIN_PASS === ''
+      ? !panelA.open && !panelB.open && !panelD.open
+      : panelA.open && panelA.buttons >= 24 && !panelB.open && !panelD.open;
   const pingMeasured = sa.ping > 0 && sa.ping < 5000;
   const listWorks =
     list.open && !list.paused && list.rows >= 2 && list.hasAdminTag && list.litBars;
@@ -348,8 +371,11 @@ try {
     portraits.every((p) => p.brightness >= 40);
   const portraitsDiffer = new Set(portraits.map((p) => p.fingerprint)).size >= 2;
 
-  console.log(`first claim gets the name + admin: ${firstGotAdmin ? 'ok' : 'FAIL'}`);
-  console.log(`second device admitted:            ${secondDeviceAdmitted ? 'ok' : 'FAIL'} (admin=${sb.admin})`);
+  console.log(
+    `password grants admin:             ${passwordGrants ? 'ok' : 'FAIL'}` +
+      `${ADMIN_PASS === '' ? ' (skipped: ARENA_ADMIN_PASSWORD unset)' : ` (admin=${sa.admin})`}`,
+  );
+  console.log(`the name alone grants nothing:     ${nameDoesNotGrant ? 'ok' : 'FAIL'} (admin=${sb.admin})`);
   console.log(
     `owner still admin after reconnect: ${ownerRecognised ? 'ok' : 'FAIL'} (admin=${sc?.admin}, panel=${panelC.open}, ${panelC.buttons} commands)`,
   );
@@ -374,8 +400,8 @@ try {
   for (const e of errors.slice(0, 8)) console.log(' ', e);
 
   const pass =
-    firstGotAdmin &&
-    secondDeviceAdmitted &&
+    passwordGrants &&
+    nameDoesNotGrant &&
     ownerRecognised &&
     beyondCapRefused &&
     beyondCapRenamed &&
