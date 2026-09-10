@@ -97,6 +97,11 @@ async function boot(): Promise<void> {
 
   const ui = new GameUI(engine);
   ui.setLoadingStatus('start.growing');
+  // The player list and the admin overrides follow live state that fires no
+  // events — whether Tab is held right now, and the current latency — so they are
+  // driven from the frame loop. The stats callback already runs there, and both
+  // updates early-out when there is nothing to do.
+  engine.onFrame(() => ui.updateOverlays());
 
   try {
     // Yield once so the start screen paints before the heavy world build.

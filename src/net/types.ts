@@ -10,6 +10,8 @@ export interface PlayerSnapshot {
   name: string;
   /** Chosen character from the library, so everyone sees the same figure. */
   skin: string;
+  /** Set by the server for the holder of the reserved name. Never client-set. */
+  admin?: boolean;
   x: number;
   y: number;
   z: number;
@@ -36,11 +38,24 @@ export interface InputCommand {
 export type ClientMessage =
   | { type: 'join'; name: string; skin: string }
   | { type: 'input'; cmd: InputCommand }
+  /**
+   * Round-trip probe. `t` is the client's own clock and is echoed back untouched,
+   * so latency is measured without the two clocks having to agree on anything.
+   */
+  | { type: 'ping'; t: number }
   | { type: 'leave' };
 
 export type ServerMessage =
-  | { type: 'welcome'; id: string; t: number }
+  /**
+   * `admin` is decided by the server, once, from the name claimed at join. The
+   * client is never asked and cannot assert it — a client-side flag would be a
+   * suggestion, not a permission.
+   */
+  | { type: 'welcome'; id: string; t: number; admin: boolean }
   | { type: 'snapshot'; snapshot: WorldSnapshot }
+  | { type: 'pong'; t: number }
+  /** Sent when a claimed name was refused, so the UI can say why. */
+  | { type: 'nameRejected'; name: string; reason: 'reserved' }
   | { type: 'playerLeft'; id: string };
 
 export type ConnectionState = 'offline' | 'connecting' | 'online' | 'error';

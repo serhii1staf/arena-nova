@@ -11,6 +11,8 @@ import {
 import { applyTranslations, getLang, onLangChange, setLang, t, type Lang } from './i18n.ts';
 import { SKINS, savedSkin, saveSkin } from '../player/skins.ts';
 import { savedName, saveName } from '../net/identity.ts';
+import { PlayerList } from './PlayerList.ts';
+import { AdminPanel } from './AdminPanel.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T | null =>
   document.getElementById(id) as T | null;
@@ -28,6 +30,8 @@ export class GameUI {
   private readonly settings: SettingsStore;
   private paused = false;
   private started = false;
+  private readonly playerList: PlayerList;
+  private readonly adminPanel: AdminPanel;
   private lastEscapeAt = 0;
   private hintTimer: number | null = null;
 
@@ -36,6 +40,9 @@ export class GameUI {
     this.settings = new SettingsStore(engine);
     this.settings.applyAll();
     applyTranslations();
+    this.playerList = new PlayerList();
+    this.adminPanel = new AdminPanel(engine);
+    this.wireAdminKey();
     this.wireStartScreen();
     this.wirePauseMenu();
     this.wireSettings();
@@ -105,6 +112,35 @@ export class GameUI {
     hint.textContent = t(key);
   }
 
+  /**
+   * Drives the panels that follow live state.
+   *
+   * Called from the frame loop rather than from events, because both depend on
+   * things no event fires for: whether Tab is held right now, and the current
+   * latency. The player list only rebuilds when its contents change, so the
+   * closed case is a couple of comparisons.
+   */
+  updateOverlays(): void {
+    // Gated on the Tab hold alone, deliberately not on `paused`. Holding Tab
+    // releases the mouse cursor, which the pause state also tracks — so gating on
+    // it meant the list could never appear at the exact moment it was asked for.
+    // The Escape menu is not a problem: it does not hold Tab.
+    this.playerList.update(this.started && this.engine.input.isPeeking);
+    this.adminPanel.applyTo();
+  }
+
+  private wireAdminKey(): void {
+    window.addEventListener('keydown', (e) => {
+      // Ignore the key while typing a name, or it toggles instead of typing.
+      const target = e.target as HTMLElement | null;
+      if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') return;
+      if (e.code !== 'KeyP' || e.repeat) return;
+      if (!this.started || !this.adminPanel.available) return;
+      e.preventDefault();
+      this.adminPanel.toggle();
+    });
+  }
+
   private wireStartScreen(): void {
     const btn = $<HTMLButtonElement>('btnPlay');
     btn?.addEventListener('click', () => this.play());
@@ -171,6 +207,11 @@ export class GameUI {
 
     document.addEventListener('pointerlockchange', () => {
       // Losing the lock any other way (alt-tab, clicking away) also pauses.
+      //
+      // Except while Tab is held: that hand-back is deliberate and temporary, and
+      // it is what shows the player list. Pausing on it put the pause overlay
+      // across the whole screen, over the very list the player asked for.
+      if (this.engine.input.isPeeking) return;
       if (!this.started || this.engine.input.locked || this.paused) return;
       if (performance.now() - this.lastEscapeAt < 400) return; // Escape already handled it
       this.setPaused(true);

@@ -19,6 +19,8 @@ export class RemotePlayer {
   readonly id: string;
   name: string;
   skin: string;
+  /** Set by the server for the holder of the reserved name. */
+  admin = false;
   x = 0;
   y = 0;
   z = 0;
@@ -101,6 +103,14 @@ export class NetworkManager {
    * snapshot spacing (50 ms at 20 Hz) so there are always two samples to blend.
    */
   private readonly INTERP_DELAY = 80;
+
+  /** Smoothed round-trip time in ms, 0 until the first pong. */
+  ping = 0;
+  /** True only if the server said so. */
+  isAdmin = false;
+  private lastPingAt = 0;
+  private readonly adminHandlers = new Set<(admin: boolean) => void>();
+  private readonly nameRejectedHandlers = new Set<(name: string) => void>();
   private timeOffset = 0; // serverTime - clientTime estimate, for input stamps
   private inputSeq = 0;
 
@@ -132,6 +142,24 @@ export class NetworkManager {
         case 'welcome':
           this.localId = msg.id;
           this.timeOffset = msg.t - performance.now();
+          // Sent a second time, with admin true, once a reserved name is claimed.
+          this.isAdmin = msg.admin === true;
+          for (const h of this.adminHandlers) h(this.isAdmin);
+          break;
+
+        case 'pong': {
+          // Round trip measured against our own clock, so the two never have to
+          // agree on anything. Smoothed, because a single sample swings widely and
+          // a jittering number is harder to read than a slightly stale one.
+          const rtt = performance.now() - msg.t;
+          if (rtt >= 0 && rtt < 10_000) {
+            this.ping = this.ping === 0 ? rtt : this.ping + (rtt - this.ping) * 0.25;
+          }
+          break;
+        }
+
+        case 'nameRejected':
+          for (const h of this.nameRejectedHandlers) h(msg.name);
           break;
         case 'snapshot':
           this.ingest(msg.snapshot.players, msg.snapshot.t);
@@ -166,6 +194,7 @@ export class NetworkManager {
       let rp = this.remotePlayers.get(s.id);
       if (!rp) {
         rp = new RemotePlayer(s.id, s.name, s.skin);
+        rp.admin = s.admin === true;
         this.remotePlayers.set(s.id, rp);
         for (const h of this.joinHandlers) h(rp);
       } else if (s.skin !== rp.skin || s.name !== rp.name) {
@@ -175,6 +204,7 @@ export class NetworkManager {
         // Without this the character someone picked was pinned to the fallback for
         // the rest of the session, and only for whoever happened to see them early.
         rp.name = s.name;
+        rp.admin = s.admin === true;
         const skinChanged = s.skin !== rp.skin;
         rp.skin = s.skin;
         if (skinChanged) for (const h of this.skinHandlers) h(rp);
@@ -208,8 +238,30 @@ export class NetworkManager {
     this.transport.send({ type: 'input', cmd });
   }
 
+  onAdminChange(h: (admin: boolean) => void): () => void {
+    this.adminHandlers.add(h);
+    // Fire immediately: the welcome may already have arrived before anyone
+    // subscribed, and a listener that misses it would show the wrong state.
+    h(this.isAdmin);
+    return () => this.adminHandlers.delete(h);
+  }
+
+  onNameRejected(h: (name: string) => void): () => void {
+    this.nameRejectedHandlers.add(h);
+    return () => this.nameRejectedHandlers.delete(h);
+  }
+
   /** Advance interpolation for all remote players. Call once per frame. */
   update(): void {
+    // One probe a second. Latency does not change fast enough to justify more, and
+    // this rides the same socket as the snapshots so it costs nothing to keep up.
+    if (this.isOnline) {
+      const now = performance.now();
+      if (now - this.lastPingAt > 1000) {
+        this.lastPingAt = now;
+        this.transport.send({ type: 'ping', t: now });
+      }
+    }
     // Same clock the snapshots were stamped with in `ingest` — the local one.
     const renderTime = performance.now() - this.INTERP_DELAY;
     for (const rp of this.remotePlayers.values()) rp.interpolate(renderTime);

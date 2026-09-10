@@ -190,6 +190,15 @@ export class Input {
     }
   }
 
+  /** Ascend while flying: Space held (as opposed to the tap that jumps). */
+  get flyUp(): boolean {
+    return this.keys.has('Space');
+  }
+  /** Descend while flying. */
+  get flyDown(): boolean {
+    return this.keys.has('ControlLeft') || this.keys.has('KeyC');
+  }
+
   /** True while Tab is held (cursor visible, look/move suspended). */
   get isPeeking(): boolean {
     return this.peeking;

@@ -1,5 +1,6 @@
 import { Euler, MathUtils, PerspectiveCamera, Vector2, Vector3 } from 'three';
 import { GameConfig } from '../config.ts';
+import { adminOverrides } from './adminState.ts';
 import type { Input } from '../core/Input.ts';
 
 export interface PlayerCollision {
@@ -55,6 +56,22 @@ export class PlayerController {
   isGrounded = false;
   /** Metres per second, signed. Lets the rig tell rising from falling. */
   verticalSpeed = 0;
+
+  // ---- Admin overrides. All default to "off", so a normal session behaves
+  // exactly as before and none of this costs a branch worth measuring. ----
+  private get speedMultiplier(): number {
+    return adminOverrides.speedMultiplier;
+  }
+  private get flying(): boolean {
+    return adminOverrides.flying;
+  }
+  private get noclip(): boolean {
+    return adminOverrides.noclip;
+  }
+  /** Visual scale of the body, read by the scenes when they drive the avatar. */
+  get bodyScale(): number {
+    return adminOverrides.bodyScale;
+  }
   /** How long the body has genuinely had no ground under it. */
   private airborneFor = 0;
   private footstepFlag = false;
@@ -129,7 +146,8 @@ export class PlayerController {
       .addScaledVector(this.right, this.input.move.x);
     if (this.wish.lengthSq() > 1) this.wish.normalize();
 
-    const targetSpeed = this.input.sprint ? cfg.sprintSpeed : cfg.walkSpeed;
+    const targetSpeed =
+      (this.input.sprint ? cfg.sprintSpeed : cfg.walkSpeed) * Math.max(0.1, this.speedMultiplier);
     const targetVx = this.wish.x * targetSpeed;
     const targetVz = this.wish.z * targetSpeed;
 
@@ -141,6 +159,30 @@ export class PlayerController {
     if (this.wish.lengthSq() < 0.01) {
       this.velocity.x *= damp;
       this.velocity.z *= damp;
+    }
+
+    // Flight replaces gravity entirely rather than cancelling it out: hovering by
+    // applying an equal upward force fights the ground snap every step and jitters.
+    if (this.flying) {
+      const climb = (this.input.consumeJump() ? 1 : 0) - (this.input.sprint ? 0 : 0);
+      // Space rises, Ctrl/C descends; sprint stays a speed modifier while flying.
+      const rise = this.input.flyDown ? -1 : climb > 0 || this.input.flyUp ? 1 : 0;
+      this.velocity.y = rise * cfg.sprintSpeed * Math.max(0.1, this.speedMultiplier);
+      this.position.x += this.velocity.x * dt;
+      this.position.z += this.velocity.z * dt;
+      this.position.y += this.velocity.y * dt;
+      if (!this.noclip) this.world.collide(this.position);
+      // Never below the ground, even in flight — falling through the world is not
+      // a feature anyone asked for.
+      const floorY = this.world.floorHeightAt(this.position.x, this.position.z);
+      if (this.position.y < floorY) this.position.y = floorY;
+      this.grounded = false;
+      this.airborneFor = 0;
+      this.isGrounded = true; // keep the walk cycle rather than a permanent fall
+      this.verticalSpeed = 0;
+      const flyingSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+      this.speed01 = MathUtils.clamp(flyingSpeed / cfg.sprintSpeed, 0, 1);
+      return;
     }
 
     // Jump + gravity.
@@ -159,7 +201,7 @@ export class PlayerController {
     this.position.y += this.velocity.y * dt;
 
     // Horizontal collisions (walls + columns).
-    this.world.collide(this.position);
+    if (!this.noclip) this.world.collide(this.position);
 
     // Ground.
     //

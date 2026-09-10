@@ -71,12 +71,23 @@ export interface Env {
 interface Attached extends PlayerSnapshot {
   /** Last time this player sent anything, for idle cleanup. */
   seen: number;
+  /** Granted only by `claimName`, never by anything the client sends. */
+  admin: boolean;
 }
 
 /** Snapshots are broadcast at most this often (ms) — 20 Hz. */
 const BROADCAST_INTERVAL = 50;
 /** Hard cap per room, so one room cannot be used to burn the whole account. */
 const MAX_PLAYERS = 16;
+/**
+ * The one name that cannot be taken twice, and which carries admin rights.
+ *
+ * Claimed by whoever asks for it first and recorded in durable storage, so it
+ * survives the room hibernating. Comparison is case-insensitive: reserving only
+ * the exact spelling would leave every other casing free to impersonate it.
+ */
+const RESERVED_NAME = 'Kairozun';
+const OWNER_KEY = 'reserved:owner';
 
 export class GameRoom {
   private readonly state: DurableObjectState;
@@ -107,6 +118,7 @@ export class GameRoom {
       id,
       name: 'Player',
       skin: 'captain',
+      admin: false,
       x: 0,
       y: 0,
       z: 0,
@@ -115,12 +127,54 @@ export class GameRoom {
     };
     server.serializeAttachment(attached);
 
-    this.send(server, { type: 'welcome', id, t: Date.now() });
+    // Admin is granted on `join`, not here — the name has not been claimed yet.
+    this.send(server, { type: 'welcome', id, t: Date.now(), admin: false });
     // Give the newcomer the current world immediately rather than making them
     // wait for someone else to move.
     this.broadcast(true);
 
     return new Response(null, { status: 101, webSocket: client } as ResponseInitWithSocket);
+  }
+
+  /**
+   * Resolves the one reserved name.
+   *
+   * Whoever claims `RESERVED_NAME` first owns it for good and is the room's admin;
+   * everyone else asking for it is refused and keeps the name they had. The owner
+   * is recorded in durable storage rather than in memory, so it survives the room
+   * hibernating and being evicted — an in-memory flag would hand the name to
+   * whoever happened to reconnect first after an idle period.
+   *
+   * Admin is decided here and only here. The client is never asked.
+   */
+  private async claimName(ws: CfWebSocket, attached: Attached, wanted: string): Promise<void> {
+    if (wanted.toLowerCase() !== RESERVED_NAME.toLowerCase()) {
+      if (attached.admin) {
+        // Gave up the reserved name, so the rights go with it.
+        attached.admin = false;
+        ws.serializeAttachment(attached);
+      }
+      return;
+    }
+
+    const owner = (await this.state.storage.get<string>(OWNER_KEY)) ?? null;
+    if (owner === null) {
+      await this.state.storage.put(OWNER_KEY, attached.id);
+    } else if (owner !== attached.id) {
+      // Taken by someone else: refuse the name and say so.
+      attached.name = `${wanted}_${attached.id.slice(0, 4)}`;
+      attached.admin = false;
+      ws.serializeAttachment(attached);
+      this.send(ws, { type: 'nameRejected', name: wanted, reason: 'reserved' });
+      this.broadcast(true);
+      return;
+    }
+
+    attached.name = wanted;
+    attached.admin = true;
+    ws.serializeAttachment(attached);
+    this.send(ws, { type: 'welcome', id: attached.id, t: Date.now(), admin: true });
+    this.broadcast(true);
   }
 
   webSocketMessage(ws: CfWebSocket, raw: string | ArrayBuffer): void {
@@ -136,18 +190,32 @@ export class GameRoom {
     if (!attached) return;
 
     switch (msg.type) {
-      case 'join':
+      case 'join': {
         // Names are player-supplied, so clamp the length and strip control
         // characters before they end up in everyone else's client.
-        attached.name = String(msg.name ?? 'Player')
-          .replace(/[\u0000-\u001f\u007f]/g, '')
-          .slice(0, 24) || 'Player';
+        const wanted =
+          String(msg.name ?? 'Player')
+            .replace(/[\u0000-\u001f\u007f]/g, '')
+            .slice(0, 24) || 'Player';
+        // The reserved name is claimed once, permanently, by whoever takes it
+        // first, and it carries admin rights. Resolved asynchronously against
+        // durable storage, so the rest of the join is applied immediately and the
+        // decision is delivered when it is known.
+        void this.claimName(ws, attached, wanted);
+        attached.name = wanted;
         // Skins are ids from a fixed client-side list, so a short allow-listed
         // string is all that is needed; anything odd falls back on the client.
         attached.skin = String(msg.skin ?? 'captain').replace(/[^a-z0-9-]/gi, '').slice(0, 24) || 'captain';
         attached.seen = Date.now();
         ws.serializeAttachment(attached);
         this.broadcast(true);
+        break;
+      }
+
+      case 'ping':
+        // Echoed untouched. The client measures the round trip against its own
+        // clock, so no clock agreement is needed and the server keeps no state.
+        this.send(ws, { type: 'pong', t: Number(msg.t) || 0 });
         break;
 
       case 'input': {
@@ -208,7 +276,16 @@ export class GameRoom {
     for (const peer of sockets) {
       const a = peer.deserializeAttachment() as Attached | null;
       if (!a) continue;
-      players.push({ id: a.id, name: a.name, skin: a.skin, x: a.x, y: a.y, z: a.z, yaw: a.yaw });
+      players.push({
+        id: a.id,
+        name: a.name,
+        skin: a.skin,
+        admin: a.admin === true,
+        x: a.x,
+        y: a.y,
+        z: a.z,
+        yaw: a.yaw,
+      });
     }
 
     const msg: ServerMessage = { type: 'snapshot', snapshot: { t: now, players } };

@@ -49,6 +49,8 @@ export class Engine {
   private fadeUntil = 0;
 
   private rafId = 0;
+  /** Per-frame hooks for UI that follows live state (no event to listen for). */
+  private readonly frameHandlers = new Set<() => void>();
   private running = false;
   private lastTime = 0;
   private accumulator = 0;
@@ -256,6 +258,9 @@ export class Engine {
       this.postfx.setSize(this.ctx.width, this.ctx.height);
     }
 
+    // 4b) Overlays that follow live state rather than events.
+    for (const h of this.frameHandlers) h();
+
     // 5) Render through the post-processing composer, matching its mood to the
     //    scene's own conditions first.
     this.postfx.setMood(this.scenes.current?.nightFactor ?? 0);
@@ -264,6 +269,18 @@ export class Engine {
 
     this.updateStats(frameDelta);
   };
+
+  /**
+   * Registers a hook that runs once per rendered frame, before the composer.
+   *
+   * For overlays whose input is live state rather than an event — held keys,
+   * measured latency — where the alternative is polling on a timer and being
+   * either late or wasteful.
+   */
+  onFrame(handler: () => void): () => void {
+    this.frameHandlers.add(handler);
+    return () => this.frameHandlers.delete(handler);
+  }
 
   /** Re-render the current scene without stepping simulation (used mid-fade). */
   private renderCurrent(now: number): void {
