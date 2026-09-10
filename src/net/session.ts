@@ -15,6 +15,7 @@ let shared: NetworkManager | null = null;
 let connecting = false;
 let unsubscribeSkin: (() => void) | null = null;
 let unsubscribeName: (() => void) | null = null;
+let unsubscribeState: (() => void) | null = null;
 
 export function gameSession(): NetworkManager {
   if (!shared) {
@@ -30,6 +31,18 @@ export function gameSession(): NetworkManager {
     });
     unsubscribeSkin = onSkinChange((id) => {
       if (shared?.isOnline) shared.join(playerName(), id);
+    });
+    // Re-announce whenever the connection comes up, not only on the first connect.
+    //
+    // `ensureConnected` sends `join` once, and returns early ever after because the
+    // session is already online — so a socket that dropped and came back left the
+    // server holding its defaults for this player. Nothing local looked wrong,
+    // because the local row is drawn from local state; it was everyone *else* who
+    // saw the wrong character, which is why it read as "some players see everybody
+    // wearing the same skin". Identity is cheap to repeat and the server treats a
+    // second `join` as an update, so the fix is simply to stop assuming once.
+    unsubscribeState = shared.onStateChange((state) => {
+      if (state === 'online') shared?.join(playerName(), savedSkin());
     });
   }
   return shared;
@@ -61,6 +74,8 @@ export function disposeSession(): void {
   unsubscribeSkin = null;
   unsubscribeName?.();
   unsubscribeName = null;
+  unsubscribeState?.();
+  unsubscribeState = null;
   shared?.dispose();
   shared = null;
   connecting = false;

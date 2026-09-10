@@ -123,13 +123,28 @@ export class PlayerList {
     }
     entries.sort((a, b) => (a.self ? -1 : b.self ? 1 : a.name.localeCompare(b.name)));
 
-    // The portrait is part of the signature so the row is rebuilt once its picture
-    // finishes rendering — a few hundred milliseconds after the panel is first
-    // opened — and not on any frame after that.
+    // Latency is deliberately *not* in the signature.
+    //
+    // It was, and it is the one field here that changes on its own: a smoothed
+    // round trip rounded to milliseconds moves almost every second, for every
+    // player in the room. So the whole list was torn down and rebuilt at that rate
+    // while the panel was open — every row, every meter, and every portrait
+    // `<img>`, which meant the browser decoded the same data URLs again and again.
+    // Nothing was re-rendered in the 3D sense, but the DOM churn is what made the
+    // pictures look like they were being redrawn.
+    //
+    // Structure is rebuilt only when the room's composition changes: who is here,
+    // what they are called, which character they wear, whether they are admin, and
+    // whether their portrait has arrived. Everything that ticks is patched in place
+    // below, which is a handful of string writes on unchanged nodes.
     const signature = `${online}|${entries
-      .map((e) => `${e.id}:${e.name}:${e.skin}:${e.admin}:${e.ping}:${e.portrait ? 1 : 0}`)
+      .map((e) => `${e.id}:${e.name}:${e.skin}:${e.admin}:${e.portrait ? 1 : 0}`)
       .join(',')}`;
-    if (signature === this.signature) return;
+
+    if (signature === this.signature) {
+      this.patchVolatile(entries, online);
+      return;
+    }
     this.signature = signature;
 
     if (this.count) this.count.textContent = String(entries.length);
@@ -146,13 +161,12 @@ export class PlayerList {
         const face = document.createElement('img');
         face.className = 'portrait';
         face.src = e.portrait;
-        face.width = 30;
-        face.height = 30;
+        face.width = 34;
+        face.height = 34;
         // Decorative: the name beside it already identifies the player, and the
         // character is named in the tooltip.
         face.alt = '';
         face.title = label;
-        face.style.setProperty('--chip', chipColour(e.skin));
         row.append(face);
       } else {
         // Fallback while the portrait is still being drawn, or if this build has no
@@ -181,6 +195,9 @@ export class PlayerList {
 
       const ping = document.createElement('span');
       ping.className = 'playerPing';
+      // Tagged with the player it belongs to, so the in-place update can find its
+      // row again without the list having to remember any DOM itself.
+      row.dataset.pid = e.id;
       // Everyone gets a real number now. A dash means only that this player has not
       // reported a round trip yet (they joined a moment ago, or they are on a build
       // that never sent one), which is a different thing from being offline.
@@ -205,5 +222,32 @@ export class PlayerList {
       return row;
     });
     this.list.replaceChildren(...rows);
+  }
+
+  /**
+   * Updates only the values that move: the latency figure and its meter.
+   *
+   * Cheap by construction — it touches existing nodes and writes a string only
+   * when it differs, so a room where nothing has changed costs a few comparisons.
+   * This is what lets the structural rebuild above be rare.
+   */
+  private patchVolatile(entries: Entry[], online: boolean): void {
+    if (!this.list) return;
+    for (const e of entries) {
+      const row = this.list.querySelector<HTMLElement>(`[data-pid="${CSS.escape(e.id)}"]`);
+      if (!row) continue;
+
+      const ping = row.querySelector<HTMLElement>('.playerPing');
+      if (ping) {
+        const text = !online ? t('players.offline') : e.ping > 0 ? `${e.ping} ms` : '—';
+        if (ping.textContent !== text) ping.textContent = text;
+      }
+
+      const meter = row.querySelector<HTMLElement>('.bars');
+      if (meter) {
+        const b = bars(e.ping, online);
+        if (meter.className !== b.className) meter.className = b.className;
+      }
+    }
   }
 }

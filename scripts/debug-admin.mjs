@@ -21,6 +21,8 @@ const browser = await chromium.launch({
 /** Distinct install tokens, so "the same install reconnecting" is expressible. */
 const TOKEN_A = 'a'.repeat(8) + '1234567890abcdef1234567890abcdef';
 const TOKEN_B = 'b'.repeat(8) + 'fedcba0987654321fedcba0987654321';
+const TOKEN_C = 'c'.repeat(8) + '0f1e2d3c4b5a69780f1e2d3c4b5a6978';
+const TOKEN_D = 'd'.repeat(8) + '9876543210fedcba9876543210fedcba';
 
 async function spawn(label, name, skin, owner) {
   const ctx = await browser.newContext({ viewport: { width: 820, height: 540 } });
@@ -258,17 +260,27 @@ try {
   // ---------------------------------------------------------------------------
   await a.context().close();
   await b.context().close();
-  const c = await spawn('C', RESERVED, 'captain', TOKEN_A);
-  let sc = null;
+  const c = await spawn('C', RESERVED, 'captain', TOKEN_C);
+  let sc0 = null;
   for (let i = 0; i < 30; i++) {
     await c.waitForTimeout(1000);
-    sc = await state(c);
+    sc0 = await state(c);
+    if (sc0.online && sc0.admin) break;
+  }
+  await c.context().close();
+  // Now the original install returns, with all three slots taken — including its
+  // own. It must still be recognised.
+  const c2 = await spawn('C2', RESERVED, 'captain', TOKEN_A);
+  let sc = null;
+  for (let i = 0; i < 30; i++) {
+    await c2.waitForTimeout(1000);
+    sc = await state(c2);
     if (sc.online && sc.admin) break;
   }
-  const panelC = await openFor(c);
+  const panelC = await openFor(c2);
   // And a stranger must still be refused after the owner has been recognised once,
   // so the self-healing path cannot be mistaken for "anyone may rebind".
-  const d = await spawn('D', RESERVED, 'mako', TOKEN_B);
+  const d = await spawn('D', RESERVED, 'mako', TOKEN_D);
   let sd = null;
   for (let i = 0; i < 30; i++) {
     await d.waitForTimeout(1000);
@@ -277,25 +289,40 @@ try {
   }
   await d.waitForTimeout(4000);
   sd = await state(d);
+  const panelD = await openFor(d);
+  const sc2 = await state(c2);
 
   console.log(`A: ${JSON.stringify(sa)}`);
   console.log(`B: ${JSON.stringify(sb)}`);
   console.log(`C (owner reconnecting): ${JSON.stringify(sc)} panel=${JSON.stringify(panelC)}`);
   console.log(`D (stranger, after):    ${JSON.stringify(sd)}`);
-  console.log(`panel A: ${JSON.stringify(panelA)}  panel B: ${JSON.stringify(panelB)}`);
+  console.log(
+    `panel A: ${JSON.stringify(panelA)}  B: ${JSON.stringify(panelB)}  D: ${JSON.stringify(panelD)}`,
+  );
   console.log(`list: ${JSON.stringify(list)} closedOnRelease=${listClosed}`);
   console.log(`portraits: ready=${portraitsReady} ${JSON.stringify(portraits)}`);
 
   const firstGotAdmin = sa.admin === true;
-  const secondRefused = sb.admin === false;
+  // A second *device* is now legitimate: the owner plays on a laptop and a desktop,
+  // and the name belongs to the person, not to one install. So B taking a free slot
+  // is the intended behaviour, not a hole — the cap is what closes it.
+  const secondDeviceAdmitted = sb.admin === true;
   // The permanent half of the claim: same install, later connection, still admin,
   // and the panel still opens.
   const ownerRecognised = sc?.admin === true && panelC.open && panelC.buttons >= 20;
-  const strangerStillRefused = sd?.admin === false;
-  // The refused client must not be walking around under the reserved name either.
-  const secondRenamed =
-    sa.remotes.length > 0 && sa.remotes.every((r) => r.name !== RESERVED);
-  const panelGated = panelA.open && panelA.buttons >= 20 && !panelB.open;
+  // Past the cap, and refused. This is the check that keeps the slots from being an
+  // open door: the room holds three installs and the fourth is turned away however
+  // well it knows the name.
+  const beyondCapRefused = sd?.admin === false;
+  // The client past the cap must not be walking around under the reserved name
+  // either. Read from the owner's own view of the room, which is where an
+  // impersonation would actually be seen.
+  const beyondCapRenamed =
+    sc2.remotes.length > 0 && sc2.remotes.every((r) => r.name !== RESERVED);
+  // The panel is gated on rights, not on being first: it opens for a registered
+  // device and stays shut for one that was turned away.
+  const panelGated =
+    panelA.open && panelA.buttons >= 20 && panelD.open === false && panelD.buttons === 0;
   const pingMeasured = sa.ping > 0 && sa.ping < 5000;
   const listWorks =
     list.open && !list.paused && list.rows >= 2 && list.hasAdminTag && list.litBars;
@@ -322,12 +349,12 @@ try {
   const portraitsDiffer = new Set(portraits.map((p) => p.fingerprint)).size >= 2;
 
   console.log(`first claim gets the name + admin: ${firstGotAdmin ? 'ok' : 'FAIL'}`);
-  console.log(`second claim refused:              ${secondRefused ? 'ok' : 'FAIL'}`);
+  console.log(`second device admitted:            ${secondDeviceAdmitted ? 'ok' : 'FAIL'} (admin=${sb.admin})`);
   console.log(
     `owner still admin after reconnect: ${ownerRecognised ? 'ok' : 'FAIL'} (admin=${sc?.admin}, panel=${panelC.open}, ${panelC.buttons} commands)`,
   );
-  console.log(`stranger refused after that:       ${strangerStillRefused ? 'ok' : 'FAIL'} (admin=${sd?.admin})`);
-  console.log(`second not shown under that name:  ${secondRenamed ? 'ok' : 'FAIL'} (${JSON.stringify(sa.remotes)})`);
+  console.log(`fourth device refused (cap 3):     ${beyondCapRefused ? 'ok' : 'FAIL'} (admin=${sd?.admin})`);
+  console.log(`over-cap client renamed:           ${beyondCapRenamed ? 'ok' : 'FAIL'} (${JSON.stringify(sc2.remotes)})`);
   console.log(`panel opens for admin only:        ${panelGated ? 'ok' : 'FAIL'} (${panelA.buttons} commands)`);
   console.log(`ping is a real measurement:        ${pingMeasured ? 'ok' : 'FAIL'} (${sa.ping} ms)`);
   console.log(
@@ -348,10 +375,10 @@ try {
 
   const pass =
     firstGotAdmin &&
-    secondRefused &&
+    secondDeviceAdmitted &&
     ownerRecognised &&
-    strangerStillRefused &&
-    secondRenamed &&
+    beyondCapRefused &&
+    beyondCapRenamed &&
     panelGated &&
     pingMeasured &&
     remotePingReported &&

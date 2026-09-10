@@ -189,18 +189,29 @@
        * wearing, rendered once per character and reused by every row wearing it.
        * There are only seven characters and a portrait never changes, so this is a
        * handful of one-off 64x64 draws for the whole session — see
-       * src/ui/Portraits.ts. The accent from the chip below survives as the ring,
-       * so a character is still identifiable at a glance.
+       * src/ui/Portraits.ts.
+       *
+       * No frame, no plate, no ring. The render already has a transparent
+       * background, so the face can sit directly on the row — and it should: at
+       * 30 px the ring and the dark plate behind it were eating the outer few
+       * pixels of a picture that is mostly face, which is the part carrying all the
+       * information. The accent colour is still available per row for the fallback
+       * chip, which does need a fill to be legible.
+       *
+       * Larger than the chip it replaces, and nudged inward, because the figure no
+       * longer has to leave room for a border.
        */
       .portrait {
         flex: 0 0 auto;
-        width: 30px;
-        height: 30px;
-        border-radius: 9px;
-        background: radial-gradient(120% 120% at 50% 15%, rgba(255, 255, 255, 0.16), transparent 70%),
-          rgba(8, 24, 15, 0.85);
-        box-shadow: inset 0 0 0 1px var(--chip, #2c6b46);
-        object-fit: cover;
+        width: 34px;
+        height: 34px;
+        margin-left: 3px;
+        margin-right: 1px;
+        /* `contain`, not `cover`: the render is framed head-and-shoulders already
+           and cropping it to fill a square cuts the top of the head off. */
+        object-fit: contain;
+        /* Lifts the figure off a dark row without drawing a box around it. */
+        filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
       }
       /*
        * Fallback for the moment before a portrait has been rendered, and for a
@@ -211,9 +222,13 @@
         display: grid;
         flex: 0 0 auto;
         place-items: center;
-        width: 30px;
-        height: 30px;
-        border-radius: 9px;
+        /* Matches the portrait's footprint including its margins, so a row does not
+           shift sideways the moment the picture arrives. */
+        width: 34px;
+        height: 34px;
+        margin-left: 3px;
+        margin-right: 1px;
+        border-radius: 10px;
         background: var(--chip, #2c6b46);
         color: #06180e;
         font-size: 14px;

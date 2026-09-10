@@ -98,6 +98,21 @@ const MAX_PLAYERS = 16;
 const RESERVED_NAME = 'Kairozun';
 const OWNER_KEY = 'reserved:owner';
 /**
+ * How many installs may hold the reserved name at once.
+ *
+ * One was wrong, and not by a little: the owner plays on a laptop and a desktop,
+ * and a name bound to a single install meant the second machine was refused from
+ * a name it legitimately owned, with no way to move it across. Renaming is not a
+ * workaround either — the name *is* the claim.
+ *
+ * A small cap rather than an unbounded list, because every slot is a way in for
+ * somebody who knows the name. The honest description of this scheme is
+ * first-come-first-served across a handful of devices, and the tradeoff is stated
+ * plainly here so it is not mistaken for authentication: anyone who claims the
+ * name before the owner does, on a room whose slots are free, gets it.
+ */
+const MAX_OWNERS = 3;
+/**
  * Shortest value accepted as an owner token.
  *
  * This is also how a record written by the previous scheme is recognised. That
@@ -207,14 +222,22 @@ export class GameRoom {
       return;
     }
 
-    const stored = (await this.state.storage.get<string>(OWNER_KEY)) ?? null;
-    const claimed = stored !== null && stored.length >= MIN_OWNER_TOKEN;
-    if (!claimed) {
-      // Unclaimed, or holding a dead record from the connection-id scheme.
-      await this.state.storage.put(OWNER_KEY, token);
-    } else if (stored !== token) {
-      refuse();
-      return;
+    // The record is a list of install tokens. Older rooms hold a single string —
+    // either a token from the previous scheme or a dead connection id from the one
+    // before that — and both are normalised here rather than migrated separately,
+    // so a room heals on the next claim whatever state it was left in.
+    const raw = await this.state.storage.get<string | string[]>(OWNER_KEY);
+    const owners = (Array.isArray(raw) ? raw : raw ? [raw] : []).filter(
+      (t) => typeof t === 'string' && t.length >= MIN_OWNER_TOKEN,
+    );
+
+    if (!owners.includes(token)) {
+      if (owners.length >= MAX_OWNERS) {
+        refuse();
+        return;
+      }
+      owners.push(token);
+      await this.state.storage.put(OWNER_KEY, owners);
     }
 
     attached.name = wanted;
