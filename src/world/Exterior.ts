@@ -71,6 +71,12 @@ const FAR_STARVE_FRAMES = 90;
 export interface ExteriorBuild {
   group: Group;
   floorHeightAt(x: number, z: number): number;
+  /**
+   * The world's collider registry. Exposed so things built at runtime — the admin
+   * construction pieces — can be made solid through the same path the streamed
+   * props use, rather than growing a second collision system beside it.
+   */
+  registry: PropRegistry;
   collide(pos: Vector3): void;
   blocksCamera(x: number, y: number, z: number): boolean;
   /**
@@ -584,6 +590,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
   return {
     group,
     floorHeightAt,
+    registry,
     collide,
     blocksCamera,
     skyMaterial,

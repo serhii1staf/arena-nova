@@ -15,6 +15,8 @@ import { PlayerController } from '../player/PlayerController.ts';
 import { Avatar } from '../player/Avatar.ts';
 import { buildExterior, type AtmosphereState, type ExteriorBuild } from '../world/Exterior.ts';
 import { buildDragon, type DragonBuild } from '../world/Dragon.ts';
+import { createBuildSite, type BuildSite } from '../world/Building.ts';
+import { setBuildSite } from '../ui/BuildBar.ts';
 import { DayNight } from '../world/DayNight.ts';
 import { RemoteCrowd } from '../net/RemoteCrowd.ts';
 import { ensureConnected, gameSession } from '../net/session.ts';
@@ -48,6 +50,11 @@ export class ExteriorScene implements GameScene {
   private fog!: FogExp2;
   private background!: Color;
   private crowd!: RemoteCrowd;
+  private buildSite!: BuildSite;
+  /** Reused each frame for the build aim ray; allocating two vectors per frame here
+   * would be pure churn for something that is off most of the time. */
+  private readonly aimFrom = new Vector3();
+  private readonly aimDir = new Vector3();
   private readonly net = gameSession();
   private readonly publisher = new LocalPublisher();
   /** Reused each frame; the world only reads it. */
@@ -161,6 +168,15 @@ export class ExteriorScene implements GameScene {
     this.scene.add(this.crowd.group);
     ensureConnected();
 
+    // Admin construction. Built here rather than inside the world so it survives
+    // chunk streaming untouched — pieces are placed by hand and must not be
+    // unloaded when the player walks away from them — but it registers its
+    // colliders in the world's own registry, so what you build is as solid as what
+    // grew there.
+    this.buildSite = createBuildSite(ctx.assets, this.world.registry);
+    this.scene.add(this.buildSite.group);
+    setBuildSite(this.buildSite);
+
     // Compile every program now, while the transition is still faded out.
     // Otherwise the first frame in the open world has to compile the terrain, the
     // wind-injected vegetation programs, the ember, portal, dragon, wildlife and
@@ -263,6 +279,15 @@ export class ExteriorScene implements GameScene {
     this.air.air.copy(this.fog.color);
     this.world.update(this.time, frameDelta, p, this.air);
     this.dragon.update(this.time, frameDelta);
+
+    // Build preview. Driven from the camera rather than from the body, so the piece
+    // lands where the crosshair points in third person too. Returns immediately
+    // while build mode is off, which is every frame of a normal session.
+    if (this.buildSite.active) {
+      this.camera.getWorldPosition(this.aimFrom);
+      this.camera.getWorldDirection(this.aimDir);
+      this.buildSite.update(this.aimFrom, this.aimDir, (x, z) => this.world.floorHeightAt(x, z));
+    }
   }
 
   resize(width: number, height: number): void {
@@ -276,6 +301,10 @@ export class ExteriorScene implements GameScene {
   }
 
   dispose(): void {
+    // Withdrawn before the site is torn down, so the hotbar cannot hold a pointer
+    // into a disposed world for even one frame.
+    setBuildSite(null);
+    this.buildSite?.dispose();
     this.crowd?.dispose();
     this.character?.dispose();
     this.dragon?.dispose();

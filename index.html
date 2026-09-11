@@ -338,6 +338,98 @@
         color: rgba(143, 227, 176, 0.75);
         font-size: 10px;
       }
+      /* --- Build hotbar (admin) ------------------------------------------------
+         Centred along the bottom, the way every game that has one puts it. Shown
+         only while build mode is on, and only for an admin: `hidden` is set from
+         script, so a normal session never renders any of this. */
+      #buildHud {
+        position: fixed;
+        left: 50%;
+        bottom: 18px;
+        transform: translateX(-50%);
+        /* Above the canvas. The canvas hit-tests first, so without this the slots
+           cannot be clicked even once the cursor is free. */
+        z-index: 45;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 7px;
+        pointer-events: none;
+      }
+      #buildHud[hidden] {
+        display: none;
+      }
+      #buildBar {
+        display: flex;
+        gap: 7px;
+        /* The bar takes the pointer; the column around it stays pass-through so it
+           never eats a click aimed at the world. */
+        pointer-events: auto;
+      }
+      .buildSlot {
+        position: relative;
+        width: 58px;
+        height: 58px;
+        padding: 0;
+        border: 1px solid rgba(150, 190, 230, 0.22);
+        border-radius: 10px;
+        background: rgba(10, 16, 26, 0.72);
+        color: #cfe0f2;
+        font: inherit;
+        cursor: pointer;
+        transition:
+          border-color 0.12s,
+          background 0.12s,
+          transform 0.12s;
+      }
+      .buildSlot:hover {
+        border-color: rgba(150, 190, 230, 0.5);
+      }
+      .buildSlot.on {
+        border-color: rgba(126, 224, 168, 0.85);
+        background: rgba(18, 44, 30, 0.85);
+        transform: translateY(-4px);
+      }
+      .buildIcon {
+        position: absolute;
+        inset: 4px 4px 13px;
+        background-position: center;
+        background-repeat: no-repeat;
+        background-size: contain;
+      }
+      .buildKey {
+        position: absolute;
+        top: 2px;
+        left: 5px;
+        color: rgba(180, 205, 230, 0.6);
+        font-size: 9px;
+      }
+      .buildName {
+        position: absolute;
+        right: 0;
+        bottom: 2px;
+        left: 0;
+        overflow: hidden;
+        color: rgba(190, 215, 240, 0.78);
+        font-size: 9px;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .buildSlot.on .buildName {
+        color: #a9f0c6;
+      }
+      #buildTip {
+        padding: 3px 9px;
+        border-radius: 7px;
+        background: rgba(8, 14, 22, 0.6);
+        color: rgba(176, 200, 224, 0.72);
+        font-size: 10px;
+        white-space: nowrap;
+      }
+      #buildCount {
+        color: #a9f0c6;
+      }
       #squadInvites {
         position: fixed;
         right: 16px;
@@ -976,6 +1068,15 @@
     <div id="squad" aria-hidden="true">
       <div id="squadList"></div>
     </div>
+    <!--
+      Build hotbar. Slots are generated in script from the piece list, so the bar
+      and the pieces can never fall out of step.
+    -->
+    <div id="buildHud" hidden>
+      <div id="buildBar" role="toolbar" aria-label="Build pieces"></div>
+      <div id="buildTip"><span id="buildHint"></span> &middot; <span id="buildCount">0</span></div>
+    </div>
+
     <div id="squadInvites" role="status" aria-live="polite"></div>
 
     <!--
