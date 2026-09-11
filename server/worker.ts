@@ -172,8 +172,19 @@ export class GameRoom {
    * character at a time. Length is allowed to leak; that is not useful on its own.
    */
   private grantsAdmin(supplied: string): boolean {
-    const secret = this.env.ADMIN_PASSWORD;
-    if (!secret || supplied.length === 0) return false;
+    // Trimmed, both sides.
+    //
+    // Not defensiveness for its own sake: a secret is typed or piped in by hand
+    // exactly once, and the ways of doing that mostly append a newline. Piping the
+    // value into `wrangler secret put` from a shell stored a trailing newline, the
+    // length check below then failed immediately, and the symptom was the password
+    // being silently wrong with nothing anywhere saying so — the one failure mode an
+    // authorisation check must not have. Whitespace around a password can never be
+    // meaningful, so removing it costs nothing and removes the trap.
+    const secret = (this.env.ADMIN_PASSWORD ?? '').trim();
+    const given = supplied.trim();
+    if (!secret || given.length === 0) return false;
+    supplied = given;
     if (supplied.length !== secret.length) return false;
     let diff = 0;
     for (let i = 0; i < secret.length; i++) {

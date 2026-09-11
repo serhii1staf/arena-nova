@@ -1,6 +1,6 @@
 import { NetworkManager } from './NetworkManager.ts';
 import { roomSocketUrl } from './endpoint.ts';
-import { onNameChange, playerName } from './identity.ts';
+import { onAdminPasswordChange, onNameChange, playerName } from './identity.ts';
 import { onSkinChange, savedSkin } from '../player/skins.ts';
 
 /**
@@ -16,6 +16,7 @@ let connecting = false;
 let unsubscribeSkin: (() => void) | null = null;
 let unsubscribeName: (() => void) | null = null;
 let unsubscribeState: (() => void) | null = null;
+let unsubscribePass: (() => void) | null = null;
 
 export function gameSession(): NetworkManager {
   if (!shared) {
@@ -41,6 +42,12 @@ export function gameSession(): NetworkManager {
     // saw the wrong character, which is why it read as "some players see everybody
     // wearing the same skin". Identity is cheap to repeat and the server treats a
     // second `join` as an update, so the fix is simply to stop assuming once.
+    // The admin password is typed on the start screen, which is up *after* the
+    // session has already connected and announced itself — so without this the
+    // server never learns it and the panel never opens.
+    unsubscribePass = onAdminPasswordChange(() => {
+      if (shared?.isOnline) shared.join(playerName(), savedSkin());
+    });
     unsubscribeState = shared.onStateChange((state) => {
       if (state === 'online') shared?.join(playerName(), savedSkin());
     });
@@ -76,6 +83,8 @@ export function disposeSession(): void {
   unsubscribeName = null;
   unsubscribeState?.();
   unsubscribeState = null;
+  unsubscribePass?.();
+  unsubscribePass = null;
   shared?.dispose();
   shared = null;
   connecting = false;

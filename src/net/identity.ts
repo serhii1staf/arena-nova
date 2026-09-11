@@ -68,15 +68,42 @@ export function adminPassword(): string {
   }
 }
 
-/** Saves the password, or clears it when given something blank. */
+const passListeners = new Set<() => void>();
+
+/**
+ * Saves the password, or clears it when given something blank, and announces the
+ * change.
+ *
+ * The announcement is the part that matters. The session connects while the start
+ * screen is still up, so identity has already been sent to the server by the time
+ * the password is typed — and nothing sent it again. The password was stored
+ * correctly, the client was online, and the server never saw it: the panel simply
+ * did not open, with nothing anywhere reporting a problem. Name and character
+ * already re-announce on change for exactly this reason; the password has to as well.
+ */
 export function saveAdminPassword(raw: string): void {
   const clean = raw.trim();
+  const previous = adminPassword();
   try {
     if (clean) localStorage.setItem(ADMIN_PASS_KEY, clean);
     else localStorage.removeItem(ADMIN_PASS_KEY);
   } catch {
     /* storage unavailable — the password simply will not persist */
   }
+  if (clean === previous) return;
+  for (const fn of [...passListeners]) {
+    try {
+      fn();
+    } catch (err) {
+      console.warn(`[identity] listener failed: ${String((err as Error)?.message ?? err)}`);
+    }
+  }
+}
+
+/** Fires when the admin password changes, so identity can be re-announced. */
+export function onAdminPasswordChange(fn: () => void): () => void {
+  passListeners.add(fn);
+  return () => passListeners.delete(fn);
 }
 
 /** 32 hex characters, from the platform CSPRNG where there is one. */
