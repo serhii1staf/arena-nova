@@ -2,6 +2,7 @@ import { NullTransport, WebSocketTransport } from './transports.ts';
 import { adminPassword, ownerToken } from './identity.ts';
 import type {
   ConnectionState,
+  RelayKind,
   InputCommand,
   PlayerSnapshot,
   Transport,
@@ -117,6 +118,9 @@ export class NetworkManager {
   private lastPingAt = 0;
   private readonly adminHandlers = new Set<(admin: boolean) => void>();
   private readonly nameRejectedHandlers = new Set<(name: string) => void>();
+  private readonly relayHandlers = new Set<
+    (from: string, name: string, kind: RelayKind) => void
+  >();
   private timeOffset = 0; // serverTime - clientTime estimate, for input stamps
   private inputSeq = 0;
 
@@ -166,6 +170,9 @@ export class NetworkManager {
 
         case 'nameRejected':
           for (const h of this.nameRejectedHandlers) h(msg.name);
+          break;
+        case 'relayed':
+          for (const h of this.relayHandlers) h(msg.from, msg.name, msg.kind);
           break;
         case 'snapshot':
           this.ingest(msg.snapshot.players, msg.snapshot.t);
@@ -309,6 +316,21 @@ export class NetworkManager {
     this.skinHandlers.add(h);
     return () => this.skinHandlers.delete(h);
   }
+  /** Sends a one-to-one message through the server. Silent when offline. */
+  sendTo(id: string, kind: RelayKind): void {
+    if (!this.isOnline || !id) return;
+    this.transport.send({ type: 'relay', to: id, kind });
+  }
+
+  /**
+   * Messages relayed from other players. The identity is the server's word, not the
+   * sender's, so a handler can trust `from` and `name`.
+   */
+  onRelay(h: (from: string, name: string, kind: RelayKind) => void): () => void {
+    this.relayHandlers.add(h);
+    return () => this.relayHandlers.delete(h);
+  }
+
   onStateChange(h: (s: ConnectionState) => void): () => void {
     this.stateHandlers.add(h);
     return () => this.stateHandlers.delete(h);

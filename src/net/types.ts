@@ -76,7 +76,21 @@ export type ClientMessage =
    * so latency is measured without the two clocks having to agree on anything.
    */
   | { type: 'ping'; t: number }
+  /**
+   * A message for one other player, forwarded by the server without being
+   * understood by it.
+   *
+   * Deliberately generic. Squad invites, accepts and declines are conversations
+   * between two clients about state neither the world nor the server owns, so giving
+   * each one its own protocol message and its own server handler would put three
+   * cases on the server to carry information it never reads. One relay covers all of
+   * them, and the next such feature costs nothing on the server at all.
+   */
+  | { type: 'relay'; to: string; kind: RelayKind }
   | { type: 'leave' };
+
+/** What one player can say to another through the relay. */
+export type RelayKind = 'squadInvite' | 'squadAccept' | 'squadDecline' | 'squadLeave';
 
 export type ServerMessage =
   /**
@@ -89,6 +103,12 @@ export type ServerMessage =
   | { type: 'pong'; t: number }
   /** Sent when a claimed name was refused, so the UI can say why. */
   | { type: 'nameRejected'; name: string; reason: 'reserved' }
+  /**
+   * A relayed message from another player. `from` and `name` are filled in by the
+   * server from the *sender's* own socket, never from what the sender claimed — a
+   * client that could name itself here could impersonate anybody in an invite.
+   */
+  | { type: 'relayed'; from: string; name: string; kind: RelayKind }
   | { type: 'playerLeft'; id: string };
 
 export type ConnectionState = 'offline' | 'connecting' | 'online' | 'error';

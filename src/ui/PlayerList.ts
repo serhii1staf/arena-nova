@@ -75,6 +75,17 @@ export class PlayerList {
   private open = false;
   /** Last rendered signature, so an unchanged room is not re-rendered. */
   private signature = '';
+  /** Set by the UI once the squad exists; absent until then. */
+  private invite: ((id: string) => void) | null = null;
+  /** Asks whether a player is already in the squad, so the button can be hidden. */
+  isInSquad: ((id: string) => boolean) | null = null;
+
+  /** Registers the squad-invite action, called when a row's button is pressed. */
+  onInvite(fn: (id: string) => void): void {
+    this.invite = fn;
+    // The button's presence is part of the row, so existing rows have to be rebuilt.
+    this.signature = '';
+  }
 
   constructor() {
     this.panel = document.getElementById('players');
@@ -138,7 +149,14 @@ export class PlayerList {
     // whether their portrait has arrived. Everything that ticks is patched in place
     // below, which is a handful of string writes on unchanged nodes.
     const signature = `${online}|${entries
-      .map((e) => `${e.id}:${e.name}:${e.skin}:${e.admin}:${e.portrait ? 1 : 0}`)
+      // Squad membership is in here because the invite button appears and disappears
+      // with it, and that is structure rather than a value to patch.
+      .map(
+        (e) =>
+          `${e.id}:${e.name}:${e.skin}:${e.admin}:${e.portrait ? 1 : 0}:${
+            this.isInSquad?.(e.id) ? 1 : 0
+          }`,
+      )
       .join(',')}`;
 
     if (signature === this.signature) {
@@ -191,6 +209,19 @@ export class PlayerList {
         tag.className = 'adminTag';
         tag.textContent = t('players.admin');
         row.append(tag);
+      }
+
+      // Inviting to a squad. Only on other players, and only while they are not
+      // already in: the button is the whole interaction, so it should not be there
+      // when pressing it would do nothing.
+      if (!e.self && this.invite && !this.isInSquad?.(e.id)) {
+        const ask = document.createElement('button');
+        ask.type = 'button';
+        ask.className = 'rowInvite';
+        ask.textContent = t('squad.invite');
+        const id = e.id;
+        ask.addEventListener('click', () => this.invite?.(id));
+        row.append(ask);
       }
 
       const ping = document.createElement('span');

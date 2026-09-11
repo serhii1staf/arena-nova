@@ -129,6 +129,18 @@ const MAX_OWNERS = 3;
  */
 const MIN_OWNER_TOKEN = 32;
 
+/**
+ * Relay kinds the room will forward. An allow-list rather than a pass-through,
+ * because the field is echoed to another client: without it this would be a way to
+ * push arbitrary strings at other players through a server that never looks at them.
+ */
+const RELAY_KINDS = new Set<string>([
+  'squadInvite',
+  'squadAccept',
+  'squadDecline',
+  'squadLeave',
+]);
+
 export class GameRoom {
   private readonly state: DurableObjectState;
   private readonly env: Env;
@@ -291,6 +303,32 @@ export class GameRoom {
     if (!attached) return;
 
     switch (msg.type) {
+      case 'relay': {
+        // Forwarded verbatim to one recipient, with the sender's identity attached
+        // by the server. The room does not interpret `kind` and holds no state for
+        // it: squad membership lives on the two clients that agreed to it.
+        //
+        // `from` and `name` come from this socket's own attachment, never from the
+        // message. A sender that could choose them could send an invite that appears
+        // to come from somebody else.
+        const to = String(msg.to ?? '').slice(0, 64);
+        const kind = String(msg.kind ?? '');
+        if (!to || !RELAY_KINDS.has(kind)) break;
+        attached.seen = Date.now();
+        for (const peer of this.state.getWebSockets()) {
+          const a = peer.deserializeAttachment() as Attached | null;
+          if (!a || a.id !== to) continue;
+          this.send(peer, {
+            type: 'relayed',
+            from: attached.id,
+            name: attached.name,
+            kind: kind as RelayKind,
+          });
+          break;
+        }
+        break;
+      }
+
       case 'join': {
         // Names are player-supplied, so clamp the length and strip control
         // characters before they end up in everyone else's client.

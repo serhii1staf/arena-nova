@@ -23,6 +23,7 @@ import {
 import type { AssetManager } from '../core/AssetManager.ts';
 import { applyTriplanarTexture } from './builders/geometry.ts';
 import { loadGrassModels } from './GrassModels.ts';
+import { applySnowToPlants } from './SnowOnPlants.ts';
 import type { PropRegistry } from './PropRegistry.ts';
 import {
   biomeStyle,
@@ -195,6 +196,11 @@ export function createScatter(
       flatShading: true,
     });
     if (stiffness > 0) wind.applyWindSway(m, stiffness, pivot);
+    // Snow settles on the foliage too. Chained *after* the wind, because
+    // `applyWindSway` assigns `onBeforeCompile` outright and a second assignment
+    // would silently throw the sway away — which is the kind of bug that looks like
+    // "the wind stopped working" and has nothing to do with wind.
+    applySnowToPlants(m);
     return m;
   };
   const treeMat = makeMat(0.16, 2.5);

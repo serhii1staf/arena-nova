@@ -5,11 +5,15 @@ import {
   Group,
   Mesh,
   MeshStandardMaterial,
-  Vector2,
   Vector3,
-  type Texture,
 } from 'three';
 import type { SnowTrackMap } from './SnowTracks.ts';
+import {
+  setSnowState,
+  snowUniforms,
+  SNOW_GLSL,
+  SNOW_UNIFORM_DECL,
+} from './SnowState.ts';
 import type { AssetManager } from '../core/AssetManager.ts';
 import type { QualitySettings } from '../core/QualityManager.ts';
 import {
@@ -61,8 +65,7 @@ const SKIRT_DEPTH = 26;
  * because the shader interpolates between the two, everything in between happens
  * on its own, in the right order, with the summits going first.
  */
-const SNOW_CEILING = WORLD.snowLine;
-const SNOW_FLOOR = WORLD.waterLevel + 6;
+
 
 interface Chunk {
   key: string;
@@ -335,16 +338,11 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
    * first and creeping down is exactly what an altitude ramp against a rising
    * threshold produces, and it costs no memory and no streaming work at all.
    */
-  const snowUniforms = {
-    uSnowCover: { value: 0 },
-    /** Where the tracks map is centred, and how many metres across it is. */
-    uTrackOrigin: { value: new Vector2() },
-    uTrackExtent: { value: 1 },
-    uTrackMap: { value: null as Texture | null },
-  };
-
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, snowUniforms);
+    // Wired here rather than kept local, so the vegetation reads the same numbers
+    // through the same objects — see `SnowState`. Green grass standing in a white
+    // field is what two copies of this looked like.
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -371,57 +369,9 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
         varying float vChroma;
         varying vec3 vSurfaceWorld;
         varying vec3 vSurfaceUp;
-        uniform float uSnowCover;
-        uniform vec2 uTrackOrigin;
-        uniform float uTrackExtent;
-        uniform sampler2D uTrackMap;
+        ${SNOW_UNIFORM_DECL}
+        ${SNOW_GLSL}
 
-        /**
-         * How much snow is lying on this fragment, 0..1.
-         *
-         * Three things decide it, and all three are read from the surface itself
-         * rather than stored anywhere. Height, because snow settles at altitude
-         * first and the line creeps down as more falls. Slope, because snow does
-         * not cling to a cliff — that is why real mountains show bare rock on
-         * their faces and white on their shoulders, and it is most of what makes
-         * a covering read as snow rather than as white paint. And the tracks map,
-         * so walking through it leaves it behind.
-         */
-        float snowAt( vec3 world, vec3 surfaceNormal ) {
-          if ( uSnowCover <= 0.001 ) return 0.0;
-
-          // The height the cover has reached. At full cover it comes down to the
-          // valley floor; with a dusting it only touches the summits.
-          float snowHeight = mix( ${SNOW_CEILING.toFixed(1)}, ${SNOW_FLOOR.toFixed(1)}, uSnowCover );
-          float lying = smoothstep( snowHeight, snowHeight + 42.0, world.y );
-
-          // Steepness, from the surface normal. Snow holds to about 50 degrees and
-          // sheds above that. Deliberately not called "flat": that is an
-          // interpolation qualifier in GLSL ES 3.0, and using it as an identifier
-          // fails to compile — which the snow probe is what caught.
-          float holds = smoothstep( 0.62, 0.86, surfaceNormal.y );
-          lying *= holds;
-
-          // Broken up so a covering has a shape. Without this the snowline is a
-          // clean contour ring around every hill, which is the one thing that
-          // never happens outdoors — wind strips ridges and fills hollows.
-          float drift =
-            sin( world.x * 0.021 ) * cos( world.z * 0.019 ) * 0.5 +
-            sin( world.x * 0.006 + world.z * 0.008 ) * 0.5;
-          lying = clamp( lying + drift * 0.16 * ( 1.0 - uSnowCover ), 0.0, 1.0 );
-
-          // Tracks. The map is a single channel of "how trodden", in world space
-          // around the player, so a footprint has to be looked up rather than
-          // baked — the ground it sits on may be streamed away and rebuilt.
-          vec2 uv = ( world.xz - uTrackOrigin ) / uTrackExtent + 0.5;
-          if ( all( greaterThan( uv, vec2( 0.0 ) ) ) && all( lessThan( uv, vec2( 1.0 ) ) ) ) {
-            float trodden = texture2D( uTrackMap, uv ).r;
-            // Compressed rather than erased: a boot pushes snow aside and exposes
-            // what is underneath, it does not clear the ground.
-            lying *= 1.0 - trodden * 0.82;
-          }
-          return lying;
-        }
         `,
       )
       .replace(
@@ -475,16 +425,11 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
    * Publishes the lying-snow depth. Two writes for the entire streamed world.
    */
   const setSnow = (cover: number, tracks: SnowTrackMap | null): void => {
-    snowUniforms.uSnowCover.value = Math.min(1, Math.max(0, cover));
+    setSnowState(cover, tracks);
     // Mirrored where a probe can see it. The uniform itself lives inside a
     // compiled program and is not readable from outside, so without this there is
     // no way to tell "the value never arrived" from "the ground was already white".
     material.userData.snowCover = snowUniforms.uSnowCover.value;
-    if (tracks) {
-      snowUniforms.uTrackMap.value = tracks.texture;
-      snowUniforms.uTrackOrigin.value.copy(tracks.origin);
-      snowUniforms.uTrackExtent.value = tracks.extent;
-    }
   };
 
   /**

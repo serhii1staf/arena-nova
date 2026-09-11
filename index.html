@@ -294,6 +294,172 @@
         background: rgba(230, 110, 90, 0.5);
       }
 
+      /* ================= Squad ================= */
+      #squad {
+        position: fixed;
+        top: 58px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 21;
+        display: none;
+        min-width: 150px;
+        padding: 6px 10px;
+        border: 1px solid rgba(90, 200, 130, 0.18);
+        border-radius: 10px;
+        background: rgba(6, 18, 12, 0.6);
+        pointer-events: none;
+      }
+      #squad.on {
+        display: block;
+      }
+      .squadRow {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 12px;
+      }
+      .squadName {
+        overflow: hidden;
+        color: #cfeedd;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .squadFar {
+        color: rgba(143, 227, 176, 0.9);
+        font-variant-numeric: tabular-nums;
+      }
+      .inviteKeys {
+        margin-top: 3px;
+        color: rgba(143, 227, 176, 0.75);
+        font-size: 10px;
+      }
+      #squadInvites {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        /* Above the canvas, which otherwise swallows the click when the cursor is
+           free. The keyboard path exists because while the mouse is captured there
+           is no cursor to click with at all. */
+        z-index: 60;
+        display: none;
+        flex-direction: column;
+        gap: 8px;
+      }
+      #squadInvites.on {
+        display: flex;
+      }
+      .inviteCard {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 10px;
+        border: 1px solid rgba(90, 200, 130, 0.28);
+        border-radius: 10px;
+        background: rgba(8, 22, 14, 0.9);
+        color: #cfeedd;
+        font-size: 12px;
+      }
+      .inviteText {
+        max-width: 170px;
+      }
+      .inviteBtn {
+        padding: 5px 9px;
+        border: 1px solid rgba(90, 200, 130, 0.3);
+        border-radius: 7px;
+        background: rgba(10, 30, 18, 0.9);
+        color: #cfeedd;
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .inviteBtn.yes {
+        border-color: rgba(90, 200, 130, 0.7);
+        background: rgba(24, 74, 44, 0.95);
+      }
+      .inviteBtn:hover {
+        background: rgba(30, 80, 48, 0.95);
+      }
+      .rowInvite {
+        padding: 2px 7px;
+        border: 1px solid rgba(90, 200, 130, 0.28);
+        border-radius: 6px;
+        background: transparent;
+        color: rgba(207, 238, 221, 0.9);
+        font: inherit;
+        font-size: 10px;
+        cursor: pointer;
+      }
+      .rowInvite:hover {
+        background: rgba(90, 200, 130, 0.16);
+      }
+
+      /* ================= Coordinates (F3) + compass ================= */
+      #coords {
+        position: fixed;
+        bottom: 18px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 22;
+        display: none;
+        padding: 8px 12px;
+        border: 1px solid rgba(90, 200, 130, 0.2);
+        border-radius: 10px;
+        background: rgba(6, 18, 12, 0.72);
+        text-align: center;
+      }
+      #coords.on {
+        display: block;
+      }
+      #coordsRead {
+        color: #cfeedd;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0.04em;
+      }
+      #coordsInput {
+        width: 200px;
+        margin-top: 7px;
+        padding: 6px 9px;
+        border: 1px solid rgba(90, 200, 130, 0.22);
+        border-radius: 7px;
+        background: rgba(4, 14, 9, 0.7);
+        color: #cfeedd;
+        font: inherit;
+        font-size: 11px;
+        text-align: center;
+        outline: none;
+      }
+      #compass {
+        position: fixed;
+        top: 14px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 22;
+        display: none;
+        text-align: center;
+        /* Never intercepts the pointer: it sits over the view, not over the UI. */
+        pointer-events: none;
+      }
+      #compass.on {
+        display: block;
+      }
+      #compassNeedle {
+        color: #8fe3b0;
+        font-size: 20px;
+        line-height: 1;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+        /* Rotation is written per frame, so keep it on its own compositor layer. */
+        will-change: transform;
+      }
+      #compassRange {
+        margin-top: 2px;
+        color: rgba(207, 238, 221, 0.85);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+      }
+
       /* ================= Admin panel (P) ================= */
       #admin {
         position: fixed;
@@ -789,6 +955,39 @@
         <span id="playersCount">0</span>
       </div>
       <div id="playersList"></div>
+    </div>
+
+    <!--
+      The squad: who is with you and how far away, along the top of the screen where
+      you are already looking when you are deciding where to go. Invitations arrive
+      bottom-right, out of the way of both the view and the player list.
+    -->
+    <div id="squad" aria-hidden="true">
+      <div id="squadList"></div>
+    </div>
+    <div id="squadInvites" role="status" aria-live="polite"></div>
+
+    <!--
+      Where you are (F3), and which way a typed coordinate is.
+      The compass sits at the top centre because that is where you look when you are
+      deciding which way to walk; the readout sits low so it does not cover the view.
+    -->
+    <div id="compass" aria-hidden="true">
+      <div id="compassNeedle">▲</div>
+      <div id="compassRange"></div>
+    </div>
+    <div id="coords" aria-hidden="true">
+      <div id="coordsRead">X 0   Y 0   Z 0</div>
+      <input
+        id="coordsInput"
+        type="text"
+        maxlength="32"
+        autocomplete="off"
+        spellcheck="false"
+        aria-label="Waypoint coordinates"
+        placeholder="Go to: x z"
+        data-i18n-placeholder="coords.goto"
+      />
     </div>
 
     <!-- Admin panel: P. Only reachable by the holder of the reserved name. -->

@@ -13,6 +13,8 @@ import { SKINS, savedSkin, saveSkin } from '../player/skins.ts';
 import { savedName, saveName, saveAdminPassword } from '../net/identity.ts';
 import { PlayerList } from './PlayerList.ts';
 import { AdminPanel } from './AdminPanel.ts';
+import { Waypoint } from './Waypoint.ts';
+import { Squad } from './Squad.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T | null =>
   document.getElementById(id) as T | null;
@@ -32,6 +34,8 @@ export class GameUI {
   private started = false;
   private readonly playerList: PlayerList;
   private readonly adminPanel: AdminPanel;
+  private readonly waypoint: Waypoint;
+  private readonly squad: Squad;
   private lastEscapeAt = 0;
   private hintTimer: number | null = null;
 
@@ -42,6 +46,11 @@ export class GameUI {
     applyTranslations();
     this.playerList = new PlayerList();
     this.adminPanel = new AdminPanel(engine);
+    this.waypoint = new Waypoint(engine);
+    this.squad = new Squad(engine);
+    // The player list is where you see who is here, so it is where inviting belongs.
+    this.playerList.onInvite((id) => this.squad.invite(id));
+    this.playerList.isInSquad = (id) => this.squad.has(id);
     this.wireAdminKey();
     this.wireStartScreen();
     this.wirePauseMenu();
@@ -120,6 +129,25 @@ export class GameUI {
    * latency. The player list only rebuilds when its contents change, so the
    * closed case is a couple of comparisons.
    */
+  /**
+   * Squad actions, exposed for the diagnostics.
+   *
+   * The buttons live in the player list and in the invite cards, and a probe cannot
+   * press a button that only exists once another player is in the room and the panel
+   * happens to be open. These are the same calls those buttons make.
+   */
+  squadInvite(id: string): void {
+    this.squad.invite(id);
+  }
+
+  squadHas(id: string): boolean {
+    return this.squad.has(id);
+  }
+
+  squadLeave(): void {
+    this.squad.leave();
+  }
+
   updateOverlays(): void {
     // Gated on the Tab hold alone, deliberately not on `paused`. Holding Tab
     // releases the mouse cursor, which the pause state also tracks — so gating on
@@ -127,6 +155,8 @@ export class GameUI {
     // The Escape menu is not a problem: it does not hold Tab.
     this.playerList.update(this.started && this.engine.input.isPeeking);
     this.adminPanel.applyTo();
+    this.waypoint.update();
+    this.squad.update();
   }
 
   private wireAdminKey(): void {
