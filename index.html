@@ -145,7 +145,11 @@
         position: fixed;
         top: 64px;
         right: 18px;
-        z-index: 7;
+        /* Above the canvas. At 7 it sat under it, and the compositor hit-tested the
+           canvas first — so the invite button could not be clicked even with
+           `pointer-events` restored on it. The panel itself stays pass-through; only
+           the button takes the pointer. */
+        z-index: 40;
         width: 268px;
         max-height: 62vh;
         overflow: hidden auto;
@@ -381,6 +385,13 @@
         background: rgba(30, 80, 48, 0.95);
       }
       .rowInvite {
+        /* The panel itself is `pointer-events: none` — it is an overlay over the
+           view and must not swallow the mouse. That was right while the list was
+           purely something to read, and became a bug the moment it grew a button:
+           the button inherited the pass-through and could not be clicked at all.
+           Restored here and only here, so the clickable area is the button and
+           nothing else about the overlay changes. */
+        pointer-events: auto;
         padding: 2px 7px;
         border: 1px solid rgba(90, 200, 130, 0.28);
         border-radius: 6px;

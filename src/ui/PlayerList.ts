@@ -221,6 +221,10 @@ export class PlayerList {
         ask.textContent = t('squad.invite');
         const id = e.id;
         ask.addEventListener('click', () => this.invite?.(id));
+        // The number that invites this player from the keyboard, which is the path
+        // that works regardless of what the compositor thinks is on top.
+        const nth = entries.filter((o) => !o.self).findIndex((o) => o.id === e.id) + 1;
+        if (nth >= 1 && nth <= 9) ask.textContent = `${t('squad.invite')} ${nth}`;
         row.append(ask);
       }
 

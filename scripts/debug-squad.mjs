@@ -75,9 +75,33 @@ try {
   console.log(`A=${idA} sees ${JSON.stringify(await sees(a))}`);
   console.log(`B=${idB} sees ${JSON.stringify(await sees(b))}`);
 
-  // --- A invites B ---------------------------------------------------------
+  // --- A invites B, through the button a player actually presses ------------
+  //
+  // Driven by a real click rather than by calling the action directly. That
+  // distinction matters here: the list is an overlay with `pointer-events: none`,
+  // so the invite button inherited the pass-through and was impossible to click
+  // while every underlying call worked perfectly. A probe that reached past the
+  // DOM would have reported this feature as working.
   await a.bringToFront();
-  await a.evaluate((id) => window.arena.ui.squadInvite(id), idB);
+  await a.keyboard.down('Tab');
+  await a.waitForTimeout(1200);
+  const buttonClickable = await a
+    .waitForSelector('#players .rowInvite', { timeout: 30000, state: 'visible' })
+    .then(() => true)
+    .catch(() => false);
+  let clicked = false;
+  if (buttonClickable) {
+    clicked = await a
+      .click('#players .rowInvite', { timeout: 20000 })
+      .then(() => true)
+      .catch(() => false);
+  }
+  await a.screenshot({ path: join(here, 'squad_button.png') });
+  await a.keyboard.up('Tab');
+  console.log(`invite button present=${buttonClickable} clicked=${clicked}`);
+  // Fall back to the action so the rest of the probe still reports, but the click
+  // result is asserted below either way.
+  if (!clicked) await a.evaluate((id) => window.arena.ui.squadInvite(id), idB);
   const cardAppeared = await b
     .waitForFunction(() => document.querySelectorAll('#squadInvites .inviteCard').length > 0, {
       timeout: 60000,
@@ -152,6 +176,7 @@ try {
   for (const e of errors.slice(0, 6)) console.log(' ', e);
 
   const inviteDelivered = cardAppeared && /Alpha/.test(inviteText);
+  const buttonWorks = buttonClickable && clicked;
   const agreed = bothAgree[0] && bothAgree[1];
   const rosterShown = roster.on && roster.rows === 1 && roster.names[0] === 'Bravo';
   const distanceShown = /^\d+ m$/.test((roster.distances[0] ?? '').trim());
@@ -160,6 +185,7 @@ try {
   const rangeShown = /(\d+ m|\d+\.\d+k m|arrived|на месте)/.test(compass.range);
 
   console.log('\n=== VERDICT ===');
+  console.log(`invite button is clickable:      ${buttonWorks ? 'ok' : 'FAIL'}`);
   console.log(`invite reaches the other player: ${inviteDelivered ? 'ok' : 'FAIL'}`);
   console.log(`both sides agree after accept:   ${agreed ? 'ok' : 'FAIL'}`);
   console.log(`roster lists the member:         ${rosterShown ? 'ok' : 'FAIL'}`);
@@ -169,6 +195,7 @@ try {
   console.log(`compass shows a range:           ${rangeShown ? 'ok' : 'FAIL'} ("${compass.range}")`);
 
   const pass =
+    buttonWorks &&
     inviteDelivered &&
     agreed &&
     rosterShown &&

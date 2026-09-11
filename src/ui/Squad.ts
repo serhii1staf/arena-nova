@@ -70,16 +70,46 @@ export class Squad {
    */
   private wireKeys(): void {
     window.addEventListener('keydown', (e) => {
-      if (this.pending.size === 0 || e.repeat) return;
+      if (e.repeat) return;
       const el = e.target as HTMLElement | null;
       if (el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA') return;
+
+      // Inviting by number, only while the list is actually on screen — otherwise
+      // the digit keys would be claimed globally for something you cannot see.
+      if (/^Digit[1-9]$/.test(e.code) && this.engine.input.isPeeking) {
+        e.preventDefault();
+        this.inviteByIndex(Number(e.code.slice(5)) - 1);
+        return;
+      }
+
+      if (this.pending.size === 0) return;
       if (e.code !== 'KeyY' && e.code !== 'KeyN') return;
+      if (e.code === 'KeyY' && this.pending.size === 0) return;
       // Oldest first, so repeated presses work through a queue predictably.
       const oldest = [...this.pending.entries()].sort((a, b) => a[1].at - b[1].at)[0];
       if (!oldest) return;
       e.preventDefault();
       this.answer(oldest[0], e.code === 'KeyY');
     });
+  }
+
+  /**
+   * Invites by number while the player list is open: 1 is the first player under
+   * your own row, 2 the second, and so on.
+   *
+   * The button in the list is the discoverable way in, and this is the one that
+   * always works. Everything about clicking an overlay in this game is fragile —
+   * the list is a pass-through layer over a canvas that hit-tests first, and the
+   * pointer only exists at all while Tab is held — whereas a keypress reaches the
+   * window no matter what is on top of what. The same reasoning as Y and N for
+   * answering.
+   */
+  inviteByIndex(index: number): void {
+    const others = [...gameSession().remotePlayers.values()]
+      .filter((p) => !this.members.has(p.id))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const pick = others[index];
+    if (pick) this.invite(pick.id);
   }
 
   /** Invites a player by id. Called from the player list. */
