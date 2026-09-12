@@ -92,6 +92,10 @@ const GLASS = 0.03;
 const UV_METRES = 1.15;
 /** How far above your feet a surface can be and still be something you step onto. */
 const STEP_UP = 0.65;
+/** How far a door swings open, in radians. */
+const DOOR_SWING = Math.PI * 0.52;
+/** How close you have to be for a door to offer itself. */
+const INTERACT_RANGE = 3.2;
 /**
  * Hard cap per kind.
  *
@@ -125,10 +129,22 @@ export type PieceKind =
   | 'roofShed'
   | 'roofFlat'
   // Corner pieces.
-  | 'pillar';
+  | 'pillar'
+  // Furnishings, on a half-cell lattice so a table need not sit in the middle of a
+  // four-metre square.
+  | 'bed'
+  | 'table'
+  | 'stool'
+  | 'cabinet'
+  | 'barrel'
+  | 'shelf'
+  | 'torch'
+  | 'campfire'
+  | 'brazier'
+  | 'lantern';
 
 export interface Category {
-  id: 'walls' | 'frame' | 'roof';
+  id: 'walls' | 'frame' | 'roof' | 'props';
   pieces: readonly PieceKind[];
 }
 
@@ -157,12 +173,33 @@ export const CATEGORIES: readonly Category[] = [
   },
   { id: 'frame', pieces: ['floor', 'foundation', 'ramp', 'stairs', 'pillar', 'beam'] },
   { id: 'roof', pieces: ['roofGable', 'roofHip', 'roofShed', 'roofFlat'] },
+  {
+    id: 'props',
+    pieces: [
+      'bed',
+      'table',
+      'stool',
+      'cabinet',
+      'barrel',
+      'shelf',
+      'torch',
+      'campfire',
+      'brazier',
+      'lantern',
+    ],
+  },
 ];
 
 /** Every kind, in category order. */
 export const PIECES: readonly PieceKind[] = CATEGORIES.flatMap((c) => [...c.pieces]);
 
-type Lattice = 'cell' | 'edge' | 'corner';
+/**
+ * `quarter` is the half-cell lattice the furnishings use. A four-metre square is
+ * the right unit for a floor and far too coarse for a stool, and a free position
+ * would give up the one property that makes the rest of this work — that two things
+ * placed apart still line up.
+ */
+type Lattice = 'cell' | 'edge' | 'corner' | 'quarter';
 
 const LATTICE: Record<PieceKind, Lattice> = {
   wall: 'edge',
@@ -185,6 +222,16 @@ const LATTICE: Record<PieceKind, Lattice> = {
   roofShed: 'cell',
   roofFlat: 'cell',
   pillar: 'corner',
+  bed: 'quarter',
+  table: 'quarter',
+  stool: 'quarter',
+  cabinet: 'quarter',
+  barrel: 'quarter',
+  shelf: 'quarter',
+  torch: 'quarter',
+  campfire: 'quarter',
+  brazier: 'quarter',
+  lantern: 'quarter',
 };
 
 /**
@@ -192,7 +239,21 @@ const LATTICE: Record<PieceKind, Lattice> = {
  * different ways are two different things. A floor rotated is the same floor; a
  * flight of stairs rotated is a different flight.
  */
-const ROTATABLE = new Set<PieceKind>(['ramp', 'stairs', 'roofGable', 'roofShed']);
+const ROTATABLE = new Set<PieceKind>([
+  'ramp',
+  'stairs',
+  'roofGable',
+  'roofShed',
+  'bed',
+  'table',
+  'cabinet',
+  'shelf',
+  'stool',
+  'barrel',
+]);
+
+/** Kinds that can be opened and shut. */
+const OPENABLE = new Set<PieceKind>(['doorLeaf']);
 
 /** A box in a piece's own frame: centre and half-extents across, and a Y range. */
 interface Slab {
@@ -214,6 +275,8 @@ interface Placed {
   turn: number;
   /** Which instance of its kind's mesh draws it. Moves when others are removed. */
   slot: number;
+  /** Doors only: swung open. */
+  open: boolean;
 }
 
 export interface BuildSite {
@@ -232,13 +295,30 @@ export interface BuildSite {
   rotate(): void;
   /** Places the previewed piece. False if the slot is taken or the kind is full. */
   place(): boolean;
+  /** A door within reach that you are facing, or null. */
+  reachableKind(): PieceKind | null;
+  /** Whether that door is currently open. */
+  reachableOpen(): boolean;
+  /** Opens or shuts the door within reach. */
+  interact(): boolean;
   /** The piece under the crosshair, or null. */
   aimedKind(): PieceKind | null;
   /** Removes the single piece under the crosshair. */
   removeAimed(): boolean;
   count(): number;
   clear(): void;
-  update(eye: Vector3, forward: Vector3, floorAt: (x: number, z: number) => number): void;
+  /**
+   * Per-frame update. `eye` and `forward` are the camera's, because that is what the
+   * crosshair points along; `body` is the player's own feet, because how far away a
+   * door is has to be measured from the person, not from a camera that in third
+   * person is standing several metres behind them.
+   */
+  update(
+    eye: Vector3,
+    forward: Vector3,
+    body: Vector3,
+    floorAt: (x: number, z: number) => number,
+  ): void;
   /**
    * Floor height at a point, taking placed pieces into account.
    *
@@ -425,10 +505,22 @@ class Carpentry {
   }
 }
 
+/**
+ * A piece's parts, split by the material each needs.
+ *
+ * Every part is drawn by its own instanced mesh sharing the piece's transform, so a
+ * pane follows its frame and a flame follows its brazier for free. The leaf is the
+ * exception and the reason this is a list rather than a single mesh with one
+ * material: it has to swing on a hinge, which means its own transform.
+ */
 interface PieceGeo {
   timber: BufferGeometry;
-  /** Panes, drawn by a second instanced mesh sharing the same transforms. */
+  /** Panes. */
   glass?: BufferGeometry;
+  /** A door leaf, hinged on its left jamb. */
+  leaf?: BufferGeometry;
+  /** Flame, ember or lit glass — emissive, casts nothing. */
+  glow?: BufferGeometry;
 }
 
 /**
@@ -510,7 +602,12 @@ function buildGeometries(): Record<PieceKind, PieceGeo> {
   doorArch.box(DOOR_HALF, (DOOR_HEAD - 0.5) / 2, 0, t, (DOOR_HEAD - 0.5) / 2, t);
   doorArch.endPosts(s, G);
 
-  // Fitted with a leaf: the same frame, closed. Vertical planks and two braces.
+  // Fitted with a leaf: the same frame, and a separate swinging door.
+  //
+  // The frame and the leaf are different geometries because they move differently.
+  // A batten door in the old manner: vertical boards held by two ledges and a
+  // diagonal brace between them, which is how a door was made before it was made of
+  // panels, and which is the only reason such a door does not sag.
   const doorLeaf = new Carpentry();
   doorLeaf.boards(-(DOOR_HALF + doorSide), 0, doorSide, b, 0, G);
   doorLeaf.boards(DOOR_HALF + doorSide, 0, doorSide, b, 0, G);
@@ -518,22 +615,30 @@ function buildGeometries(): Record<PieceKind, PieceGeo> {
   doorLeaf.box(-DOOR_HALF, DOOR_HEAD / 2, 0, t, DOOR_HEAD / 2, t);
   doorLeaf.box(DOOR_HALF, DOOR_HEAD / 2, 0, t, DOOR_HEAD / 2, t);
   doorLeaf.box(0, DOOR_HEAD, 0, DOOR_HALF + t, 0.11, t);
+  doorLeaf.endPosts(s, G);
+
+  const leaf = new Carpentry();
+  const leafW = DOOR_HALF - 0.05;
+  const leafH = DOOR_HEAD - 0.08;
   const leafPlanks = 6;
   for (let i = 0; i < leafPlanks; i++) {
-    const pitch = (DOOR_HALF * 2) / leafPlanks;
-    doorLeaf.box(
-      -DOOR_HALF + (i + 0.5) * pitch,
-      (DOOR_HEAD - 0.06) / 2,
-      0,
-      pitch / 2 - 0.02,
-      (DOOR_HEAD - 0.06) / 2,
-      0.05,
-    );
+    const pitch = (leafW * 2) / leafPlanks;
+    leaf.box(-leafW + (i + 0.5) * pitch, leafH / 2, 0, pitch / 2 - 0.018, leafH / 2, 0.045);
   }
-  for (const y of [0.5, DOOR_HEAD - 0.5]) {
-    doorLeaf.box(0, y, 0, DOOR_HALF - 0.05, 0.09, 0.075);
+  // Two ledges across the back, and the brace between them, stepped because `box`
+  // only tilts about X and this diagonal lies in the door's own plane.
+  for (const y of [0.42, leafH - 0.42]) {
+    leaf.box(0, y, -0.075, leafW - 0.04, 0.085, 0.035);
   }
-  doorLeaf.endPosts(s, G);
+  for (let i = 0; i < 7; i++) {
+    const f = (i + 0.5) / 7;
+    leaf.box(-leafW + f * leafW * 2, 0.42 + f * (leafH - 0.84), -0.075, leafW / 7, 0.09, 0.033);
+  }
+  // Strap hinges and a ring handle, so it reads as a door rather than a board.
+  for (const y of [0.55, leafH - 0.55]) {
+    leaf.box(-leafW + 0.35, y, 0.05, 0.35, 0.055, 0.02);
+  }
+  leaf.box(leafW - 0.16, leafH * 0.5, 0.075, 0.055, 0.09, 0.035);
 
   /** A window of the given opening, optionally with a pane and glazing bars. */
   const windowGeo = (half: number, sill: number, head: number, glazed: boolean): PieceGeo => {
@@ -710,13 +815,155 @@ function buildGeometries(): Record<PieceKind, PieceGeo> {
     .box(0, 0.09, 0, 0.22, 0.09, 0.22)
     .box(0, G - 0.09, 0, 0.22, 0.09, 0.22);
 
+  // --- Furnishings ---------------------------------------------------------
+  // Sized in real metres rather than to the grid: these sit inside a room, so what
+  // matters is that a stool is stool-sized next to a table, not that either fills a
+  // square.
+
+  // A rope-and-plank bed with a headboard.
+  const bed = new Carpentry();
+  for (const sx of [-0.46, 0.46]) {
+    for (const sz of [-0.95, 0.95]) {
+      bed.box(sx, 0.16, sz, 0.07, 0.16, 0.07);
+    }
+  }
+  bed.box(0, 0.36, 0, 0.5, 0.055, 1.02);
+  for (let i = 0; i < 7; i++) {
+    bed.box(0, 0.45, -0.88 + (i * 1.76) / 6, 0.46, 0.045, 0.1);
+  }
+  // Headboard.
+  for (let i = 0; i < 4; i++) {
+    bed.box(-0.34 + i * 0.23, 0.72, -1.0, 0.09, 0.36, 0.05);
+  }
+  bed.box(0, 0.94, -1.0, 0.52, 0.06, 0.07);
+
+  // Trestle table.
+  const table = new Carpentry();
+  for (let i = 0; i < 5; i++) {
+    table.box(0, 0.72, -0.5 + (i * 1.0) / 4, 0.85, 0.045, 0.11);
+  }
+  table.box(0, 0.62, 0, 0.78, 0.06, 0.5);
+  for (const sz of [-0.4, 0.4]) {
+    table.box(0, 0.31, sz, 0.09, 0.31, 0.09);
+    table.box(0, 0.05, sz, 0.42, 0.05, 0.12);
+  }
+  table.box(0, 0.42, 0, 0.06, 0.05, 0.34);
+
+  // Three-legged stool.
+  const stool = new Carpentry();
+  stool.box(0, 0.44, 0, 0.24, 0.04, 0.24);
+  for (const [sx, sz] of [
+    [-0.16, -0.16],
+    [0.16, -0.16],
+    [0, 0.18],
+  ]) {
+    stool.box(sx, 0.22, sz, 0.045, 0.22, 0.045);
+  }
+
+  // Cabinet with two doors.
+  const cabinet = new Carpentry();
+  cabinet.box(0, 0.9, -0.19, 0.55, 0.9, 0.03);
+  for (const sx of [-0.52, 0.52]) cabinet.box(sx, 0.9, 0, 0.03, 0.9, 0.2);
+  for (const y of [0.05, 0.62, 1.19, 1.76]) cabinet.box(0, y, 0, 0.55, 0.04, 0.2);
+  for (const sx of [-0.27, 0.27]) {
+    cabinet.box(sx, 0.9, 0.19, 0.25, 0.84, 0.025);
+    cabinet.box(sx + (sx < 0 ? 0.19 : -0.19), 0.9, 0.23, 0.035, 0.06, 0.025);
+  }
+
+  // Barrel: staves in a ring, hooped twice. Twelve staves reads as round.
+  const barrel = new Carpentry();
+  const staves = 12;
+  for (let i = 0; i < staves; i++) {
+    const a = (i / staves) * Math.PI * 2;
+    barrel.box(Math.cos(a) * 0.34, 0.42, Math.sin(a) * 0.34, 0.1, 0.42, 0.055);
+  }
+  for (const y of [0.12, 0.72]) {
+    for (let i = 0; i < staves; i++) {
+      const a = (i / staves) * Math.PI * 2;
+      barrel.box(Math.cos(a) * 0.36, y, Math.sin(a) * 0.36, 0.11, 0.045, 0.03);
+    }
+  }
+  barrel.box(0, 0.85, 0, 0.3, 0.03, 0.3);
+
+  // Wall shelf, on two brackets.
+  const shelf = new Carpentry();
+  shelf.box(0, 1.42, 0.1, 0.7, 0.035, 0.16);
+  shelf.box(0, 1.02, 0.1, 0.7, 0.035, 0.16);
+  for (const sx of [-0.6, 0.6]) {
+    shelf.box(sx, 1.24, 0.02, 0.045, 0.44, 0.045);
+  }
+  shelf.box(0, 1.24, -0.04, 0.66, 0.44, 0.025);
+
+  // Torch: a stub on a wall bracket, with its flame as a separate emissive part.
+  const torch = new Carpentry();
+  torch.box(0, 1.5, 0.05, 0.05, 0.4, 0.05);
+  torch.box(0, 1.24, 0.13, 0.045, 0.09, 0.14);
+  torch.box(0, 1.14, 0.03, 0.07, 0.1, 0.07);
+  const torchGlow = new Carpentry()
+    .box(0, 1.95, 0.05, 0.075, 0.11, 0.075)
+    .box(0, 2.08, 0.05, 0.05, 0.09, 0.05)
+    .box(0, 2.18, 0.05, 0.028, 0.06, 0.028);
+
+  // Campfire: a ring of stones with logs laid in, and flames above.
+  const campfire = new Carpentry();
+  const stones = 10;
+  for (let i = 0; i < stones; i++) {
+    const a = (i / stones) * Math.PI * 2;
+    campfire.box(Math.cos(a) * 0.56, 0.1, Math.sin(a) * 0.56, 0.13, 0.1, 0.11);
+  }
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI;
+    campfire.box(Math.cos(a) * 0.12, 0.14, Math.sin(a) * 0.12, 0.38, 0.055, 0.055);
+  }
+  const campGlow = new Carpentry()
+    .box(0, 0.24, 0, 0.34, 0.08, 0.34)
+    .box(0, 0.42, 0, 0.22, 0.13, 0.22)
+    .box(0, 0.62, 0, 0.13, 0.11, 0.13)
+    .box(0, 0.76, 0, 0.07, 0.08, 0.07);
+
+  // Brazier: a standing bowl of coals.
+  const brazier = new Carpentry();
+  for (const [sx, sz] of [
+    [-0.2, -0.2],
+    [0.2, -0.2],
+    [0, 0.24],
+  ]) {
+    brazier.box(sx, 0.42, sz, 0.045, 0.42, 0.045);
+  }
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2;
+    brazier.box(Math.cos(a) * 0.28, 0.9, Math.sin(a) * 0.28, 0.1, 0.11, 0.045);
+  }
+  brazier.box(0, 0.8, 0, 0.28, 0.035, 0.28);
+  const brazierGlow = new Carpentry()
+    .box(0, 0.92, 0, 0.22, 0.06, 0.22)
+    .box(0, 1.04, 0, 0.13, 0.1, 0.13)
+    .box(0, 1.18, 0, 0.07, 0.07, 0.07);
+
+  // Lantern: a glazed box on a hook, lit inside.
+  const lantern = new Carpentry();
+  lantern.box(0, 2.0, 0.06, 0.035, 0.28, 0.035);
+  lantern.box(0, 1.72, 0.1, 0.13, 0.03, 0.13);
+  lantern.box(0, 1.3, 0.1, 0.14, 0.03, 0.14);
+  for (const [sx, sz] of [
+    [-0.11, -0.01],
+    [0.11, -0.01],
+    [-0.11, 0.21],
+    [0.11, 0.21],
+  ]) {
+    lantern.box(sx, 1.51, sz, 0.02, 0.21, 0.02);
+  }
+  lantern.box(0, 1.75, 0.02, 0.05, 0.06, 0.06);
+  const lanternGlass = new Carpentry().box(0, 1.51, 0.1, 0.1, 0.2, 0.1).finish();
+  const lanternGlow = new Carpentry().box(0, 1.45, 0.1, 0.045, 0.07, 0.045).finish();
+
   return {
     wall: { timber: wall.finish() },
     wallHalf: { timber: wallHalf.finish() },
     gable: { timber: gable.finish() },
     doorway: { timber: doorway.finish() },
     doorArch: { timber: doorArch.finish() },
-    doorLeaf: { timber: doorLeaf.finish() },
+    doorLeaf: { timber: doorLeaf.finish(), leaf: leaf.finish() },
     windowOpen: windowGeo(WIN_HALF, WIN_SILL, WIN_HEAD, false),
     windowGlass: windowGeo(WIN_HALF, WIN_SILL, WIN_HEAD, true),
     windowVent: windowGeo(VENT_HALF, VENT_SILL, VENT_HEAD, true),
@@ -731,6 +978,16 @@ function buildGeometries(): Record<PieceKind, PieceGeo> {
     roofShed: { timber: roofShed.finish() },
     roofFlat: { timber: roofFlat.finish() },
     pillar: { timber: pillar.finish() },
+    bed: { timber: bed.finish() },
+    table: { timber: table.finish() },
+    stool: { timber: stool.finish() },
+    cabinet: { timber: cabinet.finish() },
+    barrel: { timber: barrel.finish() },
+    shelf: { timber: shelf.finish() },
+    torch: { timber: torch.finish(), glow: torchGlow.finish() },
+    campfire: { timber: campfire.finish(), glow: campGlow.finish() },
+    brazier: { timber: brazier.finish(), glow: brazierGlow.finish() },
+    lantern: { timber: lantern.finish(), glass: lanternGlass, glow: lanternGlow },
   };
 }
 
@@ -743,11 +1000,39 @@ function buildGeometries(): Record<PieceKind, PieceGeo> {
  * ramps, stairs and sloped roofs return nothing — they are things you stand on, and
  * giving them sides as well would trap you on top of them.
  */
-function solidsOf(kind: PieceKind): Slab[] {
+function solidsOf(kind: PieceKind, open = false): Slab[] {
   const G = BUILD_GRID;
   const s = G / 2;
   const t = POST / 2;
   const full = (hx: number, cx = 0, y0 = 0, y1 = G): Slab => ({ cx, cz: 0, hx, hz: t, y0, y1 });
+  /**
+   * A sloped roof, described as bands rising towards the ridge.
+   *
+   * Without this a roof was solid from above and empty from the side, so its low
+   * edge could simply be walked into. Each band is only as tall as the roof is at
+   * that distance from the ridge, and the step-up allowance in `collide` is larger
+   * than the difference between neighbouring bands — which is what makes the same
+   * description block you at the eaves and let you walk up the slope.
+   */
+  const bands = (height: (f: number) => number, along: 'z' | 'x' = 'z', both = true): Slab[] => {
+    const out: Slab[] = [];
+    const n = 4;
+    for (const side of both ? [1, -1] : [1]) {
+      for (let i = 0; i < n; i++) {
+        const inner = 1 - (i + 1) / n;
+        const mid = 1 - (i + 0.5) / n;
+        void inner;
+        const c = side * s * mid;
+        const h = s / n;
+        out.push(
+          along === 'z'
+            ? { cx: 0, cz: c, hx: s, hz: h, y0: 0, y1: Math.max(0.05, height(mid)) }
+            : { cx: c, cz: 0, hx: h, hz: s, y0: 0, y1: Math.max(0.05, height(mid)) },
+        );
+      }
+    }
+    return out;
+  };
 
   switch (kind) {
     case 'wall':
@@ -771,9 +1056,18 @@ function solidsOf(kind: PieceKind): Slab[] {
         full(DOOR_HALF, 0, DOOR_HEAD, G),
       ];
     }
-    case 'doorLeaf':
-      // Closed, so it is simply a wall.
-      return [full(s)];
+    case 'doorLeaf': {
+      const side = (s - DOOR_HALF) / 2;
+      const frame = [
+        full(side, -(DOOR_HALF + side)),
+        full(side, DOOR_HALF + side),
+        full(DOOR_HALF, 0, DOOR_HEAD, G),
+      ];
+      // Shut, the leaf fills the opening; open, it has swung out of the way. Both
+      // states come off the same description, so what you can walk through is always
+      // what you can see.
+      return open ? frame : [...frame, full(DOOR_HALF, 0, 0, DOOR_HEAD)];
+    }
     case 'windowOpen':
     case 'windowGlass': {
       const side = (s - WIN_HALF) / 2;
@@ -810,7 +1104,36 @@ function solidsOf(kind: PieceKind): Slab[] {
         { cx: -(s - 0.07), cz: 0, hx: 0.07, hz: s, y0, y1 },
       ];
     }
+    case 'roofGable':
+      return bands((f) => RIDGE * (1 - f));
+    case 'roofHip':
+      return [...bands((f) => RIDGE * (1 - f)), ...bands((f) => RIDGE * (1 - f), 'x')];
+    case 'roofShed':
+      // One slope: low at -Z, full height at +Z, so the bands are not mirrored.
+      return [
+        { cx: 0, cz: -s * 0.75, hx: s, hz: s / 4, y0: 0, y1: RIDGE * 0.15 },
+        { cx: 0, cz: -s * 0.25, hx: s, hz: s / 4, y0: 0, y1: RIDGE * 0.4 },
+        { cx: 0, cz: s * 0.25, hx: s, hz: s / 4, y0: 0, y1: RIDGE * 0.65 },
+        { cx: 0, cz: s * 0.75, hx: s, hz: s / 4, y0: 0, y1: RIDGE * 0.9 },
+      ];
+    // Furnishings are solid at their own size, so a table is furniture rather than
+    // a hologram. Small enough that walking round them is never a nuisance.
+    case 'bed':
+      return [{ cx: 0, cz: 0, hx: 0.53, hz: 1.06, y0: 0, y1: 0.5 }];
+    case 'table':
+      return [{ cx: 0, cz: 0, hx: 0.85, hz: 0.55, y0: 0, y1: 0.77 }];
+    case 'stool':
+      return [{ cx: 0, cz: 0, hx: 0.26, hz: 0.26, y0: 0, y1: 0.48 }];
+    case 'cabinet':
+      return [{ cx: 0, cz: 0, hx: 0.56, hz: 0.22, y0: 0, y1: 1.8 }];
+    case 'barrel':
+      return [{ cx: 0, cz: 0, hx: 0.42, hz: 0.42, y0: 0, y1: 0.88 }];
+    case 'campfire':
+      return [{ cx: 0, cz: 0, hx: 0.68, hz: 0.68, y0: 0, y1: 0.2 }];
+    case 'brazier':
+      return [{ cx: 0, cz: 0, hx: 0.36, hz: 0.36, y0: 0, y1: 1.02 }];
     default:
+      // Shelves, torches and lanterns hang on a wall and are not in the way.
       return [];
   }
 }
@@ -885,6 +1208,26 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     metalness: 0,
   });
 
+  /**
+   * Flame and ember.
+   *
+   * Emissive geometry, and deliberately not a light. A torch that actually lit the
+   * room would need a shadow-casting point light per torch, and a player who lines a
+   * corridor with twenty of them would be asking the renderer for twenty extra
+   * shadow passes a frame. Emissive reads correctly at night — it is the fire you
+   * see, not the wall it would have lit — and costs one draw call for every fire in
+   * the world put together.
+   */
+  const glowMat = new MeshStandardMaterial({
+    color: 0xff9a3c,
+    emissive: 0xff7a18,
+    emissiveIntensity: 2.6,
+    roughness: 1,
+    metalness: 0,
+    transparent: true,
+    opacity: 0.92,
+  });
+
   const ghostOk = new MeshStandardMaterial({
     color: 0x5af08c,
     transparent: true,
@@ -918,8 +1261,12 @@ export function createBuildSite(assets: AssetManager): BuildSite {
 
   interface Bucket {
     mesh: InstancedMesh;
-    /** A second mesh for panes, sharing the same instance transforms. */
+    /** Panes, sharing the piece's transform. */
     glass: InstancedMesh | null;
+    /** A door leaf, which gets the piece's transform composed with its hinge. */
+    leaf: InstancedMesh | null;
+    /** Flame or ember: emissive, casts nothing. */
+    glow: InstancedMesh | null;
     live: Placed[];
   }
 
@@ -936,19 +1283,33 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     mesh.frustumCulled = false;
     mesh.name = `Build:${kind}`;
     group.add(mesh);
-    let glass: InstancedMesh | null = null;
-    if (geo.glass) {
-      glass = new InstancedMesh(geo.glass, glassMat, MAX_PER_KIND);
-      glass.count = 0;
-      // Panes do not cast: a shadow from translucent glass reads as a solid board,
-      // and it costs a second shadow pass over every window in the scene.
-      glass.castShadow = false;
-      glass.receiveShadow = false;
-      glass.frustumCulled = false;
-      glass.name = `Glass:${kind}`;
-      group.add(glass);
-    }
-    kinds.set(kind, { mesh, glass, live: [] });
+    /** A companion layer sharing the kind's instance count. */
+    const layer = (
+      g: BufferGeometry | undefined,
+      mat: MeshStandardMaterial,
+      prefix: string,
+      casts: boolean,
+    ): InstancedMesh | null => {
+      if (!g) return null;
+      const m = new InstancedMesh(g, mat, MAX_PER_KIND);
+      m.count = 0;
+      // Panes and flames do not cast. A shadow from translucent glass reads as a
+      // solid board, a flame has no business casting one at all, and either would
+      // add a shadow pass over every window and every fire in the scene.
+      m.castShadow = casts;
+      m.receiveShadow = false;
+      m.frustumCulled = false;
+      m.name = `${prefix}:${kind}`;
+      group.add(m);
+      return m;
+    };
+    kinds.set(kind, {
+      mesh,
+      glass: layer(geo.glass, glassMat, 'Glass', false),
+      leaf: layer(geo.leaf, timberMat, 'Leaf', true),
+      glow: layer(geo.glow, glowMat, 'Glow', false),
+      live: [],
+    });
   }
 
   const placed = new Map<string, Placed>();
@@ -976,7 +1337,12 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   let atTurn = 0;
   let free = true;
   let aimed: Placed | null = null;
+  /** The door within reach, if any, so the HUD can offer to open it. */
+  let reachable: Placed | null = null;
   const matrix = new Matrix4();
+  const leafMatrix = new Matrix4();
+  const hinge = new Matrix4();
+  const spin = new Matrix4();
 
   /**
    * A slot's identity, on a half-cell index so cells, edges and corners all get
@@ -1011,6 +1377,12 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     if (lattice === 'corner') {
       out.x = (Math.round(raw.x / G - 0.5) + 0.5) * G;
       out.z = (Math.round(raw.z / G - 0.5) + 0.5) * G;
+      return quarter;
+    }
+    if (lattice === 'quarter') {
+      const h = G / 2;
+      out.x = Math.round(raw.x / h) * h;
+      out.z = Math.round(raw.z / h) * h;
       return quarter;
     }
     const cx = Math.round(raw.x / G) * G;
@@ -1131,11 +1503,53 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     return best;
   };
 
+  /**
+   * The nearest door you could reach, or null.
+   *
+   * Doors have to work whether or not build mode is open — you close a door behind
+   * you, you do not enter a construction mode to do it. So this runs off the same
+   * per-frame call, and the placement preview is what is skipped when the mode is
+   * shut, not the whole update.
+   */
+  const findReachable = (body: Vector3, forward: Vector3): Placed | null => {
+    if (placed.size === 0) return null;
+    const gx = Math.round(body.x / G);
+    const gz = Math.round(body.z / G);
+    let best: Placed | null = null;
+    let bestScore = -1;
+    for (let ix = -1; ix <= 1; ix++) {
+      for (let iz = -1; iz <= 1; iz++) {
+        const list = columns.get(colKey(gx + ix, gz + iz));
+        if (!list) continue;
+        for (const p of list) {
+          if (!OPENABLE.has(p.kind)) continue;
+          const dx = p.x - body.x;
+          const dz = p.z - body.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > INTERACT_RANGE) continue;
+          if (Math.abs(p.level - body.y) > G * 0.6) continue;
+          // Facing it, not merely beside it: the door you are looking at is the one
+          // you meant, and a corridor of doors should offer exactly one.
+          const facing = dist < 0.01 ? 1 : (dx / dist) * forward.x + (dz / dist) * forward.z;
+          if (facing < 0.35) continue;
+          const score = facing / Math.max(0.4, dist);
+          if (score > bestScore) {
+            bestScore = score;
+            best = p;
+          }
+        }
+      }
+    }
+    return best;
+  };
+
   const update = (
     eye: Vector3,
     forward: Vector3,
+    body: Vector3,
     floorAt: (x: number, z: number) => number,
   ): void => {
+    reachable = findReachable(body, forward);
     if (!active) {
       ghost.visible = false;
       mark.visible = false;
@@ -1186,7 +1600,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     }
   };
 
-  /** Writes a piece's transform into its kind's instance buffers. */
+  /** Writes a piece's transform into every layer of its kind. */
   const writeInstance = (p: Placed): void => {
     const bucket = kinds.get(p.kind);
     if (!bucket) return;
@@ -1194,15 +1608,30 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     matrix.setPosition(p.x, p.level, p.z);
     bucket.mesh.setMatrixAt(p.slot, matrix);
     bucket.mesh.instanceMatrix.needsUpdate = true;
-    if (bucket.glass) {
-      bucket.glass.setMatrixAt(p.slot, matrix);
-      bucket.glass.instanceMatrix.needsUpdate = true;
+    for (const follower of [bucket.glass, bucket.glow]) {
+      if (!follower) continue;
+      follower.setMatrixAt(p.slot, matrix);
+      follower.instanceMatrix.needsUpdate = true;
+    }
+    if (bucket.leaf) {
+      // The leaf hangs on the left jamb, so it turns about that edge rather than
+      // about the piece's own centre: shift the hinge to the origin, turn, shift
+      // back, then apply the piece's placement on top.
+      hinge.makeTranslation(-DOOR_HALF, 0, 0);
+      spin.makeRotationY(p.open ? -DOOR_SWING : 0);
+      leafMatrix.makeTranslation(DOOR_HALF, 0, 0).multiply(spin).multiply(hinge);
+      leafMatrix.premultiply(matrix);
+      bucket.leaf.setMatrixAt(p.slot, leafMatrix);
+      bucket.leaf.instanceMatrix.needsUpdate = true;
     }
   };
 
   const setCounts = (bucket: Bucket): void => {
-    bucket.mesh.count = bucket.live.length;
-    if (bucket.glass) bucket.glass.count = bucket.live.length;
+    const n = bucket.live.length;
+    bucket.mesh.count = n;
+    if (bucket.glass) bucket.glass.count = n;
+    if (bucket.leaf) bucket.leaf.count = n;
+    if (bucket.glow) bucket.glow.count = n;
   };
 
   const place = (): boolean => {
@@ -1220,6 +1649,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       level: at.y,
       turn: atTurn,
       slot: bucket.live.length,
+      open: false,
     };
     bucket.live.push(entry);
     setCounts(bucket);
@@ -1317,8 +1747,23 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       case 'roofShed':
         return p.level + Math.max(0, Math.min(RIDGE, (RIDGE * (lz + s)) / G));
       default:
-        return null; // walls, openings, railings, beams and pillars are not floors
+        break;
     }
+    // Everything else stands on its own solid parts.
+    //
+    // This is what lets you get on top of a wall, a railing or a table at all.
+    // Previously only the shapes with an analytic surface had one, so a wall was
+    // something you could be pushed sideways by and never land on: you jumped, there
+    // was nothing to stand on, and the pushout slid you off along its face. Reading
+    // the same slab list the collision uses means the top of a piece is exactly as
+    // wide as the piece — you balance on a wall's own thickness, not on its cell.
+    let top: number | null = null;
+    for (const b of solidsOf(p.kind, p.open)) {
+      if (Math.abs(lx - b.cx) > b.hx || Math.abs(lz - b.cz) > b.hz) continue;
+      const y = p.level + b.y1;
+      if (top === null || y > top) top = y;
+    }
+    return top;
   };
 
   const heightAt = (x: number, z: number, ground: number, fromY?: number): number => {
@@ -1362,7 +1807,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         const list = columns.get(colKey(gx + ix, gz + iz));
         if (!list) continue;
         for (const piece of list) {
-          const slabs = solidsOf(piece.kind);
+          const slabs = solidsOf(piece.kind, piece.open);
           if (slabs.length === 0) continue;
           const ang = (piece.turn * Math.PI) / 2;
           const c = Math.cos(ang);
@@ -1370,9 +1815,16 @@ export function createBuildSite(assets: AssetManager): BuildSite {
           for (const b of slabs) {
             const y0 = piece.level + b.y0;
             const y1 = piece.level + b.y1;
-            // Clear of it vertically? The slack at the top is what lets you stand on
-            // a wall's top edge instead of being shoved off it.
-            if (footY >= y1 - 0.1 || headY <= y0) continue;
+            // Within a step of the top counts as being on top of it, not against it.
+            //
+            // This is a step-up allowance, and it is the other half of being able to
+            // get onto a wall. The pushout runs before the ground snap does, so with
+            // a tight margin here a body that had risen level with the top was still
+            // shoved off sideways a frame before the floor query could put it on top
+            // — which is exactly the "I try to jump onto the fence and it throws me
+            // left and right". A step's worth of slack lets the landing happen, and
+            // it is the same allowance that carries you up a stair tread or a roof.
+            if (footY >= y1 - STEP_UP || headY <= y0) continue;
 
             const dx = p.x - piece.x;
             const dz = p.z - piece.z;
@@ -1407,7 +1859,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         const list = columns.get(colKey(gx + ix, gz + iz));
         if (!list) continue;
         for (const piece of list) {
-          const slabs = solidsOf(piece.kind);
+          const slabs = solidsOf(piece.kind, piece.open);
           if (slabs.length === 0) continue;
           const [lx, lz] = toLocal(piece, x, z);
           for (const b of slabs) {
@@ -1460,6 +1912,14 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       quarter = (quarter + 1) % 4;
     },
     place,
+    reachableKind: () => reachable?.kind ?? null,
+    reachableOpen: () => reachable?.open ?? false,
+    interact: () => {
+      if (!reachable) return false;
+      reachable.open = !reachable.open;
+      writeInstance(reachable);
+      return true;
+    },
     aimedKind: () => aimed?.kind ?? null,
     removeAimed: () => {
       if (!aimed) return false;
@@ -1478,13 +1938,18 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       for (const bucket of kinds.values()) {
         bucket.mesh.dispose();
         bucket.glass?.dispose();
+        bucket.leaf?.dispose();
+        bucket.glow?.dispose();
       }
       for (const g of Object.values(geometries)) {
         g.timber.dispose();
         g.glass?.dispose();
+        g.leaf?.dispose();
+        g.glow?.dispose();
       }
       timberMat.dispose();
       glassMat.dispose();
+      glowMat.dispose();
       ghostOk.dispose();
       ghostBad.dispose();
       markMaterial.dispose();

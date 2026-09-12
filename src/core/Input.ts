@@ -33,6 +33,15 @@ export class Input {
   private captureWanted = false;
   /** Tab is held down, so the cursor is temporarily handed back. */
   private peeking = false;
+  /**
+   * The player has taken the cursor with Alt and not given it back.
+   *
+   * Distinct from `peeking`: peeking is a hold, suspends movement, and is meant for
+   * a glance at the player list. This is a latch for actually using the mouse —
+   * clicking the hotbar, the admin panel, a text field — while still being able to
+   * walk. Holding a key down to keep a cursor is the thing being fixed.
+   */
+  private cursorFreed = false;
 
   private readonly keys = new Set<string>();
   private readonly el: HTMLElement;
@@ -121,6 +130,11 @@ export class Input {
     if (this.pointerIsCoarseOnly) return;
     this.captureWanted = true;
     if (this.peeking) return; // Tab is held — stay released until it comes up
+    // The player asked for the cursor and has not asked for it back. Authoritative
+    // over everything else that wants capture — unpausing, closing a menu, a click
+    // on the canvas — because otherwise the next such event would silently take the
+    // cursor away again and the toggle would look broken.
+    if (this.cursorFreed) return;
     if (isNative()) {
       this.nativeCapture = true;
       this.locked = true;
@@ -156,8 +170,33 @@ export class Input {
     this.locked = document.pointerLockElement === this.el;
   }
 
+  /** True while the player has the cursor by choice. */
+  get isCursorFreed(): boolean {
+    return this.cursorFreed;
+  }
+
+  /**
+   * Hands the cursor over, or takes it back.
+   *
+   * Movement stays live either way — the point is to be able to reach the interface
+   * without stopping, which is what holding Tab could never do.
+   */
+  toggleCursor(): void {
+    if (this.pointerIsCoarseOnly) return;
+    this.cursorFreed = !this.cursorFreed;
+    if (this.cursorFreed) this.stopCapture();
+    else if (this.captureWanted) this.requestPointerLock();
+  }
+
   private onKeyDown(e: KeyboardEvent): void {
     this.keys.add(e.code);
+    // Alt frees the cursor and takes it back, which is the convention players
+    // already know from every game that has a cursor mode.
+    if ((e.code === 'AltLeft' || e.code === 'AltRight') && !e.repeat) {
+      e.preventDefault();
+      this.toggleCursor();
+      return;
+    }
     if (e.code === 'Space') {
       this.jumpQueued = true;
       e.preventDefault();
@@ -265,6 +304,28 @@ export class Input {
         claimCursorWarp();
         return;
       }
+    }
+
+    // Second guard on the warp, and the one that does not depend on timing.
+    //
+    // The check above recognises a warp by where it lands, but only while the warp
+    // is still considered outstanding — and that window is a fixed number of
+    // milliseconds against an async round trip through the OS. Under load the
+    // landing arrives after it closes, the jump is taken for real movement, and the
+    // view snaps back the way it came. That is the intermittent "I flick right and
+    // it turns me left", and it is why correcting the sign or the landing test never
+    // finished the job: both are timing-dependent, and this fault is a late reply.
+    //
+    // A warp is only ever issued once the cursor is past a quarter of the window
+    // from the middle, so its jump is always larger than that. A mouse reporting a
+    // fifth of the window in a single event does not happen — even a violent flick
+    // arrives as a stream of much smaller deltas. So a delta that big is a warp
+    // whatever the clock says: resync the reference and emit nothing.
+    const spikeX = w * 0.22;
+    const spikeY = h * 0.22;
+    if (Math.abs(dx) > spikeX || Math.abs(dy) > spikeY) {
+      claimCursorWarp();
+      return;
     }
 
     if (hadPrevious) {

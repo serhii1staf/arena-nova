@@ -297,10 +297,15 @@ export class ExteriorScene implements GameScene {
     // Build preview. Driven from the camera rather than from the body, so the piece
     // lands where the crosshair points in third person too. Returns immediately
     // while build mode is off, which is every frame of a normal session.
-    if (this.buildSite.active) {
+    // Also runs with the mode shut once anything is standing, because doors have to
+    // be usable without entering a construction mode to open one. Still nothing at
+    // all for a session that has built nothing, which is every normal session.
+    if (this.buildSite.active || this.buildSite.count() > 0) {
       this.camera.getWorldPosition(this.aimFrom);
       this.camera.getWorldDirection(this.aimDir);
-      this.buildSite.update(this.aimFrom, this.aimDir, (x, z) => this.world.floorHeightAt(x, z));
+      this.buildSite.update(this.aimFrom, this.aimDir, this.player.feetPosition, (x, z) =>
+        this.world.floorHeightAt(x, z),
+      );
     }
   }
 

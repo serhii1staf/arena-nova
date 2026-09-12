@@ -405,6 +405,26 @@
           0 0 0 1px rgba(126, 224, 168, 0.45),
           0 0 12px rgba(90, 240, 140, 0.25);
       }
+      /* Door prompt, just below the crosshair where the eye already is. */
+      #interactHint {
+        position: fixed;
+        left: 50%;
+        top: calc(50% + 34px);
+        transform: translateX(-50%);
+        z-index: 44;
+        padding: 3px 11px;
+        border: 1px solid rgba(255, 226, 150, 0.35);
+        border-radius: 8px;
+        background: rgba(10, 12, 8, 0.55);
+        color: #ffe9a8;
+        font-size: 12px;
+        letter-spacing: 0.02em;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+        pointer-events: none;
+      }
+      #interactHint[hidden] {
+        display: none;
+      }
       /* Group tabs. Twenty pieces will not fit on one row a hand can reach across,
          so the bar shows one group and these switch between them. */
       #buildCats {
@@ -1122,6 +1142,12 @@
       Build hotbar. Slots are generated in script from the piece list, so the bar
       and the pieces can never fall out of step.
     -->
+    <!--
+      Door prompt. Sits just under the crosshair and is shown whenever a door is in
+      reach, with or without the build hotbar, because opening a door is not building.
+    -->
+    <div id="interactHint" role="status" aria-live="polite" hidden></div>
+
     <div id="buildHud" hidden>
       <div id="buildCats" role="tablist" aria-label="Build groups"></div>
       <div id="buildLabel" role="status" aria-live="polite"></div>

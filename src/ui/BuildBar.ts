@@ -72,6 +72,9 @@ export class BuildBar {
   /** Names the piece the crosshair is on, so removing is never a guess. */
   private readonly aim: HTMLElement | null;
   private lastAim = '';
+  /** Offers to open the door in front of you. Lives outside the hotbar. */
+  private readonly prompt: HTMLElement | null;
+  private lastPrompt = '';
   /** Which group's slots are currently on the bar. */
   private shownCategory = -1;
   private allowed = false;
@@ -88,6 +91,7 @@ export class BuildBar {
     this.bar = document.getElementById('buildBar');
     this.label = document.getElementById('buildLabel');
     this.aim = document.getElementById('buildAim');
+    this.prompt = document.getElementById('interactHint');
     this.hint = document.getElementById('buildHint');
     this.counter = document.getElementById('buildCount');
     if (this.bar) this.buildSlots();
@@ -104,6 +108,16 @@ export class BuildBar {
     });
 
     window.addEventListener('keydown', (e) => this.onKey(e));
+    // Doors, separately from the build keys and deliberately outside the build-mode
+    // gate: you shut a door behind you, you do not open a construction mode to do it.
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== 'KeyE' || e.repeat || !this.allowed) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') return;
+      if (!site?.reachableKind()) return;
+      e.preventDefault();
+      site.interact();
+    });
     // Placement is on the primary button, and only counts while the game holds the
     // mouse — which also happens to be exactly when the hotbar is unreachable, so a
     // click meant for a slot can never place a piece as well.
@@ -329,6 +343,18 @@ export class BuildBar {
    */
   update(): void {
     if (!this.root) return;
+
+    // The door prompt is not part of the hotbar and must show with it closed.
+    if (this.prompt) {
+      const door = this.allowed ? site?.reachableKind() : null;
+      const text = door ? t(site?.reachableOpen() === true ? 'build.shutDoor' : 'build.openDoor') : '';
+      if (text !== this.lastPrompt) {
+        this.lastPrompt = text;
+        this.prompt.textContent = text;
+        this.prompt.hidden = text === '';
+      }
+    }
+
     const shouldShow = this.allowed && site?.active === true;
     if (this.root.hidden === shouldShow) this.setVisible(shouldShow);
     if (!shouldShow || !this.aim) return;

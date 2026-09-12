@@ -373,6 +373,16 @@ try {
       'roofShed',
       'roofFlat',
       'pillar',
+      'bed',
+      'table',
+      'stool',
+      'cabinet',
+      'barrel',
+      'shelf',
+      'torch',
+      'campfire',
+      'brazier',
+      'lantern',
     ];
     const out = {};
     for (const k of kinds) {
@@ -679,7 +689,7 @@ try {
       .length,
     litKind: document.querySelector('.buildSlot.on')?.dataset.kind ?? null,
     selected: window.arena.scene.buildSite.selected,
-    groupSize: [10, 6, 4][window.arena.scene.buildSite.category],
+    groupSize: [10, 6, 4, 10][window.arena.scene.buildSite.category],
     // The lit tab has to be the group the piece in hand belongs to. It was showing
     // the previous group: the tab of a roof was still active while a wall was in
     // hand and the wall row was on the bar.
@@ -896,6 +906,148 @@ try {
   });
   console.log(`label centring: ${JSON.stringify(centred)}`);
 
+  // ---- You can get on top of a railing and a wall --------------------------
+  // Before, only shapes with an analytic surface had a top, so a wall was something
+  // you got pushed sideways by and never landed on: jumping at a fence threw you
+  // left and right along its face. The top now comes from the same slabs the
+  // collision uses, and the pushout yields within a step of it.
+  const onTop = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    s.select('railing');
+    sc.player.spawn(700, 700, 0);
+    sc.player.pitch = 0;
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const r = window.probe.piece('railing', 0);
+    if (!r) return { placed: true, found: false };
+    const ground = sc.world.floorHeightAt(r.x, r.z);
+    return {
+      placed: true,
+      found: true,
+      // Standing on the ground beside it, the railing is not the floor.
+      fromGround: +(s.heightAt(r.x, r.z, ground, ground) - ground).toFixed(2),
+      // Risen to near its top, it is.
+      fromLevel: +(s.heightAt(r.x, r.z, ground, ground + 0.9) - ground).toFixed(2),
+      // And the pushout lets go once you are within a step of the top, which is what
+      // allows the landing to happen at all.
+      pushedAtTop: (() => {
+        const p = { x: r.x, y: ground + 0.9, z: r.z };
+        s.collide(p, 0.4);
+        return +Math.hypot(p.x - r.x, p.z - r.z).toFixed(2);
+      })(),
+      // Down at knee height it is still solid.
+      pushedLow: (() => {
+        const p = { x: r.x, y: ground, z: r.z };
+        s.collide(p, 0.4);
+        return +Math.hypot(p.x - r.x, p.z - r.z).toFixed(2);
+      })(),
+    };
+  });
+  console.log(`on top: ${JSON.stringify(onTop)}`);
+
+  // ---- A roof is solid from the side too -----------------------------------
+  const roofSide = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    s.select('roofGable');
+    sc.player.spawn(-700, 700, 0);
+    sc.player.pitch = 0;
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const r = window.probe.piece('roofGable', 0);
+    if (!r) return { placed: true, found: false };
+    const ground = sc.world.floorHeightAt(r.x, r.z);
+    // At ground level under the ridge, where the roof is tall: solid.
+    const mid = { x: r.x, y: ground, z: r.z };
+    s.collide(mid, 0.4);
+    // Up on the slope, a step below the surface: free to walk.
+    const up = { x: r.x, y: ground + s.heightAt(r.x, r.z, ground) - ground - 0.2, z: r.z };
+    const upFrom = { x: up.x, z: up.z };
+    s.collide(up, 0.4);
+    return {
+      placed: true,
+      found: true,
+      blockedAtGround: +Math.hypot(mid.x - r.x, mid.z - r.z).toFixed(2),
+      freeOnSlope: +Math.hypot(up.x - upFrom.x, up.z - upFrom.z).toFixed(2),
+    };
+  });
+  console.log(`roof from the side: ${JSON.stringify(roofSide)}`);
+
+  // ---- Doors open and shut -------------------------------------------------
+  const door2 = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    s.select('doorLeaf');
+    sc.player.spawn(-700, -700, 0);
+    sc.player.pitch = 0;
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const d = window.probe.piece('doorLeaf', 0);
+    if (!d) return { placed: true, found: false };
+    const nx = Math.sin(d.ry);
+    const nz = Math.cos(d.ry);
+    const walkThrough = () => {
+      const p = { x: d.x + nx * 5, y: d.y + 0.2, z: d.z + nz * 5 };
+      for (let i = 0; i < 80; i++) {
+        p.x -= nx * 0.12;
+        p.z -= nz * 0.12;
+        s.collide(p, 0.4);
+      }
+      return +((p.x - d.x) * nx + (p.z - d.z) * nz).toFixed(2);
+    };
+    const shut = walkThrough();
+    // Stand in front of it and look at it, which is how a door offers itself.
+    // Yaw 0 faces -Z here, and the forward vector for yaw t is (-sin t, 0, -cos t),
+    // so looking back along the door's own normal is atan2(nx, nz).
+    sc.player.spawn(d.x + nx * 1.6, d.z + nz * 1.6, Math.atan2(nx, nz));
+    sc.player.pitch = 0;
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    const promptShut = s.reachableKind();
+    const openedFlag = s.interact();
+    const opened = walkThrough();
+    const promptOpen = s.reachableOpen();
+    s.interact();
+    const shutAgain = walkThrough();
+    // The leaf has its own transform, which has to have moved.
+    const leafMesh = s.group.children.find((c) => c.name === 'Leaf:doorLeaf') ?? null;
+    return {
+      placed: true,
+      found: true,
+      promptShut,
+      openedFlag,
+      promptOpen,
+      shut,
+      opened,
+      shutAgain,
+      hasLeafLayer: !!leafMesh,
+      leafCount: leafMesh?.count ?? 0,
+    };
+  });
+  console.log(`door: ${JSON.stringify(door2)}`);
+
+  // ---- Alt frees the cursor and gives it back ------------------------------
+  const cursor = await page.evaluate(() => ({
+    freed: window.arena.engine.input.isCursorFreed,
+  }));
+  await page.keyboard.press('AltLeft');
+  await page.waitForTimeout(250);
+  const freed = await page.evaluate(() => ({
+    freed: window.arena.engine.input.isCursorFreed,
+    locked: window.arena.engine.input.locked,
+  }));
+  await page.keyboard.press('AltLeft');
+  await page.waitForTimeout(250);
+  const regrabbed = await page.evaluate(() => window.arena.engine.input.isCursorFreed);
+  console.log(`cursor: ${JSON.stringify(cursor)} -> ${JSON.stringify(freed)} -> ${regrabbed}`);
+
   // ---- Removing exactly one, the one under the crosshair -------------------
   const removed = await page.evaluate(() => {
     const sc = window.arena.scene;
@@ -982,7 +1134,7 @@ try {
   // the see-through ramp and roof.
   const facesOutward =
     Object.values(winding).every((w) => w.tris > 0 && w.inverted === 0) &&
-    Object.keys(winding).length === 20;
+    Object.keys(winding).length === 30;
   // Half a wall's thickness plus the body radius is 0.5 m. Anything near that is a
   // wall; 2.4 m was the bubble.
   const hitboxThin =
@@ -1024,11 +1176,14 @@ try {
   // does not move when ninety pieces are placed.
   // Twenty timber meshes plus two for glazing, and the preview and marker on top.
   // That count does not move when ninety pieces are placed.
+  // Thirty kinds, plus a companion layer wherever a piece needs a second material:
+  // three glazed, one door leaf, four fires. Forty children in all, and that count
+  // does not move when ninety pieces go in.
   const costFlat =
     scaling.placed >= 80 &&
-    scaling.instanced === 22 &&
+    scaling.instanced === 38 &&
     scaling.childrenFull === scaling.childrenEmpty &&
-    scaling.childrenFull <= 26;
+    scaling.childrenFull === 40;
   // One turn changes the piece and leaves the camera exactly where it was, and the
   // reverse turn comes back to where it started.
   const wheelIsolated =
@@ -1037,7 +1192,9 @@ try {
     wheelTest === 3 &&
     backAgain === before2.selected;
   const glassWorks =
-    glazing.glassMeshes.length === 2 &&
+    glazing.glassMeshes.includes('Glass:windowGlass') &&
+    glazing.glassMeshes.includes('Glass:windowVent') &&
+    glazing.glassMeshes.includes('Glass:lantern') &&
     glazing.paneTransparent === true &&
     glazing.paneOpacity < 0.5 &&
     glazing.paneSmooth === true &&
@@ -1055,14 +1212,39 @@ try {
     Math.abs(gable.base) < 0.05;
   // Relative to wherever it started, and wrapping. The slot count has to follow the
   // group, which is the part that was leaving a stale row on the bar.
-  const expectNext = (groups.cat + 1) % 3;
-  const groupSizes = [10, 6, 4];
+  const expectNext = (groups.cat + 1) % 4;
+  const groupSizes = [10, 6, 4, 10];
   const groupsWork =
-    groups.tabs === 3 &&
+    groups.tabs === 4 &&
     afterTab.cat === expectNext &&
     afterTab.slots === groupSizes[expectNext] &&
     afterTab.litTabs === 1 &&
     backToWalls === groups.cat;
+  // Not the floor from the ground, the floor once you are up there, and the pushout
+  // lets go at the top while still holding at knee height.
+  const topsStandable =
+    onTop.found === true &&
+    Math.abs(onTop.fromGround) < 0.01 &&
+    Math.abs(onTop.fromLevel - 1.1) < 0.02 &&
+    onTop.pushedAtTop < 0.01 &&
+    onTop.pushedLow > 0.1;
+  const roofSolidSideways =
+    roofSide.found === true && roofSide.blockedAtGround > 0.1 && roofSide.freeOnSlope < 0.01;
+  // Shut it stops you; open you come out the far side; shut again it stops you once
+  // more, so the state really is a state and not a one-way door.
+  const doorsOpen =
+    door2.found === true &&
+    door2.hasLeafLayer === true &&
+    door2.leafCount === 1 &&
+    door2.promptShut === 'doorLeaf' &&
+    door2.openedFlag === true &&
+    door2.promptOpen === true &&
+    door2.shut > 0.3 &&
+    door2.opened < -1 &&
+    door2.shutAgain > 0.3;
+  // Freed means the game is not holding the mouse, and pressing again gives it back.
+  const cursorToggles =
+    cursor.freed === false && freed.freed === true && freed.locked === false && regrabbed === false;
   const labelCentred =
     centred !== null && Math.abs(centred.boxOffset) < 1.5 && Math.abs(centred.textOffset) < 1.5;
   const removesOne =
@@ -1162,6 +1344,22 @@ try {
     groupsWork,
     `${groups.cat} -> ${afterTab.cat} (${afterTab.slots} slots) -> ${backToWalls}`,
   );
+  line(
+    'you can stand on a railing:',
+    topsStandable,
+    `ground=${onTop.fromGround} up=${onTop.fromLevel} pushTop=${onTop.pushedAtTop} pushLow=${onTop.pushedLow}`,
+  );
+  line(
+    'roof is solid from the side:',
+    roofSolidSideways,
+    `ground=${roofSide.blockedAtGround} slope=${roofSide.freeOnSlope}`,
+  );
+  line(
+    'doors open and shut:',
+    doorsOpen,
+    `shut=${door2.shut} open=${door2.opened} shutAgain=${door2.shutAgain}`,
+  );
+  line('Alt frees the cursor:', cursorToggles, `freed=${freed.freed} locked=${freed.locked}`);
   line('label centred on the bar:', labelCentred, `off by ${centred?.textOffset}px`);
   line(
     'X removes exactly the aimed one:',
@@ -1200,6 +1398,10 @@ try {
     glassWorks &&
     gableFits &&
     groupsWork &&
+    topsStandable &&
+    roofSolidSideways &&
+    doorsOpen &&
+    cursorToggles &&
     labelCentred &&
     removesOne &&
     removesLowPiece &&
