@@ -5,6 +5,7 @@ import { GameUI } from './ui/GameUI.ts';
 import { invalidateWindowCentre, prepareNative } from './ui/native.ts';
 import { applyTranslations, t } from './ui/i18n.ts';
 import { squadIds } from './ui/Squad.ts';
+import { inventory } from './game/Inventory.ts';
 
 /**
  * Bootstraps the game: builds the engine, loads the lobby while the start screen
@@ -155,6 +156,9 @@ async function boot(): Promise<void> {
     // Squad membership, so a probe can assert on who the highlight is meant for
     // rather than inferring it from what happens to be drawn.
     squadIds,
+    // The bag and the meters, so a probe can assert on the model rather than on what
+    // the panel happens to have drawn.
+    inventory,
   };
 
 }

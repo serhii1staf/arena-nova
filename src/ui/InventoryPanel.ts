@@ -1,0 +1,292 @@
+import { inventory } from '../game/Inventory.ts';
+import { ITEMS, ITEM_ORDER, itemGeometry, type ItemId } from '../game/Items.ts';
+import { RECIPES, craft, recommended, type Recipe } from '../game/Recipes.ts';
+import { savedSkin } from '../player/skins.ts';
+import { renderIcons } from './IconRenderer.ts';
+import { portraitFor } from './Portraits.ts';
+import { t } from './i18n.ts';
+
+/**
+ * InventoryPanel
+ * --------------
+ * What you are carrying, how you are doing, and what you could make.
+ *
+ * Opened with I. Three columns, because they answer three different questions and
+ * putting them in one list would make all three harder to read: the bag on the left,
+ * the recipes in the middle, and the player themself on the right with their meters
+ * under them.
+ *
+ * Icons are 3D renders of the same geometry the world drops, taken once for the
+ * session — the shared renderer does the batch and hands the context straight back.
+ * The panel itself does no per-frame work at all: it redraws when the inventory
+ * changes, when it opens, and when the player walks in or out of range of a bench.
+ * A panel that rebuilt sixty times a second would be the most expensive thing on
+ * screen while doing nothing.
+ */
+
+/** How long a craft takes to sweep its bar, matching the recipe's own seconds. */
+interface Progress {
+  recipe: Recipe;
+  until: number;
+  from: number;
+}
+
+export class InventoryPanel {
+  private readonly root: HTMLElement | null;
+  private readonly grid: HTMLElement | null;
+  private readonly list: HTMLElement | null;
+  private readonly face: HTMLImageElement | null;
+  private readonly bars: Record<'health' | 'water' | 'food', HTMLElement | null>;
+  private readonly hint: HTMLElement | null;
+  private open = false;
+  private icons = new Map<ItemId, string>();
+  /** Whether a bench was in range when the panel was last drawn. */
+  private benchShown = false;
+  private atBench = false;
+  private progress: Progress | null = null;
+  /** Set by the scene each frame; the panel never reaches into the world itself. */
+  private benchProbe: (() => boolean) | null = null;
+
+  constructor() {
+    this.root = document.getElementById('inventory');
+    this.grid = document.getElementById('invGrid');
+    this.list = document.getElementById('invRecipes');
+    this.face = document.getElementById('invFace') as HTMLImageElement | null;
+    this.hint = document.getElementById('invHint');
+    this.bars = {
+      health: document.getElementById('barHealth'),
+      water: document.getElementById('barWater'),
+      food: document.getElementById('barFood'),
+    };
+
+    inventory().onChange(() => {
+      if (this.open) this.draw();
+    });
+
+    window.addEventListener('keydown', (e) => {
+      if (e.repeat) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA') return;
+      if (e.code === 'KeyI') {
+        e.preventDefault();
+        this.toggle();
+        return;
+      }
+      // Escape shuts the panel rather than falling through to the pause menu, which
+      // is what you expect from the top-most thing on screen.
+      if (e.code === 'Escape' && this.open) {
+        e.stopPropagation();
+        e.preventDefault();
+        this.setOpen(false);
+      }
+    });
+  }
+
+  /** The scene tells the panel how to ask whether a bench is in reach. */
+  setBenchProbe(fn: (() => boolean) | null): void {
+    this.benchProbe = fn;
+  }
+
+  get isOpen(): boolean {
+    return this.open;
+  }
+
+  toggle(): void {
+    this.setOpen(!this.open);
+  }
+
+  private setOpen(on: boolean): void {
+    this.open = on;
+    this.root?.classList.toggle('on', on);
+    if (on) {
+      this.paintIcons();
+      this.draw();
+    }
+  }
+
+  /**
+   * Called once a frame from the HUD pass.
+   *
+   * Almost nothing on purpose. The meters move continuously so they are written when
+   * they change by enough to see, and the recipe list is rebuilt only when walking
+   * into or out of a bench's range changes what is possible.
+   */
+  update(): void {
+    this.atBench = this.benchProbe?.() ?? false;
+    if (!this.open) return;
+    if (this.atBench !== this.benchShown) this.draw();
+    this.drawBars();
+    this.drawFace();
+    this.drawProgress();
+  }
+
+  /**
+   * Puts the player's own face in the panel, retrying until it exists.
+   *
+   * Portraits are rendered off the frame loop, once per character, the first time one
+   * is asked for — so the first open of the panel almost always asks before there is
+   * anything to show. Setting it only while redrawing meant the space stayed empty
+   * until something else happened to trigger a redraw, which for a panel that redraws
+   * on change could be never.
+   */
+  private drawFace(): void {
+    if (!this.face || this.face.getAttribute('src')) return;
+    const url = portraitFor(savedSkin());
+    if (!url) return;
+    this.face.src = url;
+    this.face.hidden = false;
+  }
+
+  private paintIcons(): void {
+    if (this.icons.size > 0) return;
+    const order = ITEM_ORDER;
+    // One batch, one context, one release. Fitted per item rather than to a shared
+    // frame: a log and a berry differ by an order of magnitude in size, and a frame
+    // that suits one leaves the other a dot.
+    const urls = renderIcons(
+      order.map((id) => itemGeometry(id)),
+      { size: 64 },
+    );
+    order.forEach((id, i) => {
+      const url = urls[i];
+      if (url) this.icons.set(id, url);
+    });
+  }
+
+  private drawBars(): void {
+    const v = inventory().state;
+    for (const [key, el] of Object.entries(this.bars) as [keyof typeof this.bars, HTMLElement | null][]) {
+      if (!el) continue;
+      const pct = `${Math.round(v[key] * 100)}%`;
+      if (el.style.width !== pct) el.style.width = pct;
+    }
+  }
+
+  private drawProgress(): void {
+    const p = this.progress;
+    if (!p) return;
+    const now = performance.now();
+    if (now >= p.until) {
+      this.progress = null;
+      // Checked again at the moment it completes, not only when it started: you can
+      // walk away from a bench mid-craft, and the materials should not vanish into a
+      // recipe that is no longer allowed.
+      craft(p.recipe, inventory(), this.atBench);
+      this.draw();
+      return;
+    }
+    const el = this.list?.querySelector<HTMLElement>(`[data-recipe="${p.recipe.id}"] .invBarFill`);
+    if (el) {
+      const f = (now - p.from) / (p.until - p.from);
+      el.style.width = `${Math.round(f * 100)}%`;
+    }
+  }
+
+  private draw(): void {
+    const inv = inventory();
+    this.benchShown = this.atBench;
+
+    // --- The bag ---
+    if (this.grid) {
+      const held = ITEM_ORDER.filter((id) => inv.count(id) > 0);
+      this.grid.replaceChildren(
+        ...held.map((id) => {
+          const cell = document.createElement('div');
+          cell.className = 'invCell';
+          cell.title = t(`item.${id}`);
+          const url = this.icons.get(id);
+          if (url) {
+            const img = document.createElement('img');
+            img.className = 'invIcon';
+            img.src = url;
+            img.alt = '';
+            cell.appendChild(img);
+          }
+          const n = document.createElement('span');
+          n.className = 'invCount';
+          n.textContent = String(inv.count(id));
+          const name = document.createElement('span');
+          name.className = 'invName';
+          name.textContent = t(`item.${id}`);
+          cell.append(n, name);
+          // Food is eaten by clicking it, which is the only verb an item has here.
+          if (ITEMS[id].eat) {
+            cell.classList.add('edible');
+            cell.addEventListener('click', () => {
+              inv.eat(id);
+              this.draw();
+            });
+          }
+          return cell;
+        }),
+      );
+      if (held.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'invEmpty';
+        empty.textContent = t('inv.empty');
+        this.grid.appendChild(empty);
+      }
+    }
+
+    // --- Recipes, the ones you can make first ---
+    if (this.list) {
+      this.list.replaceChildren(
+        ...recommended(inv, this.atBench).map(({ r, blocked }) => {
+          const row = document.createElement('button');
+          row.type = 'button';
+          row.className = 'invRecipe';
+          row.dataset.recipe = r.id;
+          if (blocked) row.classList.add('blocked');
+          row.disabled = blocked !== null || this.progress !== null;
+
+          const icon = document.createElement('img');
+          icon.className = 'invRecipeIcon';
+          const url = this.icons.get(r.out);
+          if (url) icon.src = url;
+          icon.alt = '';
+
+          const text = document.createElement('span');
+          text.className = 'invRecipeText';
+          const title = document.createElement('span');
+          title.className = 'invRecipeName';
+          title.textContent = `${t(`item.${r.out}`)}${r.count > 1 ? ` ×${r.count}` : ''}`;
+          const needs = document.createElement('span');
+          needs.className = 'invRecipeNeeds';
+          // Each ingredient shows held against required, so a shortfall is visible
+          // without opening anything else.
+          needs.textContent = r.needs
+            .map((nd) => `${t(`item.${nd.id}`)} ${inv.count(nd.id)}/${nd.count}`)
+            .join(' · ');
+          text.append(title, needs);
+
+          const tag = document.createElement('span');
+          tag.className = 'invRecipeTag';
+          tag.textContent = blocked === 'bench' ? t('inv.needBench') : r.bench ? t('inv.bench') : t('inv.hand');
+
+          const bar = document.createElement('span');
+          bar.className = 'invBar';
+          const fill = document.createElement('span');
+          fill.className = 'invBarFill';
+          bar.appendChild(fill);
+
+          row.append(icon, text, tag, bar);
+          row.addEventListener('click', () => this.begin(r));
+          return row;
+        }),
+      );
+    }
+
+    // --- The player ---
+    this.drawFace();
+    if (this.hint) this.hint.textContent = this.atBench ? t('inv.atBench') : t('inv.noBench');
+    this.drawBars();
+  }
+
+  private begin(r: Recipe): void {
+    if (this.progress) return;
+    if (RECIPES.indexOf(r) < 0) return;
+    const now = performance.now();
+    this.progress = { recipe: r, from: now, until: now + r.seconds * 1000 };
+    this.draw();
+  }
+}

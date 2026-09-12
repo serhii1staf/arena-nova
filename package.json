@@ -1,6 +1,6 @@
 {
   "name": "arena-nova",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "description": "Optimized 3D game — overgrown gothic cathedral lobby. Runs in the browser and as a native desktop app (Tauri). Multiplayer-ready.",
   "type": "module",
   "license": "MIT",
@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "buildsys": "node scripts/debug-build.mjs",
     "squadsight": "node scripts/debug-squadsight.mjs",
+    "craft": "node scripts/debug-craft.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "icons": "node scripts/gen-icons.mjs",

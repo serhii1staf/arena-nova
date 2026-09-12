@@ -405,7 +405,220 @@
           0 0 0 1px rgba(126, 224, 168, 0.45),
           0 0 12px rgba(90, 240, 140, 0.25);
       }
-      /* Door prompt, just below the crosshair where the eye already is. */
+      /* --- Inventory, crafting, vitals ---------------------------------------- */
+      #inventory {
+        position: fixed;
+        inset: 0;
+        z-index: 70;
+        display: none;
+        gap: 12px;
+        align-items: stretch;
+        justify-content: center;
+        padding: 6vh 4vw;
+        background: rgba(4, 8, 14, 0.62);
+        backdrop-filter: blur(5px);
+      }
+      #inventory.on {
+        display: flex;
+      }
+      .invPane {
+        display: flex;
+        flex: 1 1 0;
+        flex-direction: column;
+        gap: 8px;
+        min-width: 0;
+        max-width: 320px;
+        padding: 14px;
+        border: 1px solid rgba(150, 190, 230, 0.18);
+        border-radius: 14px;
+        background: rgba(10, 16, 26, 0.86);
+      }
+      .invWide {
+        flex: 1.6 1 0;
+        max-width: 520px;
+      }
+      .invYou {
+        flex: 0 0 210px;
+        align-items: center;
+        max-width: 210px;
+      }
+      .invTitle {
+        color: rgba(190, 215, 240, 0.72);
+        font-size: 11px;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+      #invGrid {
+        display: grid;
+        overflow: hidden auto;
+        flex: 1;
+        gap: 7px;
+        grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+        align-content: start;
+      }
+      .invCell {
+        position: relative;
+        aspect-ratio: 1;
+        padding: 3px;
+        border: 1px solid rgba(150, 190, 230, 0.16);
+        border-radius: 9px;
+        background: rgba(16, 24, 36, 0.8);
+      }
+      .invCell.edible {
+        border-color: rgba(190, 120, 140, 0.4);
+        cursor: pointer;
+      }
+      .invCell.edible:hover {
+        background: rgba(52, 24, 32, 0.85);
+      }
+      .invIcon {
+        width: 100%;
+        height: 74%;
+        object-fit: contain;
+      }
+      .invCount {
+        position: absolute;
+        top: 3px;
+        right: 6px;
+        color: #dceaf8;
+        font-size: 11px;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+      }
+      .invName {
+        display: block;
+        overflow: hidden;
+        color: rgba(180, 205, 230, 0.75);
+        font-size: 9px;
+        text-align: center;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .invEmpty {
+        grid-column: 1 / -1;
+        padding: 18px 4px;
+        color: rgba(170, 195, 220, 0.5);
+        font-size: 12px;
+        text-align: center;
+      }
+      #invRecipes {
+        display: flex;
+        overflow: hidden auto;
+        flex: 1;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .invRecipe {
+        position: relative;
+        display: flex;
+        gap: 9px;
+        align-items: center;
+        padding: 7px 9px;
+        border: 1px solid rgba(126, 224, 168, 0.35);
+        border-radius: 10px;
+        background: rgba(14, 30, 22, 0.8);
+        color: #d7ecff;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      .invRecipe:hover:not(:disabled) {
+        border-color: rgba(126, 224, 168, 0.75);
+      }
+      /* Blocked, not hidden. Seeing what you cannot make yet is how you learn what to
+         look for; hiding it makes the list change shape as you walk around. */
+      .invRecipe.blocked {
+        border-color: rgba(150, 190, 230, 0.14);
+        background: rgba(14, 20, 30, 0.7);
+        color: rgba(180, 205, 230, 0.55);
+        cursor: default;
+      }
+      .invRecipeIcon {
+        width: 34px;
+        height: 34px;
+        object-fit: contain;
+      }
+      .invRecipeText {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .invRecipeName {
+        font-size: 13px;
+      }
+      .invRecipeNeeds {
+        overflow: hidden;
+        color: rgba(170, 200, 225, 0.66);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .invRecipeTag {
+        flex: 0 0 auto;
+        color: rgba(150, 200, 175, 0.7);
+        font-size: 9px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+      .invBar {
+        position: absolute;
+        right: 9px;
+        bottom: 2px;
+        left: 9px;
+        height: 2px;
+        border-radius: 2px;
+        background: rgba(255, 255, 255, 0.07);
+      }
+      .invBarFill {
+        display: block;
+        width: 0;
+        height: 100%;
+        border-radius: 2px;
+        background: #7ee0a8;
+      }
+      #invHint {
+        color: rgba(170, 200, 225, 0.6);
+        font-size: 11px;
+      }
+      #invFace {
+        width: 104px;
+        height: 104px;
+        border-radius: 12px;
+        object-fit: cover;
+      }
+      .invBars {
+        display: flex;
+        width: 100%;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .invMeter {
+        overflow: hidden;
+        height: 9px;
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.08);
+      }
+      .invMeterFill {
+        display: block;
+        width: 100%;
+        height: 100%;
+        border-radius: 5px;
+      }
+      .invMeterFill.health {
+        background: linear-gradient(90deg, #d2544e, #f08a72);
+      }
+      .invMeterFill.water {
+        background: linear-gradient(90deg, #3f86c6, #74c2ea);
+      }
+      .invMeterFill.food {
+        background: linear-gradient(90deg, #a8863a, #dcc06a);
+      }
+      .invClose {
+        margin-top: auto;
+        color: rgba(170, 200, 225, 0.5);
+        font-size: 10px;
+      }
+      /* Interaction prompt, just below the crosshair where the eye already is. */
       #interactHint {
         position: fixed;
         left: 50%;
@@ -1187,8 +1400,33 @@
       and the pieces can never fall out of step.
     -->
     <!--
-      Door prompt. Sits just under the crosshair and is shown whenever a door is in
-      reach, with or without the build hotbar, because opening a door is not building.
+      Inventory, crafting and vitals. Three columns because they answer three
+      questions; opened with I or by using a workbench.
+    -->
+    <div id="inventory">
+      <div class="invPane">
+        <div class="invTitle" data-i18n="inv.bag">Bag</div>
+        <div id="invGrid"></div>
+      </div>
+      <div class="invPane invWide">
+        <div class="invTitle" data-i18n="inv.craft">Crafting</div>
+        <div id="invRecipes"></div>
+        <div id="invHint"></div>
+      </div>
+      <div class="invPane invYou">
+        <img id="invFace" alt="" hidden />
+        <div class="invBars">
+          <div class="invMeter"><span class="invMeterFill health" id="barHealth"></span></div>
+          <div class="invMeter"><span class="invMeterFill water" id="barWater"></span></div>
+          <div class="invMeter"><span class="invMeterFill food" id="barFood"></span></div>
+        </div>
+        <div class="invClose" data-i18n="inv.close">I to close</div>
+      </div>
+    </div>
+
+    <!--
+      Interaction prompt. Sits just under the crosshair. One label and one key, fed by
+      the scene, because the scene is the only thing that knows what is in reach.
     -->
     <div id="interactHint" role="status" aria-live="polite" hidden></div>
 

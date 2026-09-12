@@ -18,7 +18,13 @@ import { buildDragon, type DragonBuild } from '../world/Dragon.ts';
 import { createBuildSite, type BuildSite } from '../world/Building.ts';
 import { setBuildSite } from '../ui/BuildBar.ts';
 import { squadIds } from '../ui/Squad.ts';
-import { surfaceGroundHeightAt } from '../world/WorldGen.ts';
+import { surfaceGroundHeightAt, WORLD } from '../world/WorldGen.ts';
+import { createGatherSite, type GatherSite } from '../world/Gatherables.ts';
+import { consumeUse, initInteract, setPrompt } from '../ui/Interact.ts';
+import { openInventory, setBenchProbe } from '../ui/GameUI.ts';
+import { inventory } from '../game/Inventory.ts';
+import { ITEMS, type ItemId } from '../game/Items.ts';
+import { t } from '../ui/i18n.ts';
 import { DayNight } from '../world/DayNight.ts';
 import { RemoteCrowd } from '../net/RemoteCrowd.ts';
 import { ensureConnected, gameSession } from '../net/session.ts';
@@ -53,6 +59,7 @@ export class ExteriorScene implements GameScene {
   private background!: Color;
   private crowd!: RemoteCrowd;
   private buildSite!: BuildSite;
+  private gather!: GatherSite;
   /** Reused each frame for the build aim ray; allocating two vectors per frame here
    * would be pure churn for something that is off most of the time. */
   private readonly aimFrom = new Vector3();
@@ -193,6 +200,14 @@ export class ExteriorScene implements GameScene {
     this.scene.add(this.buildSite.group);
     setBuildSite(this.buildSite);
 
+    // Sticks, stones, dead trees and workbenches. Nothing is stored: every one is
+    // derived from its own grid cell, so the world is consistent without a spawn list
+    // and only what is near the player exists as geometry.
+    this.gather = createGatherSite();
+    this.scene.add(this.gather.group);
+    initInteract();
+    setBenchProbe(() => this.gather.atBench(this.player.feetPosition));
+
     // Compile every program now, while the transition is still faded out.
     // Otherwise the first frame in the open world has to compile the terrain, the
     // wind-injected vegetation programs, the ember, portal, dragon, wildlife and
@@ -311,6 +326,7 @@ export class ExteriorScene implements GameScene {
     this.air.air.copy(this.fog.color);
     this.world.update(this.time, frameDelta, p, this.air);
     this.dragon.update(this.time, frameDelta);
+    this.stepSurvival(frameDelta);
 
     // Build preview. Driven from the camera rather than from the body, so the piece
     // lands where the crosshair points in third person too. Returns immediately
@@ -333,6 +349,69 @@ export class ExteriorScene implements GameScene {
   }
 
   /**
+   * Gathering, felling, benches, thirst.
+   *
+   * All of it hangs off one thing being in reach, so it is one pass rather than four
+   * that each walk the same list. The heavy part — deciding what exists nearby — only
+   * runs when the player crosses a cell boundary, inside `gather.update`.
+   */
+  private stepSurvival(dt: number): void {
+    const feet = this.player.feetPosition;
+    this.gather.update(feet);
+    inventory().tick(dt);
+
+    // Standing in water fills the water meter. Cheap, and it is the one source of
+    // drink in the world, so it does not need a container to be useful.
+    if (feet.y <= WORLD.waterLevel + 0.9) inventory().drink();
+
+    this.camera.getWorldDirection(this.aimDir);
+    const target = this.gather.aimed(feet, this.aimDir);
+    const door = this.buildSite.reachableKind();
+
+    // One prompt, and the nearer intent wins. A door is only offered when there is no
+    // pickup in reach, because reaching for a stick at your feet is the more likely
+    // meaning when both are there.
+    if (target) {
+      setPrompt(this.promptFor(target.kind));
+      if (consumeUse()) this.use(target.kind, target);
+    } else if (door) {
+      setPrompt(t(this.buildSite.reachableOpen() ? 'build.shutDoor' : 'build.openDoor'));
+      if (consumeUse()) this.buildSite.interact();
+    } else {
+      setPrompt(null);
+      consumeUse();
+    }
+  }
+
+  /** What the prompt should say for a thing in reach. */
+  private promptFor(kind: ItemId | 'snag' | 'bench'): string {
+    if (kind === 'bench') return t('gather.bench');
+    if (kind === 'snag') {
+      return inventory().hasTool('axe') ? t('gather.fell') : t('gather.needAxe');
+    }
+    return `${t('gather.take')} ${t(`item.${kind}`)}`;
+  }
+
+  private use(kind: ItemId | 'snag' | 'bench', target: Parameters<GatherSite['take']>[0]): void {
+    if (kind === 'bench') {
+      openInventory();
+      return;
+    }
+    if (kind === 'snag') {
+      // An axe is the gate rather than a strength check: the point of the axe is that
+      // it opens timber up, and a player without one should be told, not silently
+      // ignored.
+      if (!inventory().hasTool('axe')) return;
+      this.gather.take(target);
+      return;
+    }
+    // Only removed if it actually fitted, so a full bag leaves the item on the ground
+    // instead of destroying it.
+    const stack = kind === 'stick' || kind === 'stone' || kind === 'fibre' ? 2 : 1;
+    if (inventory().add(kind, Math.min(stack, ITEMS[kind].stack)) > 0) this.gather.take(target);
+  }
+
+  /**
    * Whether a point is inside something that would hide a squad member.
    *
    * A bound arrow so it can be handed straight to the crowd without allocating a
@@ -352,6 +431,8 @@ export class ExteriorScene implements GameScene {
     // Withdrawn before the site is torn down, so the hotbar cannot hold a pointer
     // into a disposed world for even one frame.
     setBuildSite(null);
+    setBenchProbe(null);
+    this.gather?.dispose();
     this.buildSite?.dispose();
     this.crowd?.dispose();
     this.character?.dispose();

@@ -347,7 +347,7 @@ export interface BuildSite {
  * length. That one rule is why the grain runs the right way on a wall board, a floor
  * board and a stair tread from a single tile.
  */
-class Carpentry {
+export class Carpentry {
   private readonly pos: number[] = [];
   private readonly nrm: number[] = [];
   private readonly uv: number[] = [];
