@@ -368,8 +368,10 @@
       }
       .buildSlot {
         position: relative;
-        width: 58px;
-        height: 58px;
+        /* Ten slots across, so they are sized to fit a narrow window rather than to
+           look generous on a wide one. */
+        width: 52px;
+        height: 52px;
         padding: 0;
         border: 1px solid rgba(150, 190, 230, 0.22);
         border-radius: 10px;
@@ -400,6 +402,9 @@
         color: #d7ecff;
         font-size: 13px;
         letter-spacing: 0.03em;
+        /* The block is centred by the column's `align-items`, but a name shorter
+           than the box still has to be centred *inside* it. */
+        text-align: center;
         text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
       }
       .buildIcon {
@@ -426,6 +431,12 @@
       }
       #buildCount {
         color: #a9f0c6;
+      }
+      #buildAim:not(:empty) {
+        margin-left: 6px;
+        padding-left: 8px;
+        border-left: 1px solid rgba(255, 209, 102, 0.35);
+        color: #ffd166;
       }
       #squadInvites {
         position: fixed;
@@ -1072,7 +1083,10 @@
     <div id="buildHud" hidden>
       <div id="buildLabel" role="status" aria-live="polite"></div>
       <div id="buildBar" role="toolbar" aria-label="Build pieces"></div>
-      <div id="buildTip"><span id="buildHint"></span> &middot; <span id="buildCount">0</span></div>
+      <div id="buildTip">
+        <span id="buildHint"></span> <span id="buildCount">0</span>
+        <span id="buildAim"></span>
+      </div>
     </div>
 
     <div id="squadInvites" role="status" aria-live="polite"></div>

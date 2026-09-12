@@ -63,6 +63,9 @@ export class BuildBar {
   private readonly label: HTMLElement | null;
   private readonly hint: HTMLElement | null;
   private readonly counter: HTMLElement | null;
+  /** Names the piece the crosshair is on, so removing is never a guess. */
+  private readonly aim: HTMLElement | null;
+  private lastAim = '';
   private allowed = false;
   private icons: string[] = [];
   private readonly engine: Engine;
@@ -72,6 +75,7 @@ export class BuildBar {
     this.root = document.getElementById('buildHud');
     this.bar = document.getElementById('buildBar');
     this.label = document.getElementById('buildLabel');
+    this.aim = document.getElementById('buildAim');
     this.hint = document.getElementById('buildHint');
     this.counter = document.getElementById('buildCount');
     if (this.bar) this.buildSlots();
@@ -111,6 +115,21 @@ export class BuildBar {
       site.place();
       this.refresh();
     });
+
+    // The wheel steps through the pieces, which is how you change what is in hand
+    // without taking a finger off the movement keys. Ten pieces is more than a hand
+    // wants to reach across.
+    window.addEventListener(
+      'wheel',
+      (e) => {
+        if (!site?.active || !this.allowed) return;
+        e.preventDefault();
+        site.cycle(e.deltaY > 0 ? 1 : -1);
+        void this.paintIcons();
+        this.refresh();
+      },
+      { passive: false },
+    );
   }
 
   private buildSlots(): void {
@@ -127,7 +146,7 @@ export class BuildBar {
       slot.title = t(`build.${kind}`);
       slot.innerHTML =
         `<span class="buildIcon" data-slot="${i}"></span>` +
-        `<span class="buildKey">${i + 1}</span>`;
+        `<span class="buildKey">${(i + 1) % 10}</span>`;
       // Selecting by mouse as well as by number key. The bar is only reachable with
       // a cursor while the game has released the mouse, which is exactly when the
       // keys are least convenient.
@@ -171,11 +190,13 @@ export class BuildBar {
     }
     if (!site.active) return;
 
-    // Digits pick a piece. No clash with the squad invite keys: those only listen
-    // while Tab is held, and the player list is not open in build mode.
-    const digit = /^Digit([1-9])$/.exec(e.code);
+    // Digits pick a piece — 1 to 9 and then 0 for the tenth, the way a ten-slot
+    // bar has always been keyed. No clash with the squad invite keys: those only
+    // listen while Tab is held, and the player list is not open in build mode.
+    const digit = /^Digit([0-9])$/.exec(e.code);
     if (digit) {
-      const idx = Number(digit[1]) - 1;
+      const typed = Number(digit[1]);
+      const idx = typed === 0 ? 9 : typed - 1;
       const kind = PIECES[idx];
       if (kind) {
         e.preventDefault();
@@ -235,6 +256,15 @@ export class BuildBar {
     if (!this.root) return;
     const shouldShow = this.allowed && site?.active === true;
     if (this.root.hidden === shouldShow) this.setVisible(shouldShow);
+    if (!shouldShow || !this.aim) return;
+    // What X would take, named, and updated per frame because it changes as the
+    // crosshair moves. One string comparison guards the DOM write.
+    const kind = site?.aimedKind() ?? null;
+    const text = kind ? `${t('build.remove')} ${t(`build.${kind}`)}` : '';
+    if (text !== this.lastAim) {
+      this.lastAim = text;
+      this.aim.textContent = text;
+    }
   }
 
   /**

@@ -1,6 +1,6 @@
 {
   "productName": "Arena Nova",
-  "version": "0.15.3",
+  "version": "0.15.4",
   "identifier": "com.arenanova.app",
   "build": {
     "frontendDist": "../dist",

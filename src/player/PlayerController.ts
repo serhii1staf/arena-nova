@@ -6,8 +6,15 @@ import type { Input } from '../core/Input.ts';
 export interface PlayerCollision {
   /** Resolve horizontal collisions in-place. */
   collide(pos: Vector3): void;
-  /** Ground height at a world XZ. */
-  floorHeightAt(x: number, z: number): number;
+  /**
+   * Ground height at a world XZ.
+   *
+   * `fromY` is the height the question is asked from, so the answer can leave out
+   * surfaces that are above the asker rather than under it. Without it, anything
+   * with a floor over it — a roof, a raised platform — reports as the ground of its
+   * whole column, and walking underneath snatches the body onto the top.
+   */
+  floorHeightAt(x: number, z: number, fromY?: number): number;
   /**
    * Optional: true when a point is inside geometry, so the third-person camera
    * can stop short instead of ending up inside a rock or wall.
@@ -183,7 +190,7 @@ export class PlayerController {
       // request for it: the whole point of passing through walls is being able to
       // go under the map, and this clamp is why noclip only ever worked sideways.
       if (!this.noclip) {
-        const floorY = this.world.floorHeightAt(this.position.x, this.position.z);
+        const floorY = this.world.floorHeightAt(this.position.x, this.position.z, this.position.y);
         if (this.position.y < floorY) this.position.y = floorY;
       }
       this.grounded = false;
@@ -229,7 +236,9 @@ export class PlayerController {
     // rather than being a fixed number, so it scales with speed and cannot let a
     // stationary player sink. The constant floor on top of it is what carries the
     // player down single stair treads without leaving the ground.
-    const floor = this.world.floorHeightAt(this.position.x, this.position.z);
+    // Asked from the body's own height, so a floor overhead is a ceiling rather
+    // than the ground of this column.
+    const floor = this.world.floorHeightAt(this.position.x, this.position.z, this.position.y);
     const wasGrounded = this.grounded;
     const travelled = Math.hypot(this.velocity.x, this.velocity.z) * dt;
     const snapDown = Math.max(cfg.groundSnapMin, travelled * cfg.groundSnapSlope);
@@ -338,7 +347,8 @@ export class PlayerController {
       // being shoved back above the surface while the body is under it — you would
       // be inside the terrain looking at it from outside.
       if (!this.noclip) {
-        const camFloor = this.world.floorHeightAt(this.camScratch.x, this.camScratch.z) + 0.45;
+        const camFloor =
+          this.world.floorHeightAt(this.camScratch.x, this.camScratch.z, this.camScratch.y) + 0.45;
         if (this.camScratch.y < camFloor) this.camScratch.y = camFloor;
       }
       this.camera.position.copy(this.camScratch);

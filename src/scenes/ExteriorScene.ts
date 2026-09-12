@@ -163,9 +163,9 @@ export class ExteriorScene implements GameScene {
       // the answer where it has a floor, a ramp or a roof. The site is created a
       // few lines below, so these are written to survive being asked before it
       // exists.
-      floorHeightAt: (x, z) => {
+      floorHeightAt: (x, z, fromY) => {
         const ground = this.world.floorHeightAt(x, z);
-        return this.buildSite?.heightAt(x, z, ground) ?? ground;
+        return this.buildSite?.heightAt(x, z, ground, fromY) ?? ground;
       },
       blocksCamera: (x, y, z) =>
         this.world.blocksCamera(x, y, z) || (this.buildSite?.blocksCamera(x, y, z) ?? false),
