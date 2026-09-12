@@ -198,7 +198,8 @@ try {
     const sc = window.arena.scene;
     const s = sc.buildSite;
     // The preview is the one mesh with a transparent material; everything else in
-    // the group has been placed.
+    // the group has been placed. Every piece is modelled with its underside on the
+    // floor of its cell, so its origin *is* its base — no per-shape fudge.
     let piece = null;
     s.group.traverse((o) => {
       if (!piece && o.isMesh && o.material?.transparent !== true) piece = o;
@@ -206,9 +207,11 @@ try {
     if (!piece) return null;
     const ground = sc.world.floorHeightAt(piece.position.x, piece.position.z);
     return {
-      base: +(piece.position.y - 2).toFixed(2), // a wall's origin is half a cell up
+      base: +piece.position.y.toFixed(2),
       ground: +ground.toFixed(2),
-      gap: +(piece.position.y - 2 - ground).toFixed(2),
+      gap: +(piece.position.y - ground).toFixed(2),
+      // And the geometry really does start at its origin.
+      geoMinY: +piece.geometry.boundingBox.min.y.toFixed(2),
     };
   });
   console.log(`first wall: ${JSON.stringify(resting)}`);
@@ -253,12 +256,10 @@ try {
     sc.player.update(0.016);
     sc.render(1, 0.016);
     if (!s.place()) return { placed: false };
-    let slab = null;
-    s.group.traverse((o) => {
-      if (o.isMesh && o.geometry?.type === 'BoxGeometry' && o.material?.transparent !== true) {
-        if (Math.abs(o.position.x) > 100) slab = o;
-      }
-    });
+    // The most recently added solid mesh. Identifying pieces by geometry class no
+    // longer works and should not: they are all assembled from the same primitive.
+    const solids = s.group.children.filter((o) => o.isMesh && o.material?.transparent !== true);
+    const slab = solids[solids.length - 1] ?? null;
     if (!slab) return { placed: true, found: false };
     const x = slab.position.x;
     const z = slab.position.z;
@@ -287,12 +288,8 @@ try {
     sc.player.update(0.016);
     sc.render(1, 0.016);
     if (!s.place()) return { placed: false };
-    let wedge = null;
-    s.group.traverse((o) => {
-      if (o.isMesh && o.material?.transparent !== true && o.geometry?.type === 'BufferGeometry') {
-        if (o.position.x < -100) wedge = o;
-      }
-    });
+    const solids = s.group.children.filter((o) => o.isMesh && o.material?.transparent !== true);
+    const wedge = solids[solids.length - 1] ?? null;
     if (!wedge) return { placed: true, found: false };
     const x = wedge.position.x;
     const z = wedge.position.z;
@@ -329,6 +326,221 @@ try {
   });
   console.log(`ramp rises: ${JSON.stringify(rampRises)}`);
 
+  // ---- Every face points outwards -----------------------------------------
+  // The previous ramp and roof were wound inside out, so their outer faces were
+  // back-faces: culled from the only side you ever look at them from, which is why
+  // they appeared transparent and unlit. Checked against the winding itself rather
+  // than by eye, for all six pieces.
+  const winding = await page.evaluate(() => {
+    const s = window.arena.scene.buildSite;
+    const kinds = ['wall', 'floor', 'ramp', 'roof', 'pillar', 'foundation'];
+    const out = {};
+    for (const k of kinds) {
+      const g = s.geometryFor(k);
+      const p = g.getAttribute('position');
+      const n = g.getAttribute('normal');
+      let tris = 0;
+      let inverted = 0;
+      for (let i = 0; i + 2 < p.count; i += 3) {
+        const ax = p.getX(i);
+        const ay = p.getY(i);
+        const az = p.getZ(i);
+        const ex1 = p.getX(i + 1) - ax;
+        const ey1 = p.getY(i + 1) - ay;
+        const ez1 = p.getZ(i + 1) - az;
+        const ex2 = p.getX(i + 2) - ax;
+        const ey2 = p.getY(i + 2) - ay;
+        const ez2 = p.getZ(i + 2) - az;
+        // Winding normal, against the normal the geometry declares.
+        const cx = ey1 * ez2 - ez1 * ey2;
+        const cy = ez1 * ex2 - ex1 * ez2;
+        const cz = ex1 * ey2 - ey1 * ex2;
+        const len = Math.hypot(cx, cy, cz);
+        if (len < 1e-9) continue;
+        tris++;
+        const dot = (cx * n.getX(i) + cy * n.getY(i) + cz * n.getZ(i)) / len;
+        if (dot < 0.9) inverted++;
+      }
+      out[k] = { tris, inverted };
+    }
+    return out;
+  });
+  console.log(`winding: ${JSON.stringify(winding)}`);
+
+  // ---- The wall's hitbox is a wall, not a bubble ---------------------------
+  // A wall is four metres wide and a fifth of a metre thick. Describing it with a
+  // circle wide enough to cover its width stopped the player two and a half metres
+  // short of it from every direction, which is what "the hitbox is enormous" meant.
+  const hitbox = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    s.select('wall');
+    sc.player.spawn(200, 200, 0);
+    sc.player.pitch = 0;
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const solids = s.group.children.filter((o) => o.isMesh && o.material?.transparent !== true);
+    const wall = solids[solids.length - 1] ?? null;
+    if (!wall) return { placed: true, found: false };
+    const { x, y, z } = wall.position;
+    // The wall may have been rotated by an earlier check, so the axis it is thin on
+    // is derived from the piece rather than assumed. Its local +Z is the thin one;
+    // a quarter turn about Y sends that to (sin ry, 0, cos ry).
+    const ry = wall.rotation.y;
+    const nx = Math.sin(ry);
+    const nz = Math.cos(ry);
+    // Along the wall's face, perpendicular to the above.
+    const tx = nz;
+    const tz = -nx;
+    // A plain object with the fields `collide` touches: it only reads and writes
+    // x, y and z, so the probe does not need to build a real Vector3.
+    const walkInto = (from) => {
+      const p = { x: x + nx * from, y: y + 1, z: z + nz * from };
+      // Stepped in repeatedly, as the controller does every frame you hold forward.
+      const step = 0.12 * Math.sign(from);
+      for (let i = 0; i < 60; i++) {
+        p.x -= nx * step;
+        p.z -= nz * step;
+        s.collide(p, 0.4);
+      }
+      // Distance from the wall's own plane, which is the only distance that matters.
+      return +Math.abs((p.x - x) * nx + (p.z - z) * nz).toFixed(2);
+    };
+    return {
+      placed: true,
+      found: true,
+      turn: +ry.toFixed(2),
+      // How close you end up after walking straight at the wall from either side.
+      fromFront: walkInto(6),
+      fromBack: walkInto(-6),
+      // And a body beside the wall, past the end of its four-metre span, must not
+      // be touched at all.
+      pastTheEnd: (() => {
+        const sx = x + tx * 3.2 + nx * 0.05;
+        const sz = z + tz * 3.2 + nz * 0.05;
+        const p = { x: sx, y: y + 1, z: sz };
+        s.collide(p, 0.4);
+        return +Math.hypot(p.x - sx, p.z - sz).toFixed(3);
+      })(),
+    };
+  });
+  console.log(`wall hitbox: ${JSON.stringify(hitbox)}`);
+
+  // ---- The roof can be stood on -------------------------------------------
+  const roofSolid = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    s.select('roof');
+    sc.player.spawn(-200, -200, 0);
+    sc.player.pitch = 0;
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const solids = s.group.children.filter((o) => o.isMesh && o.material?.transparent !== true);
+    const roof = solids[solids.length - 1] ?? null;
+    if (!roof) return { placed: true, found: false };
+    const x = roof.position.x;
+    const z = roof.position.z;
+    const ground = sc.world.floorHeightAt(x, z);
+    // A gable has a ridge, so it is flat along one axis and a tent across the other.
+    // Both are sampled and the tent is whichever one it turns out to be, because the
+    // piece may have been rotated.
+    const along = (axis) =>
+      [-1.9, -1, 0, 1, 1.9].map(
+        (d) =>
+          +(
+            s.heightAt(axis === 'x' ? x + d : x, axis === 'z' ? z + d : z, ground) - ground
+          ).toFixed(2),
+      );
+    const ax = along('x');
+    const az = along('z');
+    const isTent = (v) => v[2] > v[1] && v[1] > v[0] && v[2] > v[3] && v[3] > v[4];
+    const profile = isTent(ax) ? ax : az;
+    return { placed: true, found: true, x: ax, z: az, profile, ridge: profile[2] };
+  });
+  console.log(`roof: ${JSON.stringify(roofSolid)}`);
+
+  // ---- Wood, not tinted stone ---------------------------------------------
+  const wood = await page.evaluate(async () => {
+    const s = window.arena.scene.buildSite;
+    let mesh = null;
+    s.group.traverse((o) => {
+      if (o.isMesh && o.material?.transparent !== true) mesh = o;
+    });
+    const map = mesh?.material?.map;
+    const src = map?.image;
+    if (!src) return { hasMap: false };
+    const c = document.createElement('canvas');
+    c.width = src.width;
+    c.height = src.height;
+    const g = c.getContext('2d');
+    g.drawImage(src, 0, 0);
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    let r = 0;
+    let gr = 0;
+    let b = 0;
+    const n = d.length / 4;
+    // Variation along a row against variation down a column: grain running one way
+    // makes a wood texture measurably smoother along the fibres than across them.
+    let dU = 0;
+    let dV = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      r += d[i];
+      gr += d[i + 1];
+      b += d[i + 2];
+    }
+    const at = (x, y) => d[(y * c.width + x) * 4];
+    for (let y = 4; y < c.height - 4; y += 3) {
+      for (let x = 4; x < c.width - 4; x += 3) {
+        dU += Math.abs(at(x + 3, y) - at(x, y));
+        dV += Math.abs(at(x, y + 3) - at(x, y));
+      }
+    }
+    return {
+      hasMap: true,
+      size: c.width,
+      r: Math.round(r / n),
+      g: Math.round(gr / n),
+      b: Math.round(b / n),
+      alongGrain: +(dU / Math.max(1, dV)).toFixed(2),
+      hasNormal: !!mesh.material.normalMap,
+      hasRough: !!mesh.material.roughnessMap,
+    };
+  });
+  console.log(`wood: ${JSON.stringify(wood)}`);
+
+  // ---- The name is above the bar, not in the slots -------------------------
+  const naming = await page.evaluate(() => {
+    const s = window.arena.scene.buildSite;
+    s.select('ramp');
+    return {
+      insideSlots: document.querySelectorAll('.buildSlot .buildName').length,
+      label: document.getElementById('buildLabel')?.textContent?.trim() ?? '',
+      labelAbove: (() => {
+        const l = document.getElementById('buildLabel');
+        const b = document.getElementById('buildBar');
+        if (!l || !b) return false;
+        return l.getBoundingClientRect().bottom <= b.getBoundingClientRect().top + 1;
+      })(),
+    };
+  });
+  // The label follows the piece in hand, so it has to change when the piece does.
+  await page.keyboard.press('Digit3');
+  await page.waitForTimeout(250);
+  const labelRamp = await page.evaluate(
+    () => document.getElementById('buildLabel')?.textContent?.trim() ?? '',
+  );
+  await page.keyboard.press('Digit1');
+  await page.waitForTimeout(250);
+  const labelWall = await page.evaluate(
+    () => document.getElementById('buildLabel')?.textContent?.trim() ?? '',
+  );
+  console.log(`naming: ${JSON.stringify(naming)} ramp="${labelRamp}" wall="${labelWall}"`);
+  await page.screenshot({ path: join(here, 'build_bar.png') });
+
   // ---- Removing and clearing ----------------------------------------------
   const removed = await page.evaluate(() => {
     const s = window.arena.scene.buildSite;
@@ -360,7 +572,7 @@ try {
   const enterWorks = enterPlace.to === enterPlace.from + 1;
   // On the ground, not a level above it. A wall's underside must sit within a few
   // centimetres of the terrain it was placed on.
-  const restsOnGround = !!resting && Math.abs(resting.gap) < 0.75;
+  const restsOnGround = !!resting && Math.abs(resting.gap) < 0.35 && Math.abs(resting.geoMinY) < 0.01;
   const digitSelects = picked.selected === 'floor' && picked.lit === 1;
   const floorWorks =
     floorStands.found === true &&
@@ -368,6 +580,36 @@ try {
     floorStands.lift < 1 &&
     floorStands.awayUnchanged === true;
   const rampWorks = rampRises.found === true && rampRises.rising === true && rampRises.span > 2.5;
+  // Not one inverted triangle anywhere. This is the check that would have caught
+  // the see-through ramp and roof.
+  const facesOutward =
+    Object.values(winding).every((w) => w.tris > 0 && w.inverted === 0) &&
+    Object.keys(winding).length === 6;
+  // Half a wall's thickness plus the body radius is 0.5 m. Anything near that is a
+  // wall; 2.4 m was the bubble.
+  const hitboxThin =
+    hitbox.found === true &&
+    hitbox.fromFront < 0.75 &&
+    hitbox.fromBack < 0.75 &&
+    hitbox.pastTheEnd < 0.01;
+  const roofWalkable =
+    roofSolid.found === true &&
+    roofSolid.ridge > 1.8 &&
+    roofSolid.profile[0] < 0.5 &&
+    roofSolid.profile[4] < 0.5 &&
+    Math.abs(roofSolid.profile[1] - roofSolid.profile[3]) < 0.2;
+  // Warm and directional: brown rather than grey, and smoother along the fibres
+  // than across them, which is what makes it read as timber at all.
+  const isWood =
+    wood.hasMap === true &&
+    wood.hasNormal === true &&
+    wood.hasRough === true &&
+    wood.r > 110 &&
+    wood.r > wood.g + 15 &&
+    wood.g > wood.b + 15 &&
+    wood.alongGrain < 0.9;
+  const nameAbove =
+    naming.insideSlots === 0 && naming.labelAbove === true && labelRamp !== '' && labelWall !== '' && labelRamp !== labelWall;
   const removeWorks = removed.ok === true && removed.after === removed.before - 1;
   const clearWorks = cleared === 0;
   const barCloses = !closed.active && !closed.hudShown;
@@ -389,6 +631,21 @@ try {
     rampWorks,
     `x=${JSON.stringify(rampRises.x)} z=${JSON.stringify(rampRises.z)}`,
   );
+  line(
+    'every face points outward:',
+    facesOutward,
+    Object.entries(winding)
+      .map(([k, w]) => `${k}:${w.inverted}/${w.tris}`)
+      .join(' '),
+  );
+  line('wall hitbox is thin:', hitboxThin, `stops at ${hitbox.fromFront}m / ${hitbox.fromBack}m`);
+  line(
+    'roof can be stood on:',
+    roofWalkable,
+    `x=${JSON.stringify(roofSolid.x)} z=${JSON.stringify(roofSolid.z)}`,
+  );
+  line('timber, grained and warm:', isWood, `rgb(${wood.r},${wood.g},${wood.b}) grain=${wood.alongGrain}`);
+  line('name sits above the bar:', nameAbove, `"${labelRamp}" / "${labelWall}"`);
   line('X removes one piece:', removeWorks);
   line('clear empties the site:', clearWorks);
   line('B closes the bar:', barCloses);
@@ -407,6 +664,11 @@ try {
     digitSelects &&
     floorWorks &&
     rampWorks &&
+    facesOutward &&
+    hitboxThin &&
+    roofWalkable &&
+    isWood &&
+    nameAbove &&
     removeWorks &&
     clearWorks &&
     barCloses &&

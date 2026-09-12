@@ -59,6 +59,8 @@ export class BuildBar {
   /** Just the row of slots. */
   private readonly bar: HTMLElement | null;
   private readonly slots: HTMLButtonElement[] = [];
+  /** Name of the piece in hand, shown above the bar. */
+  private readonly label: HTMLElement | null;
   private readonly hint: HTMLElement | null;
   private readonly counter: HTMLElement | null;
   private allowed = false;
@@ -69,6 +71,7 @@ export class BuildBar {
     this.engine = engine;
     this.root = document.getElementById('buildHud');
     this.bar = document.getElementById('buildBar');
+    this.label = document.getElementById('buildLabel');
     this.hint = document.getElementById('buildHint');
     this.counter = document.getElementById('buildCount');
     if (this.bar) this.buildSlots();
@@ -118,10 +121,13 @@ export class BuildBar {
       slot.type = 'button';
       slot.className = 'buildSlot';
       slot.dataset.kind = kind;
+      // Icon and key number only. The name lives above the bar, on one label that
+      // shows whichever piece is in hand — six names crammed into six squares is
+      // six times the text for one piece of information.
+      slot.title = t(`build.${kind}`);
       slot.innerHTML =
         `<span class="buildIcon" data-slot="${i}"></span>` +
-        `<span class="buildKey">${i + 1}</span>` +
-        `<span class="buildName">${t(`build.${kind}`)}</span>`;
+        `<span class="buildKey">${i + 1}</span>`;
       // Selecting by mouse as well as by number key. The bar is only reachable with
       // a cursor while the game has released the mouse, which is exactly when the
       // keys are least convenient.
@@ -214,6 +220,7 @@ export class BuildBar {
     for (const slot of this.slots) {
       slot.classList.toggle('on', slot.dataset.kind === selected);
     }
+    if (this.label && selected) this.label.textContent = t(`build.${selected}`);
     if (this.counter) this.counter.textContent = String(site?.count() ?? 0);
     if (this.hint) this.hint.textContent = t('build.hint');
   }
@@ -283,8 +290,8 @@ function renderIcons(from: BuildSite): string[] {
     // Flat colour, no maps: the world texture is 512px of grain that turns to noise
     // at icon size, and the silhouette is the whole point.
     const material = new MeshStandardMaterial({
-      color: 0xc08b52,
-      roughness: 0.85,
+      color: 0xb07c46,
+      roughness: 0.9,
       metalness: 0,
     });
 
@@ -296,11 +303,16 @@ function renderIcons(from: BuildSite): string[] {
     const urls: string[] = [];
     const mesh = new Mesh(undefined, material);
     scene.add(mesh);
+    const centre = new Vector3();
     for (const kind of PIECES) {
-      mesh.geometry = from.geometryFor(kind);
-      // Walls and pillars are drawn standing on the floor of their cell, the way
-      // they are placed, so the icon matches what appears in the world.
-      mesh.position.y = kind === 'wall' || kind === 'pillar' ? -BUILD_GRID / 2 : 0;
+      const geo = from.geometryFor(kind);
+      mesh.geometry = geo;
+      // Centred on its own bounds. Every piece is modelled with its underside on
+      // the floor of its cell, and they are not the same height — a wall is four
+      // metres and a floor is a third of one — so a shared offset would put some
+      // of them out of frame.
+      geo.boundingBox?.getCenter(centre);
+      mesh.position.set(-centre.x, -centre.y, -centre.z);
       renderer.render(scene, camera);
       urls.push(renderer.domElement.toDataURL('image/png'));
     }

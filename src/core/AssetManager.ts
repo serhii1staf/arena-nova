@@ -105,6 +105,72 @@ export class AssetManager {
     return out;
   }
 
+  /**
+   * The same fractal noise, but with a separate frequency per axis, so the features
+   * can be stretched instead of round.
+   *
+   * Wood needs this and nothing else does: fibres are the same noise as any blotch,
+   * sampled a few cells across and a hundred cells along. Both frequencies still
+   * wrap on their own period, so the tile stays seamless in both directions.
+   */
+  private fbmAnisotropic(
+    size: number,
+    freqX: number,
+    freqY: number,
+    octaves: number,
+    seed: number,
+  ): Float32Array {
+    const out = new Float32Array(size * size);
+
+    const latticeValue = (xi: number, yi: number, px: number, py: number): number => {
+      const x = ((xi % px) + px) % px;
+      const y = ((yi % py) + py) % py;
+      let h = (x * 374761393 + y * 668265263 + seed * 1442695040) | 0;
+      h = Math.imul(h ^ (h >>> 13), 1274126177);
+      h = h ^ (h >>> 16);
+      return (h >>> 0) / 4294967295;
+    };
+
+    const smooth = (t: number): number => t * t * (3 - 2 * t);
+
+    const sample = (fx: number, fy: number, px: number, py: number): number => {
+      const gx = fx * px;
+      const gy = fy * py;
+      const x0 = Math.floor(gx);
+      const y0 = Math.floor(gy);
+      const tx = smooth(gx - x0);
+      const ty = smooth(gy - y0);
+      const v00 = latticeValue(x0, y0, px, py);
+      const v10 = latticeValue(x0 + 1, y0, px, py);
+      const v01 = latticeValue(x0, y0 + 1, px, py);
+      const v11 = latticeValue(x0 + 1, y0 + 1, px, py);
+      const a = v00 + (v10 - v00) * tx;
+      const b = v01 + (v11 - v01) * tx;
+      return a + (b - a) * ty;
+    };
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const fx = x / size;
+        const fy = y / size;
+        let amp = 0.5;
+        let px = freqX;
+        let py = freqY;
+        let sum = 0;
+        let norm = 0;
+        for (let o = 0; o < octaves; o++) {
+          sum += sample(fx, fy, px, py) * amp;
+          norm += amp;
+          amp *= 0.5;
+          px *= 2;
+          py *= 2;
+        }
+        out[y * size + x] = sum / norm;
+      }
+    }
+    return out;
+  }
+
   private makeCanvas(size: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } {
     const canvas = document.createElement('canvas');
     canvas.width = size;
@@ -218,6 +284,94 @@ export class AssetManager {
 
       const normalMap = this.finalizeTexture(this.heightToNormal(height, size, 2.2), false, repeat);
 
+      return { map, normalMap, roughnessMap };
+    });
+  }
+
+  /**
+   * Sawn timber, for built structures.
+   *
+   * Grain only — no board edges drawn into the texture. The construction pieces are
+   * modelled as actual separate planks, so a seam painted here would land in the
+   * middle of a board and read as a crack in the wood. What this has to supply is
+   * what geometry cannot: long fibres, the colour drift from one part of a board to
+   * another, and knots.
+   *
+   * The grain runs along U, and the pieces lay their UVs out so U follows each
+   * plank's long axis. That is the whole reason the fibres look right on a wall, a
+   * floor and a ramp from one 512px tile.
+   */
+  plank(repeat = 1): StoneTextureSet {
+    return this.cached(`plank:${repeat}`, () => {
+      const size = 512;
+      // Stretched hard along U: sampling a square noise field at 3 by 96 is what
+      // turns blobs into fibres running the length of the board.
+      const fibre = this.fbmAnisotropic(size, 3, 96, 5, 23);
+      const coarse = this.fbmAnisotropic(size, 2, 14, 4, 71);
+      const speck = this.fbm(size, 128, 2, 131);
+      const knotField = this.fbm(size, 4, 2, 199);
+
+      const { canvas, ctx } = this.makeCanvas(size);
+      const img = ctx.createImageData(size, size);
+      const height = new Float32Array(size * size);
+
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = y * size + x;
+          const f = fibre[i]!;
+          const c = coarse[i]!;
+          const s = speck[i]!;
+
+          // Knots: a few tight dark whorls where a branch left the trunk. Built
+          // from the low-frequency field so they sit at plausible intervals rather
+          // than on a grid, and squeezed along U because a knot in sawn timber is
+          // an ellipse, not a circle.
+          const k = knotField[i]!;
+          const knot = Math.pow(Math.max(0, k - 0.72) / 0.28, 0.6);
+          // Rings inside the knot.
+          const ring = knot > 0 ? 0.5 + 0.5 * Math.cos(knot * 26) : 0;
+
+          // Height: fibres stand slightly proud, knots sink.
+          height[i] = f * 0.55 + c * 0.3 + s * 0.15 - knot * 0.7 - ring * knot * 0.25;
+
+          // Warm pine, darkened along the grain lines.
+          const grain = Math.pow(f, 1.7);
+          let r = 158 + c * 46 - grain * 62 + s * 10;
+          let g = 118 + c * 40 - grain * 58 + s * 8;
+          let b = 74 + c * 30 - grain * 44 + s * 6;
+
+          // Knots are much darker and slightly redder than the surrounding wood.
+          const kd = knot * (0.55 + ring * 0.3);
+          r = r * (1 - kd) + 74 * kd;
+          g = g * (1 - kd) + 48 * kd;
+          b = b * (1 - kd) + 28 * kd;
+
+          const j = i * 4;
+          img.data[j] = Math.max(0, Math.min(255, r));
+          img.data[j + 1] = Math.max(0, Math.min(255, g));
+          img.data[j + 2] = Math.max(0, Math.min(255, b));
+          img.data[j + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      const map = this.finalizeTexture(canvas, true, repeat);
+
+      // Rough all over — this is unfinished timber — but the raised fibres catch a
+      // little more light than the pits between them, and knots are denser and
+      // therefore smoother.
+      const { canvas: rc, ctx: rctx } = this.makeCanvas(size);
+      const rimg = rctx.createImageData(size, size);
+      for (let i = 0; i < size * size; i++) {
+        const knot = Math.pow(Math.max(0, knotField[i]! - 0.72) / 0.28, 0.6);
+        const rough = 242 - fibre[i]! * 26 - knot * 60;
+        const j = i * 4;
+        rimg.data[j] = rimg.data[j + 1] = rimg.data[j + 2] = Math.max(70, Math.min(255, rough));
+        rimg.data[j + 3] = 255;
+      }
+      rctx.putImageData(rimg, 0, 0);
+      const roughnessMap = this.finalizeTexture(rc, false, repeat);
+
+      const normalMap = this.finalizeTexture(this.heightToNormal(height, size, 1.9), false, repeat);
       return { map, normalMap, roughnessMap };
     });
   }

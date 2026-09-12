@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "arena-nova"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "serde",
  "serde_json",

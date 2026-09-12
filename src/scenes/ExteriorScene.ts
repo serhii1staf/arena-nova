@@ -152,15 +152,23 @@ export class ExteriorScene implements GameScene {
     this.godRaysSource = this.dayNight.sunMesh;
 
     this.player = new PlayerController(this.camera, ctx.input, {
-      collide: (p) => this.world.collide(p),
+      // World first: it clamps to the map and walks the body off the shoreline.
+      // Built pieces push afterwards, so a wall cannot shove you into the sea only
+      // for the shoreline pass to shove you back through the wall.
+      collide: (p) => {
+        this.world.collide(p);
+        this.buildSite?.collide(p, 0.4);
+      },
       // Composed, not replaced: the world answers first and the build site raises
-      // the answer where it has a floor or a ramp. The site is created a few lines
-      // below, so this is written to survive being asked before it exists.
+      // the answer where it has a floor, a ramp or a roof. The site is created a
+      // few lines below, so these are written to survive being asked before it
+      // exists.
       floorHeightAt: (x, z) => {
         const ground = this.world.floorHeightAt(x, z);
         return this.buildSite?.heightAt(x, z, ground) ?? ground;
       },
-      blocksCamera: (x, y, z) => this.world.blocksCamera(x, y, z),
+      blocksCamera: (x, y, z) =>
+        this.world.blocksCamera(x, y, z) || (this.buildSite?.blocksCamera(x, y, z) ?? false),
     });
     this.player.spawn(this.world.spawn.x, this.world.spawn.z, this.world.spawn.yaw);
 
@@ -179,7 +187,7 @@ export class ExteriorScene implements GameScene {
     // unloaded when the player walks away from them — but it registers its
     // colliders in the world's own registry, so what you build is as solid as what
     // grew there.
-    this.buildSite = createBuildSite(ctx.assets, this.world.registry);
+    this.buildSite = createBuildSite(ctx.assets);
     this.scene.add(this.buildSite.group);
     setBuildSite(this.buildSite);
 
