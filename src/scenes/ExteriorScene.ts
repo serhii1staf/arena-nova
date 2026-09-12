@@ -153,7 +153,13 @@ export class ExteriorScene implements GameScene {
 
     this.player = new PlayerController(this.camera, ctx.input, {
       collide: (p) => this.world.collide(p),
-      floorHeightAt: (x, z) => this.world.floorHeightAt(x, z),
+      // Composed, not replaced: the world answers first and the build site raises
+      // the answer where it has a floor or a ramp. The site is created a few lines
+      // below, so this is written to survive being asked before it exists.
+      floorHeightAt: (x, z) => {
+        const ground = this.world.floorHeightAt(x, z);
+        return this.buildSite?.heightAt(x, z, ground) ?? ground;
+      },
       blocksCamera: (x, y, z) => this.world.blocksCamera(x, y, z),
     });
     this.player.spawn(this.world.spawn.x, this.world.spawn.z, this.world.spawn.yaw);

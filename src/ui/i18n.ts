@@ -34,7 +34,7 @@ const STRINGS = {
     'build.roof': 'Roof',
     'build.pillar': 'Pillar',
     'build.foundation': 'Base',
-    'build.hint': 'Click place · R turn · X remove · Shift+C clear · B exit · placed:',
+    'build.hint': 'Click or Enter place · R turn · X remove · Shift+C clear · B exit · placed:',
 
     'players.title': 'Players',
     'players.admin': 'ADMIN',
@@ -137,7 +137,7 @@ const STRINGS = {
     'build.roof': 'Крыша',
     'build.pillar': 'Столб',
     'build.foundation': 'Основа',
-    'build.hint': 'ЛКМ ставить · R поворот · X убрать · Shift+C всё · B выход · построено:',
+    'build.hint': 'ЛКМ или Enter ставить · R поворот · X убрать · Shift+C всё · B выход · построено:',
 
     'players.title': 'Игроки',
     'players.admin': 'АДМИН',

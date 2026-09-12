@@ -59,6 +59,36 @@ interface Placed {
   mesh: Mesh;
   kind: PieceKind;
   key: string;
+  /** World height of the cell floor this piece stands on. */
+  level: number;
+  /** Quarter turns about Y, as placed. */
+  turn: number;
+}
+
+/**
+ * How far a piece's own origin sits above the floor of its cell, so that its
+ * underside lands flush on that floor.
+ *
+ * Box geometries are centred on their origin, so they need half their height;
+ * the hand-built ramp starts at `-t` and the pyramid at 0.
+ */
+function baseOffset(kind: PieceKind): number {
+  switch (kind) {
+    case 'wall':
+    case 'pillar':
+      return BUILD_GRID / 2;
+    case 'floor':
+      return SLAB / 2;
+    case 'foundation':
+      return (SLAB * 3) / 2;
+    // The wedge's sloped face starts at its own origin and its underside hangs
+    // `t` below. Zero, so the walkable face begins level with the cell floor and
+    // you can step straight onto it; the buried underside is never seen.
+    case 'ramp':
+      return 0;
+    case 'roof':
+      return 0;
+  }
 }
 
 export interface BuildSite {
@@ -83,6 +113,13 @@ export interface BuildSite {
    * direction; cheap, and does nothing at all while inactive.
    */
   update(eye: Vector3, forward: Vector3, floorAt: (x: number, z: number) => number): void;
+  /**
+   * Floor height at a point, taking placed pieces into account. Given the height
+   * the world reports there, returns whichever is higher. This is what makes a
+   * floor stand on and a ramp walkable — the collider registry cannot express
+   * either shape.
+   */
+  heightAt(x: number, z: number, ground: number): number;
   /** The geometries, so the hotbar can draw an icon of each. */
   geometryFor(kind: PieceKind): BufferGeometry;
   dispose(): void;
@@ -193,6 +230,13 @@ export function createBuildSite(assets: AssetManager, registry: PropRegistry): B
   };
 
   const placed = new Map<string, Placed>();
+  /**
+   * Pieces grouped by the grid column they stand in, so asking how high the floor
+   * is at a point costs one map lookup rather than a walk over everything built.
+   */
+  const columns = new Map<string, Placed[]>();
+  const columnKey = (x: number, z: number): string =>
+    `${Math.round(x / G)}|${Math.round(z / G)}`;
   let selected: PieceKind = 'wall';
   let quarter = 0;
   let active = false;
@@ -245,16 +289,27 @@ export function createBuildSite(assets: AssetManager, registry: PropRegistry): B
     // Vertical snap is relative to the ground under the target, so a structure
     // follows the terrain instead of floating off it on a slope. Half-cell steps,
     // which is what lets a wall sit on a floor and a floor cap a wall.
+    //
+    // The tier comes from *how far you looked up*, and the base from the terrain
+    // under the target. Measuring the aim height against the ground instead mixed
+    // the two together: eye height is about 1.7 m, so looking straight ahead
+    // already read as most of a tier, and whether it tipped over depended on how
+    // the ground happened to fall away in front of you. Pieces landed flush on
+    // level ground and a tier up on a slope, from the same gesture.
+    //
+    // Taking the rise from the view direction alone makes it predictable: level
+    // gaze is always tier 0 and always flush, and it takes a deliberate look
+    // upwards — about 17 degrees — to move up a tier. Floored, so tier 0 holds
+    // across the whole range where the player is plainly looking straight ahead.
     const ground = floorAt(at.x, at.z);
     const step = G / 2;
-    at.y = ground + Math.max(0, Math.round((at.y - ground) / step)) * step;
+    const tier = Math.max(0, Math.floor((at.y - eye.y) / step));
+    at.y = ground + tier * step;
 
     ghost.geometry = geometries[selected];
     ghost.position.copy(at);
     ghost.rotation.set(0, (quarter * Math.PI) / 2, 0);
-    // Floors and roofs sit *on* their level rather than centred in it.
-    if (selected === 'floor' || selected === 'foundation') ghost.position.y += SLAB;
-    if (selected === 'wall' || selected === 'pillar') ghost.position.y += G / 2;
+    ghost.position.y += baseOffset(selected);
 
     free = !placed.has(cellKey(selected, at, quarter));
     ghost.material = free ? ghostOk : ghostBad;
@@ -272,21 +327,83 @@ export function createBuildSite(assets: AssetManager, registry: PropRegistry): B
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     group.add(mesh);
-    placed.set(key, { mesh, kind: selected, key });
+    const entry: Placed = { mesh, kind: selected, key, level: at.y, turn: quarter };
+    placed.set(key, entry);
+    const col = columnKey(at.x, at.z);
+    const bucket = columns.get(col);
+    if (bucket) bucket.push(entry);
+    else columns.set(col, [entry]);
 
-    // Solid, so you can stand on what you build. Registered as a circle because
-    // that is all the registry holds; for a grid piece the inscribed radius is the
-    // honest choice — an outscribed one would stop you a metre from a wall.
-    const top = mesh.position.y + (selected === 'wall' || selected === 'pillar' ? G / 2 : SLAB);
-    registry.add(`build:${key}`, {
-      x: mesh.position.x,
-      z: mesh.position.z,
-      r: selected === 'pillar' ? 0.4 : G * 0.5,
-      top,
-      blockTop: selected === 'wall' ? mesh.position.y + G / 2 : top,
-      solid: selected === 'wall' || selected === 'pillar',
-    });
+    // Only the upright pieces go into the collider registry, and only to *block*.
+    //
+    // The registry holds circles with one flat top each, which is the right shape
+    // for a tree trunk and the wrong shape for a floor — and hopeless for a ramp,
+    // where every point along the slope is at a different height. Standing is
+    // handled by `heightAt` instead, which knows each piece's exact cell and can
+    // work the surface out properly. The inscribed radius, not the outscribed one:
+    // outscribed would stop you a metre short of every wall.
+    if (selected === 'wall' || selected === 'pillar') {
+      registry.add(`build:${key}`, {
+        x: mesh.position.x,
+        z: mesh.position.z,
+        r: selected === 'pillar' ? 0.4 : G * 0.5,
+        top: at.y,
+        blockTop: at.y + G,
+        solid: true,
+      });
+    }
     return true;
+  };
+
+  /**
+   * The walkable surface of one piece at a point, or `null` if that point is not
+   * over it — or if the piece is not something you stand on.
+   */
+  const surfaceAt = (p: Placed, x: number, z: number): number | null => {
+    const s = G / 2;
+    const dx = x - p.mesh.position.x;
+    const dz = z - p.mesh.position.z;
+    if (p.kind === 'floor' || p.kind === 'foundation') {
+      if (Math.abs(dx) > s || Math.abs(dz) > s) return null;
+      return p.level + (p.kind === 'floor' ? SLAB : SLAB * 3);
+    }
+    if (p.kind !== 'ramp') return null; // walls, pillars and pyramids are not floors
+    // Undo the piece's own rotation, so the slope can be measured in the frame the
+    // geometry was built in — where it always rises along +Z, from 0 to one cell.
+    const ang = (p.turn * Math.PI) / 2;
+    const c = Math.cos(ang);
+    const sn = Math.sin(ang);
+    const lx = c * dx - sn * dz;
+    const lz = sn * dx + c * dz;
+    if (Math.abs(lx) > s || Math.abs(lz) > s) return null;
+    return p.level + Math.max(0, Math.min(G, lz + s));
+  };
+
+  /**
+   * Floor height at a point, given the height the world already reports there.
+   * One map lookup: pieces are bucketed by grid column, so this does not care how
+   * much has been built, and it returns `ground` untouched when nothing has.
+   */
+  const heightAt = (x: number, z: number, ground: number): number => {
+    if (placed.size === 0) return ground;
+    const list = columns.get(columnKey(x, z));
+    if (!list) return ground;
+    let h = ground;
+    for (const p of list) {
+      const surface = surfaceAt(p, x, z);
+      if (surface !== null && surface > h) h = surface;
+    }
+    return h;
+  };
+
+  /** Takes a piece out of its column bucket, dropping the bucket once empty. */
+  const unbucket = (p: Placed): void => {
+    const col = columnKey(p.mesh.position.x, p.mesh.position.z);
+    const bucket = columns.get(col);
+    if (!bucket) return;
+    const i = bucket.indexOf(p);
+    if (i >= 0) bucket.splice(i, 1);
+    if (bucket.length === 0) columns.delete(col);
   };
 
   const removeAimed = (): boolean => {
@@ -306,6 +423,7 @@ export function createBuildSite(assets: AssetManager, registry: PropRegistry): B
     if (!best || bestD > (G * 1.6) ** 2) return false;
     group.remove(best.mesh);
     registry.removeOwner(`build:${best.key}`);
+    unbucket(best);
     placed.delete(best.key);
     return true;
   };
@@ -316,6 +434,7 @@ export function createBuildSite(assets: AssetManager, registry: PropRegistry): B
       registry.removeOwner(`build:${p.key}`);
     }
     placed.clear();
+    columns.clear();
   };
 
   return {
@@ -341,6 +460,7 @@ export function createBuildSite(assets: AssetManager, registry: PropRegistry): B
     count: () => placed.size,
     clear,
     update,
+    heightAt,
     geometryFor: (kind) => geometries[kind],
     dispose: () => {
       clear();

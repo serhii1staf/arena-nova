@@ -9,6 +9,7 @@ import {
   Vector3,
   WebGLRenderer,
 } from 'three';
+import type { Engine } from '../core/Engine.ts';
 import { gameSession } from '../net/session.ts';
 import { BUILD_GRID, PIECES, type BuildSite, type PieceKind } from '../world/Building.ts';
 import { t } from './i18n.ts';
@@ -62,8 +63,10 @@ export class BuildBar {
   private readonly counter: HTMLElement | null;
   private allowed = false;
   private icons: string[] = [];
+  private readonly engine: Engine;
 
-  constructor() {
+  constructor(engine: Engine) {
+    this.engine = engine;
     this.root = document.getElementById('buildHud');
     this.bar = document.getElementById('buildBar');
     this.hint = document.getElementById('buildHint');
@@ -82,11 +85,26 @@ export class BuildBar {
     });
 
     window.addEventListener('keydown', (e) => this.onKey(e));
-    // Placement is on the primary button, which only counts while the game holds
-    // the mouse — otherwise every click on the bar itself would also place a piece.
-    window.addEventListener('mousedown', (e) => {
+    // Placement is on the primary button, and only counts while the game holds the
+    // mouse — which also happens to be exactly when the hotbar is unreachable, so a
+    // click meant for a slot can never place a piece as well.
+    //
+    // Gated on the engine's own capture flag rather than on
+    // `document.pointerLockElement`: the desktop shell confines the cursor itself
+    // and deliberately never enters Pointer Lock (so Chromium never shows its
+    // "press Esc to exit" banner), which means that property is *always* null in
+    // the installed app. Reading it here disabled building entirely outside the
+    // browser. `input.locked` is the one flag both capture paths keep up to date.
+    // `pointerdown`, which is the event this codebase already trusts at window
+    // level (the audio unlock listens for the same one), and which arrives from
+    // mouse, pen and touch alike.
+    window.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || !site?.active) return;
-      if (document.pointerLockElement === null) return;
+      // Either the game holds the mouse, or the click landed on the canvas — two
+      // independent ways of saying "this click was aimed at the world". Neither can
+      // match a click on a hotbar slot, so a slot press cannot also place a piece.
+      const onCanvas = (e.target as HTMLElement | null)?.tagName === 'CANVAS';
+      if (!this.engine.input.locked && !onCanvas) return;
       site.place();
       this.refresh();
     });
@@ -157,6 +175,15 @@ export class BuildBar {
         e.preventDefault();
         this.select(kind);
       }
+      return;
+    }
+    // Enter places too. The mouse is the natural way to do it, but a keyboard path
+    // costs nothing and means build mode is never stuck because of how a particular
+    // shell delivers clicks.
+    if (e.code === 'Enter' || e.code === 'NumpadEnter') {
+      e.preventDefault();
+      site.place();
+      this.refresh();
       return;
     }
     if (e.code === 'KeyR') {
