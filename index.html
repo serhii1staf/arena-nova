@@ -500,6 +500,50 @@
         border-left: 1px solid rgba(255, 209, 102, 0.35);
         color: #ffd166;
       }
+      /* Squad name tags over the world. The layer covers the screen and is inert;
+         each tag is placed by transform, which costs no layout. */
+      #squadTags {
+        position: fixed;
+        inset: 0;
+        z-index: 38;
+        overflow: hidden;
+        pointer-events: none;
+      }
+      .squadTag {
+        position: absolute;
+        top: 0;
+        left: 0;
+        display: flex;
+        gap: 6px;
+        align-items: baseline;
+        padding: 2px 8px;
+        border: 1px solid rgba(126, 224, 168, 0.4);
+        border-radius: 8px;
+        background: rgba(6, 20, 12, 0.55);
+        white-space: nowrap;
+        will-change: transform;
+      }
+      /* Their face, so a teammate is recognisable at a distance where the character
+         itself is only a few pixels tall. */
+      .squadTagFace {
+        width: 20px;
+        height: 20px;
+        align-self: center;
+        border-radius: 4px;
+        object-fit: cover;
+      }
+      .squadTagFace[hidden] {
+        display: none;
+      }
+      .squadTagName {
+        color: #b6f5cf;
+        font-size: 12px;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+      }
+      .squadTagFar {
+        color: rgba(150, 220, 180, 0.8);
+        font-size: 10px;
+      }
       #squadInvites {
         position: fixed;
         right: 16px;
@@ -1157,6 +1201,12 @@
         <span id="buildAim"></span>
       </div>
     </div>
+
+    <!--
+      Squad name tags. Positioned per frame from a world-to-screen projection, so
+      this layer must not lay anything out itself or take the pointer.
+    -->
+    <div id="squadTags" aria-hidden="true"></div>
 
     <div id="squadInvites" role="status" aria-live="polite"></div>
 

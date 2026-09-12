@@ -4,6 +4,7 @@ import { ExteriorScene } from './scenes/ExteriorScene.ts';
 import { GameUI } from './ui/GameUI.ts';
 import { invalidateWindowCentre, prepareNative } from './ui/native.ts';
 import { applyTranslations, t } from './ui/i18n.ts';
+import { squadIds } from './ui/Squad.ts';
 
 /**
  * Bootstraps the game: builds the engine, loads the lobby while the start screen
@@ -151,6 +152,9 @@ async function boot(): Promise<void> {
     get scene() {
       return engine.scenes.current;
     },
+    // Squad membership, so a probe can assert on who the highlight is meant for
+    // rather than inferring it from what happens to be drawn.
+    squadIds,
   };
 
 }

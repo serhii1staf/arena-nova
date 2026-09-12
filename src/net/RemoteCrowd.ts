@@ -1,4 +1,12 @@
-import { Group, Vector3 } from 'three';
+import {
+  Color,
+  Group,
+  Vector3,
+  type Material,
+  type Mesh,
+  type MeshStandardMaterial,
+  type Object3D,
+} from 'three';
 import { Avatar } from '../player/Avatar.ts';
 import type { NetworkManager, RemotePlayer } from './NetworkManager.ts';
 
@@ -27,7 +35,34 @@ interface Tracked {
   primed: boolean;
   /** Smoothed vertical speed, m/s, derived from the interpolated path. */
   vy: number;
+  /**
+   * Per-mesh material pair for the see-through highlight: the material the rig came
+   * with, and a private clone of it that ignores depth.
+   *
+   * Built lazily, and only for squad members. The clone is essential rather than
+   * tidy: authored characters share one material set with a module-cached prototype,
+   * so flipping `depthTest` on the material a rig hands you would make *every*
+   * player wearing that character draw through walls. Cloning shares the textures,
+   * so the cost is a small object per mesh and no extra shader — `depthTest` is
+   * pipeline state, not a shader define.
+   */
+  overlay: { mesh: Mesh; normal: Material | Material[]; through: Material | Material[] }[] | null;
+  /** Whether the highlight is currently applied, so a swap only happens on change. */
+  showing: boolean;
+  /** Result of the last line-of-sight test. */
+  hidden: boolean;
+  /** Frame budget counter, so sight lines are not retested every frame. */
+  checkIn: number;
 }
+
+/** How far apart the line-of-sight samples are, in metres. */
+const SIGHT_STEP = 2.4;
+/** Most samples one sight line may take, whatever the distance. */
+const SIGHT_SAMPLES = 48;
+/** Frames between sight tests for one player. */
+const SIGHT_INTERVAL = 4;
+/** Height above the feet the sight line aims for — chest, not toes. */
+const CHEST = 1.15;
 
 export class RemoteCrowd {
   /**
@@ -74,12 +109,138 @@ export class RemoteCrowd {
       phase: 0,
       primed: false,
       vy: 0,
+      overlay: null,
+      showing: false,
+      hidden: false,
+      checkIn: 0,
     });
+  }
+
+  /**
+   * Marks squad members and draws the hidden ones through the world.
+   *
+   * Two separate jobs, deliberately: deciding whether a player can be seen, and
+   * deciding how to draw them. The first is a sampled walk along the sight line —
+   * there is no raycasting anywhere in this project, and a grid of analytic height
+   * and collider queries is both cheaper and steadier than one. The second is a
+   * material swap on the meshes the rig is already animating, so the highlight is
+   * genuinely the player's own character in their own pose rather than a stand-in
+   * shape that would have to be kept in step with it.
+   *
+   * A member in plain sight is left completely alone. That is the point: a highlight
+   * on someone you can already see is noise, and it would hide them behind their own
+   * outline.
+   */
+  highlight(
+    members: ReadonlySet<string>,
+    eye: Vector3,
+    blocked: (x: number, y: number, z: number) => boolean,
+  ): void {
+    for (const [id, t] of this.tracked) {
+      const member = members.has(id);
+      if (!member) {
+        // Left the squad, or never was in it. Put their own materials back.
+        if (t.showing) this.applyOverlay(t, false);
+        t.hidden = false;
+        continue;
+      }
+
+      const rp = this.net.remotePlayers.get(id);
+      if (!rp) continue;
+
+      // Staggered rather than every frame. A sight line is tens of height samples,
+      // and whether a teammate is behind a hill does not change within four frames
+      // — but it would cost four times as much to keep asking.
+      if (t.checkIn <= 0) {
+        t.checkIn = SIGHT_INTERVAL;
+        t.hidden = this.occluded(eye, rp.x, rp.y + CHEST, rp.z, blocked);
+      } else {
+        t.checkIn--;
+      }
+
+      if (t.showing !== t.hidden) this.applyOverlay(t, t.hidden);
+    }
+  }
+
+  /**
+   * True when something stands between the eye and a point.
+   *
+   * Both ends are excluded from the walk. The near end because the camera itself sits
+   * a little inside whatever it is against, and the far end because a player standing
+   * on a slope has terrain immediately behind their own chest — sampling right up to
+   * them would report every teammate on a hillside as hidden.
+   */
+  private occluded(
+    eye: Vector3,
+    x: number,
+    y: number,
+    z: number,
+    blocked: (x: number, y: number, z: number) => boolean,
+  ): boolean {
+    const dx = x - eye.x;
+    const dy = y - eye.y;
+    const dz = z - eye.z;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist < 3) return false;
+    const steps = Math.min(SIGHT_SAMPLES, Math.max(2, Math.round(dist / SIGHT_STEP)));
+    for (let i = 1; i < steps; i++) {
+      const f = i / steps;
+      if (blocked(eye.x + dx * f, eye.y + dy * f, eye.z + dz * f)) return true;
+    }
+    return false;
+  }
+
+  /** Swaps a tracked player between their own materials and the see-through set. */
+  private applyOverlay(t: Tracked, on: boolean): void {
+    if (on && !t.overlay) t.overlay = this.buildOverlay(t.avatar.object);
+    if (!t.overlay) return;
+    for (const entry of t.overlay) {
+      entry.mesh.material = on ? entry.through : entry.normal;
+    }
+    t.showing = on;
+  }
+
+  /**
+   * Clones every material on a rig into a version that ignores depth.
+   *
+   * Rendered late and without depth testing, so it comes through terrain and
+   * buildings; tinted with its own emissive so it reads as a marker rather than as
+   * somebody standing in front of the mountain they are actually behind. The map is
+   * kept, which is the whole point — you recognise the character, not a coloured
+   * blob. Slightly transparent so an outline is still legible against bright sky.
+   */
+  private buildOverlay(root: Object3D): Tracked['overlay'] {
+    const out: NonNullable<Tracked['overlay']> = [];
+    root.traverse((o) => {
+      const mesh = o as Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      const dress = (m: Material): Material => {
+        const c = m.clone();
+        c.depthTest = false;
+        c.depthWrite = false;
+        c.transparent = true;
+        c.opacity = 0.85;
+        const std = c as MeshStandardMaterial;
+        if (std.isMeshStandardMaterial) {
+          std.emissive = new Color(0x2f8f5a);
+          std.emissiveIntensity = 0.75;
+        }
+        return c;
+      };
+      const normal = mesh.material;
+      const through = Array.isArray(normal) ? normal.map(dress) : dress(normal);
+      // Drawn after the world, and after the other transparent things in it.
+      mesh.renderOrder = 12;
+      out.push({ mesh, normal, through });
+    });
+    return out;
   }
 
   private remove(id: string): void {
     const t = this.tracked.get(id);
     if (!t) return;
+    // Cloned highlight materials are ours; the ones underneath are the rig's.
+    this.releaseOverlay(t);
     this.group.remove(t.avatar.object);
     t.avatar.dispose();
     this.tracked.delete(id);
@@ -137,5 +298,17 @@ export class RemoteCrowd {
     this.unsub.length = 0;
     for (const id of [...this.tracked.keys()]) this.remove(id);
     this.group.removeFromParent();
+  }
+
+  /** Frees the cloned highlight materials. The originals belong to the rig. */
+  private releaseOverlay(t: Tracked): void {
+    if (!t.overlay) return;
+    if (t.showing) this.applyOverlay(t, false);
+    for (const entry of t.overlay) {
+      const m = entry.through;
+      if (Array.isArray(m)) for (const one of m) one.dispose();
+      else m.dispose();
+    }
+    t.overlay = null;
   }
 }

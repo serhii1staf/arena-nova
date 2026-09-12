@@ -17,6 +17,8 @@ import { buildExterior, type AtmosphereState, type ExteriorBuild } from '../worl
 import { buildDragon, type DragonBuild } from '../world/Dragon.ts';
 import { createBuildSite, type BuildSite } from '../world/Building.ts';
 import { setBuildSite } from '../ui/BuildBar.ts';
+import { squadIds } from '../ui/Squad.ts';
+import { surfaceGroundHeightAt } from '../world/WorldGen.ts';
 import { DayNight } from '../world/DayNight.ts';
 import { RemoteCrowd } from '../net/RemoteCrowd.ts';
 import { ensureConnected, gameSession } from '../net/session.ts';
@@ -282,6 +284,22 @@ export class ExteriorScene implements GameScene {
     });
 
     this.crowd.update(frameDelta);
+    // Squad members behind terrain or behind something built are drawn through it.
+    // The sight test reuses the very predicate the third-person camera uses to pull
+    // itself in, so "can I see them" and "can the camera see past that" are one
+    // answer rather than two that could disagree.
+    //
+    // Called unconditionally, not only while a squad exists. It is also what puts a
+    // player's own materials back when they leave the squad, and gating it on a
+    // non-empty squad meant the last member to leave kept their highlight for ever.
+    //
+    // Terrain and built structures block the sight line; trees deliberately do not.
+    // `world.blocksCamera` would also count every trunk and boulder, which is right
+    // for pulling a camera in and wrong here — a teammate six metres away in a wood
+    // would flicker in and out of being "hidden" with every trunk that crossed the
+    // line. What the highlight is for is a hill or a wall between you.
+    this.camera.getWorldPosition(this.aimFrom);
+    this.crowd.highlight(squadIds(), this.aimFrom, this.sightBlocked);
     // The fog colour is read back out after `applyTo` wrote it, so mist and motes
     // take the colour of the air rather than carrying a palette of their own.
     this.air.nightFactor = this.dayNight.nightFactor;
@@ -313,6 +331,17 @@ export class ExteriorScene implements GameScene {
     this.camera.aspect = width / Math.max(1, height);
     this.camera.updateProjectionMatrix();
   }
+
+  /**
+   * Whether a point is inside something that would hide a squad member.
+   *
+   * A bound arrow so it can be handed straight to the crowd without allocating a
+   * closure per frame, and public so it is the one definition of "in the way" —
+   * anything asking the question, including the probe, asks this rather than
+   * reassembling the same expression and drifting from it.
+   */
+  readonly sightBlocked = (x: number, y: number, z: number): boolean =>
+    y < surfaceGroundHeightAt(x, z) || (this.buildSite?.blocksCamera(x, y, z) ?? false);
 
   /** Debug/menu hook: set the third-person camera distance. */
   setCameraZoom(distance: number): void {

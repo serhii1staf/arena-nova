@@ -1,3 +1,4 @@
+import { Vector3 } from 'three';
 import { gameSession } from '../net/session.ts';
 import type { Engine } from '../core/Engine.ts';
 import type { RelayKind } from '../net/types.ts';
@@ -32,6 +33,21 @@ interface Located {
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T | null =>
   document.getElementById(id) as T | null;
 
+/**
+ * Who is in the squad, readable from outside the HUD.
+ *
+ * A module-level set rather than a getter on the instance, for the same reason the
+ * build site is reached this way: the squad is part of the HUD and is built with it,
+ * while the thing that needs to know — the crowd of remote avatars — belongs to a
+ * scene that is created and destroyed around it. Neither can hold a reference to the
+ * other for its whole life, and the membership is a single session-wide fact.
+ */
+const squadMembers = new Set<string>();
+
+export function squadIds(): ReadonlySet<string> {
+  return squadMembers;
+}
+
 /** How long an unanswered invitation stays on screen, in seconds. */
 const INVITE_TIMEOUT = 25;
 
@@ -41,12 +57,25 @@ export class Squad {
   private readonly list = $('squadList');
   private readonly invites = $('squadInvites');
 
-  /** Player ids that have agreed to be in the squad with us. */
-  private readonly members = new Set<string>();
+  /**
+   * Player ids that have agreed to be in the squad with us.
+   *
+   * The module-level set, not a private one: the roster on screen and the highlight
+   * in the world have to be the same membership, and two sets that are meant to
+   * agree eventually stop agreeing.
+   */
+  private readonly members = squadMembers;
   /** Open invitations we have received, by sender id. */
   private readonly pending = new Map<string, { name: string; at: number }>();
   /** Last rendered roster signature, so an unchanged frame writes nothing. */
   private signature = '';
+  /** Layer the world-anchored name tags live in. */
+  private readonly tags = $('squadTags');
+  /** Tag element per member id, reused frame to frame. */
+  private readonly shown = new Map<string, HTMLElement>();
+  /** Scratch for the projection, so nothing is allocated per frame per member. */
+  private readonly at = new Vector3();
+  private readonly view = new Vector3();
 
   constructor(engine: Engine) {
     this.engine = engine;
@@ -213,6 +242,12 @@ export class Squad {
 
   /** Called once per frame from the UI's overlay pass. */
   update(): void {
+    // Before the empty-squad shortcut below, because leaving a squad has to take the
+    // tags down with it — and that early return is exactly the path a squad of zero
+    // takes. Left after it, the last member's tag stayed on screen for good.
+    const located = this.engine.scenes.current as unknown as Located | null;
+    this.drawTags(located?.player?.feetPosition);
+
     // Expire invitations nobody answered, so a card cannot sit there for a session.
     if (this.pending.size > 0) {
       const now = performance.now();
@@ -234,8 +269,7 @@ export class Squad {
       return;
     }
 
-    const scene = this.engine.scenes.current as unknown as Located | null;
-    const me = scene?.player?.feetPosition;
+    const me = located?.player?.feetPosition;
     const net = gameSession();
 
     // Built from who is actually in the room, so a member who disconnected simply
@@ -270,5 +304,106 @@ export class Squad {
         return row;
       }),
     );
+  }
+
+  /**
+   * Puts a name and a distance over each squad member's head.
+   *
+   * There was no world-to-screen path in this project at all — the waypoint arrow is
+   * a compass bearing, not a projection — so this is the first of them. Plain HTML
+   * over the canvas rather than sprites in the scene: text in the scene would be
+   * tone-mapped and bloomed with everything else and would have to fight the depth
+   * buffer, whereas a div is crisp at any distance and costs nothing to lay out.
+   *
+   * Deliberately not gated on the sight test. A tag on a teammate you *can* see is
+   * still the thing you want — it tells you which of two characters is which, and how
+   * far off they are. It is the body silhouette that is hidden when they are in plain
+   * view, because that is what would be in the way.
+   */
+  private drawTags(me: { x: number; y: number; z: number } | undefined): void {
+    const layer = this.tags;
+    if (!layer) return;
+    const camera = this.engine.scenes.current?.camera;
+    if (!camera || this.members.size === 0) {
+      if (layer.childElementCount > 0) layer.replaceChildren();
+      this.shown.clear();
+      return;
+    }
+
+    const net = gameSession();
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    const live = new Set<string>();
+
+    for (const id of this.members) {
+      const p = net.remotePlayers.get(id);
+      if (!p) continue;
+
+      // Just above the head, so the tag never covers the character it names.
+      this.at.set(p.x, p.y + 2.15, p.z);
+
+      // Behind the eye is checked in view space, before projecting. Projection
+      // divides by w, and for a point behind the camera that flips it back into
+      // frame — so a tag for somebody standing behind you would appear in front of
+      // you, mirrored. The sign of the view-space depth is the only honest test.
+      this.view.copy(this.at).applyMatrix4(camera.matrixWorldInverse);
+      if (this.view.z > -0.6) continue;
+
+      this.at.project(camera);
+      if (Math.abs(this.at.x) > 1.15 || Math.abs(this.at.y) > 1.15) continue;
+
+      const sx = Math.round((this.at.x * 0.5 + 0.5) * width);
+      const sy = Math.round((-this.at.y * 0.5 + 0.5) * height);
+      const metres = me ? Math.round(Math.hypot(p.x - me.x, p.z - me.z)) : 0;
+
+      let tag = this.shown.get(id);
+      if (!tag) {
+        tag = document.createElement('div');
+        tag.className = 'squadTag';
+        const face = document.createElement('img');
+        face.className = 'squadTagFace';
+        face.alt = '';
+        const name = document.createElement('span');
+        name.className = 'squadTagName';
+        const far = document.createElement('span');
+        far.className = 'squadTagFar';
+        tag.append(face, name, far);
+        layer.appendChild(tag);
+        this.shown.set(id, tag);
+      }
+
+      // Their face in the tag.
+      //
+      // This is what makes the highlight usable at range, and it is the part the
+      // see-through body cannot do: a 1.8 m character 260 m away is about four pixels
+      // tall, so however well it draws through a hill there is nothing legible to
+      // look at. The portrait is the same one the player list uses — rendered once
+      // per character for the session and cached — so recognising who is out there
+      // costs nothing per frame.
+      const face = tag.firstElementChild as HTMLImageElement;
+      const portrait = portraitFor(p.skin);
+      if (portrait && face.getAttribute('src') !== portrait) face.src = portrait;
+      face.hidden = !portrait;
+
+      // Text only when it changes: the position moves every frame, the name never
+      // does and the distance only on whole metres.
+      const name = face.nextElementSibling as HTMLElement;
+      const far = tag.lastElementChild as HTMLElement;
+      if (name.textContent !== p.name) name.textContent = p.name;
+      const text = `${metres} m`;
+      if (far.textContent !== text) far.textContent = text;
+      // Faded with distance so a teammate across the valley does not shout as loudly
+      // as one in the next room, but never all the way out.
+      tag.style.transform = `translate(-50%, -100%) translate(${sx}px, ${sy}px)`;
+      tag.style.opacity = String(Math.max(0.45, 1 - metres / 900));
+      live.add(id);
+    }
+
+    // Anyone who left the squad, left the room, or walked off screen.
+    for (const [id, el] of this.shown) {
+      if (live.has(id)) continue;
+      el.remove();
+      this.shown.delete(id);
+    }
   }
 }
