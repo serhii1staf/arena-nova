@@ -15,41 +15,42 @@ import type { AssetManager } from '../core/AssetManager.ts';
  * Building
  * --------
  * Snap-to-grid construction, in the shape players already know from Fortnite and
- * Rust: pick a piece, look where you want it, place. Ten pieces, a translucent
- * preview of exactly what will appear, and no materials to gather — this is an
- * admin tool, not an economy.
+ * Rust: pick a piece, look where you want it, place. Twenty pieces in three
+ * categories, a translucent preview of exactly what will appear, and no materials
+ * to gather — this is an admin tool for now, but nothing here assumes that.
  *
- * Three ideas carry the whole thing.
+ * Four ideas carry the whole thing.
  *
- * **One global lattice, with three kinds of slot.** Floors, ramps, stairs, roofs
- * and foundations fill a *cell*; walls, doorways, windows and railings stand on a
- * cell *edge*; pillars stand at a *corner*. That is not decoration — it is what
- * makes a building assemble. When walls sat in the middle of cells, four walls
- * around one floor tile was impossible: they landed in four different squares. On
- * edges, four walls enclose exactly one floor, and the pillars at its corners line
- * up with all of them. The edge is also chosen by which side of the cell you are
- * looking at, so a wall goes where you are pointing without any fiddling.
+ * **One global lattice, with three kinds of slot.** Floors, ramps, stairs and roofs
+ * fill a *cell*; walls, doorways, windows, gables and railings stand on a cell
+ * *edge*; pillars stand at a *corner*. That is what makes a building assemble: four
+ * walls enclose exactly one floor, the pillars at its corners meet all of them, and
+ * a gable end lands on the same edge the wall below it used. The edge is chosen by
+ * which side of the cell you are looking at, so a piece goes where you point.
  *
- * **Pieces are carpentry, not blocks.** A wall is boards between posts, a floor is
- * boards over joists, a doorway has jambs and a lintel. Modelling the boards costs
- * a few dozen triangles and buys the silhouette: light falls through the gaps and
- * thin timber is thin from the side. Everything is generated from one primitive
- * that emits faces already wound outwards, which is not tidiness — the hand-written
- * ramp and roof this replaced were wound inside out, so their outer faces were
- * culled and the pieces looked transparent.
+ * **A piece is described once.** Each kind declares its solid parts as a list of
+ * boxes in its own frame, and collision, camera occlusion and crosshair picking all
+ * read that one list. A doorway's opening is walkable for the same reason it looks
+ * open: there is no box there. Nothing can drift between how a piece looks and how
+ * it behaves, because there is only one description.
  *
- * **Cost does not grow with what you build.** Each kind is one `InstancedMesh`, so
- * a thousand pieces is ten draw calls rather than a thousand. Collision and floor
- * height are analytic — worked out from a piece's own cell and rotation — and
- * bucketed by grid column, so a query costs a map lookup rather than a search.
- * There is a hard cap per kind, because an admin holding the mouse down should run
- * out of pieces long before the frame budget does.
+ * **Pieces are carpentry.** Boards between posts, boards over joists, jambs and a
+ * lintel, cladding that narrows as a gable rises. Modelling the boards costs a few
+ * dozen triangles and buys the silhouette. Everything comes from one primitive that
+ * emits faces already wound outwards — the hand-written shapes this replaced were
+ * wound inside out, so their outer faces were culled and looked transparent.
+ *
+ * **Cost does not grow with what is built.** One `InstancedMesh` per kind, so a
+ * thousand pieces is a couple of dozen draw calls. Collision and floor height are
+ * analytic and bucketed by grid column, so a query costs a map lookup rather than a
+ * search. There is a hard cap per kind: whoever is building should run out of
+ * pieces long before the frame budget does.
  *
  * Placements are local to the player who made them. Making them visible to the room
- * would need authoritative world state on the server: somewhere to store them,
- * ownership, a limit, and a rule for what happens when two people build into the
- * same cell. Relaying placements peer-to-peer instead would produce structures that
- * disagree between clients.
+ * needs authoritative world state on the server: storage, ownership, a limit, and a
+ * rule for what happens when two people build into the same slot. Relaying
+ * placements peer-to-peer instead would produce structures that disagree between
+ * clients.
  */
 
 /** Metres per lattice cell. A wall is this wide and this tall. */
@@ -62,11 +63,16 @@ const PICK_RANGE = 11;
 const BOARD = 0.12;
 /** Thickness of a frame member — post, joist, stringer, jamb. */
 const POST = 0.2;
-/** Height of the roof ridge above its cell floor. */
+/** Height of a roof ridge or a gable apex above its slot floor. */
 const RIDGE = BUILD_GRID * 0.55;
-/** Walkable height of a floor and of a foundation, above their cell floor. */
+/** Walkable heights above a piece's own slot floor. */
 const FLOOR_TOP = 0.3;
 const FOUNDATION_TOP = 0.42;
+const DECK_TOP = 0.26;
+/** Height of a half wall, and of a railing or parapet. */
+const HALF_WALL = 1.6;
+const RAIL_TOP = 1.1;
+const PARAPET = 0.62;
 /** Doorway opening: half width, and height to the underside of the lintel. */
 const DOOR_HALF = 0.85;
 const DOOR_HEAD = 2.6;
@@ -74,68 +80,119 @@ const DOOR_HEAD = 2.6;
 const WIN_HALF = 1.15;
 const WIN_SILL = 1.1;
 const WIN_HEAD = 2.45;
-/** Railing height. */
-const RAIL_TOP = 1.1;
+/** Vent window: the small high one. */
+const VENT_HALF = 0.6;
+const VENT_SILL = 2.15;
+const VENT_HEAD = 3.05;
 /** Steps in a flight of stairs. */
 const STEPS = 8;
+/** Thickness of a pane of glass. */
+const GLASS = 0.03;
 /** How many metres of timber one tile of the wood texture covers. */
 const UV_METRES = 1.15;
+/** How far above your feet a surface can be and still be something you step onto. */
+const STEP_UP = 0.65;
 /**
  * Hard cap per kind.
  *
- * Not a licence to grow: an `InstancedMesh` reserves its whole matrix buffer up
- * front, so this is 256 pieces of each of ten kinds, about 160 kB of matrices and
- * ten draw calls no matter how full it gets. Beyond this the answer is server-owned
- * world state, not a bigger buffer.
+ * An `InstancedMesh` reserves its whole matrix buffer up front, so this is a fixed
+ * cost: twenty kinds at 192 pieces each is about 240 kB of matrices, whether or not
+ * anything is built. Beyond this the answer is server-owned world state, not a
+ * bigger buffer.
  */
-const MAX_PER_KIND = 256;
+const MAX_PER_KIND = 192;
 
 export type PieceKind =
+  // Edge pieces — they stand on the boundary between two cells.
   | 'wall'
+  | 'wallHalf'
+  | 'gable'
   | 'doorway'
-  | 'window'
+  | 'doorArch'
+  | 'doorLeaf'
+  | 'windowOpen'
+  | 'windowGlass'
+  | 'windowVent'
+  | 'railing'
+  | 'beam'
+  // Cell pieces — they fill a square.
   | 'floor'
+  | 'foundation'
   | 'ramp'
   | 'stairs'
-  | 'roof'
-  | 'pillar'
-  | 'railing'
-  | 'foundation';
+  | 'roofGable'
+  | 'roofHip'
+  | 'roofShed'
+  | 'roofFlat'
+  // Corner pieces.
+  | 'pillar';
 
-/** Order in the hotbar. Also the order the number keys select. */
-export const PIECES: readonly PieceKind[] = [
-  'wall',
-  'doorway',
-  'window',
-  'floor',
-  'ramp',
-  'stairs',
-  'roof',
-  'pillar',
-  'railing',
-  'foundation',
-];
+export interface Category {
+  id: 'walls' | 'frame' | 'roof';
+  pieces: readonly PieceKind[];
+}
 
 /**
- * Which slot of the lattice a piece occupies.
+ * The library, grouped so a hotbar can show ten at a time.
  *
- * `cell` fills a square, `edge` stands on the boundary between two squares, and
- * `corner` stands where four squares meet.
+ * Grouped by what you are doing rather than by lattice: putting up walls is one
+ * job, laying floors and stairs is another, closing the top is a third. Openings sit
+ * beside the wall they are cut into, which is where you look for them.
  */
+export const CATEGORIES: readonly Category[] = [
+  {
+    id: 'walls',
+    pieces: [
+      'wall',
+      'wallHalf',
+      'gable',
+      'doorway',
+      'doorArch',
+      'doorLeaf',
+      'windowOpen',
+      'windowGlass',
+      'windowVent',
+      'railing',
+    ],
+  },
+  { id: 'frame', pieces: ['floor', 'foundation', 'ramp', 'stairs', 'pillar', 'beam'] },
+  { id: 'roof', pieces: ['roofGable', 'roofHip', 'roofShed', 'roofFlat'] },
+];
+
+/** Every kind, in category order. */
+export const PIECES: readonly PieceKind[] = CATEGORIES.flatMap((c) => [...c.pieces]);
+
 type Lattice = 'cell' | 'edge' | 'corner';
 
 const LATTICE: Record<PieceKind, Lattice> = {
   wall: 'edge',
+  wallHalf: 'edge',
+  gable: 'edge',
   doorway: 'edge',
-  window: 'edge',
+  doorArch: 'edge',
+  doorLeaf: 'edge',
+  windowOpen: 'edge',
+  windowGlass: 'edge',
+  windowVent: 'edge',
   railing: 'edge',
+  beam: 'edge',
   floor: 'cell',
+  foundation: 'cell',
   ramp: 'cell',
   stairs: 'cell',
-  roof: 'cell',
-  foundation: 'cell',
+  roofGable: 'cell',
+  roofHip: 'cell',
+  roofShed: 'cell',
+  roofFlat: 'cell',
   pillar: 'corner',
 };
+
+/**
+ * Cell pieces whose orientation means something, so two of them in one cell facing
+ * different ways are two different things. A floor rotated is the same floor; a
+ * flight of stairs rotated is a different flight.
+ */
+const ROTATABLE = new Set<PieceKind>(['ramp', 'stairs', 'roofGable', 'roofShed']);
 
 /** A box in a piece's own frame: centre and half-extents across, and a Y range. */
 interface Slab {
@@ -150,12 +207,10 @@ interface Slab {
 interface Placed {
   kind: PieceKind;
   key: string;
-  /** Centre of the piece on the lattice. */
   x: number;
   z: number;
   /** World height of the floor of the slot this piece stands on. */
   level: number;
-  /** Quarter turns about Y, as placed. */
   turn: number;
   /** Which instance of its kind's mesh draws it. Moves when others are removed. */
   slot: number;
@@ -163,53 +218,42 @@ interface Placed {
 
 export interface BuildSite {
   group: Group;
-  /** True while the player is holding a piece and the preview is showing. */
   readonly active: boolean;
   setActive(on: boolean): void;
   select(kind: PieceKind): void;
   readonly selected: PieceKind;
-  /** Steps the selection by `n` places, for the mouse wheel. */
+  /** Index of the category the selection is in. */
+  readonly category: number;
+  /** Moves to another category, selecting its first piece. */
+  setCategory(index: number): void;
+  /** Steps the selection within the current category, for the mouse wheel. */
   cycle(n: number): void;
   /** Quarter turn: rotates cell pieces, and moves edge pieces to the next side. */
   rotate(): void;
   /** Places the previewed piece. False if the slot is taken or the kind is full. */
   place(): boolean;
-  /** The piece under the crosshair, described for the HUD, or null. */
+  /** The piece under the crosshair, or null. */
   aimedKind(): PieceKind | null;
   /** Removes the single piece under the crosshair. */
   removeAimed(): boolean;
-  /** How many pieces are standing. */
   count(): number;
-  /** Clears everything this player built. */
   clear(): void;
-  /**
-   * Moves the preview and works out what is under the crosshair. Call once per
-   * frame; does nothing at all while inactive.
-   */
   update(eye: Vector3, forward: Vector3, floorAt: (x: number, z: number) => number): void;
   /**
    * Floor height at a point, taking placed pieces into account.
    *
    * `fromY` is the height the question is being asked from — the feet of the body
    * about to stand there. Surfaces further above that than a single step are
-   * ignored, which is the whole reason walking under a roof no longer snatches you
-   * onto it. Omit it to get the highest surface regardless.
+   * ignored, which is why walking under a roof no longer snatches you onto it. Omit
+   * it to get the highest surface regardless.
    */
   heightAt(x: number, z: number, ground: number, fromY?: number): number;
-  /**
-   * Pushes a body of the given radius out of anything solid it is inside.
-   * Call after the world's own collision, which clamps and handles terrain.
-   */
   collide(p: Vector3, radius: number): void;
-  /** True if something solid occupies this point, for camera pull-in. */
   blocksCamera(x: number, y: number, z: number): boolean;
-  /** The geometries, so the hotbar can draw an icon of each. */
+  /** The timber geometry of a kind, so the hotbar can draw an icon of it. */
   geometryFor(kind: PieceKind): BufferGeometry;
   dispose(): void;
 }
-
-/** How far above your feet a surface can be and still be something you step onto. */
-const STEP_UP = 0.65;
 
 // --- Geometry -----------------------------------------------------------------
 
@@ -217,22 +261,19 @@ const STEP_UP = 0.65;
  * Accumulates boxes into one geometry.
  *
  * Faces are emitted wound counter-clockwise as seen from outside, so
- * `computeVertexNormals` is never needed and a piece can never come out inside
- * out. UVs put the texture's V axis across the timber and U along it: for every
- * face, U follows whichever of its two tangents is longer, which on a board is
- * always its length. That one rule is why the grain runs the right way on a wall
- * board, a floor board and a stair tread from a single tile.
+ * `computeVertexNormals` is never needed and a piece can never come out inside out.
+ * UVs put the texture's V axis across the timber and U along it: for every face, U
+ * follows whichever of its two tangents is longer, which on a board is always its
+ * length. That one rule is why the grain runs the right way on a wall board, a floor
+ * board and a stair tread from a single tile.
  */
 class Carpentry {
   private readonly pos: number[] = [];
   private readonly nrm: number[] = [];
   private readonly uv: number[] = [];
 
-  /**
-   * One board. Half-extents are half its width, height and depth; `tilt` rotates
-   * it about X, which is how treads lie on a slope.
-   */
   box(cx: number, cy: number, cz: number, hx: number, hy: number, hz: number, tilt = 0): Carpentry {
+    if (hx <= 0 || hy <= 0 || hz <= 0) return this;
     const ct = Math.cos(tilt);
     const st = Math.sin(tilt);
     // Three's rotation about X: y' = y cos - z sin, z' = y sin + z cos.
@@ -247,8 +288,6 @@ class Carpentry {
       y * st + z * ct,
     ];
 
-    // Each face: its outward normal, its four corners in outward-CCW order, and
-    // the extents of its two tangents so U can follow the longer one.
     const faces: {
       n: [number, number, number];
       c: [number, number, number][];
@@ -325,9 +364,6 @@ class Carpentry {
 
     for (const f of faces) {
       const n = dir(f.n[0], f.n[1], f.n[2]);
-      // The quad's corners run around its edge, so corner 1 is one tangent away
-      // from corner 0 and corner 3 is the other. Which of those is the long one
-      // decides whether the grain runs across the quad or up it.
       const flip = f.sv > f.su;
       const [uMax, vMax] = flip ? [f.sv, f.su] : [f.su, f.sv];
       const uvs: [number, number][] = flip
@@ -361,12 +397,20 @@ class Carpentry {
   /** Horizontal boards filling a height range, for a wall or a panel. */
   boards(cx: number, cz: number, hx: number, hz: number, y0: number, y1: number): Carpentry {
     const span = y1 - y0;
-    if (span <= 0.01) return this;
+    if (span <= 0.02 || hx <= 0) return this;
     const rows = Math.max(1, Math.round(span / 0.66));
     const pitch = span / rows;
     for (let i = 0; i < rows; i++) {
       this.box(cx, y0 + (i + 0.5) * pitch, cz, hx, pitch / 2 - 0.035, hz);
     }
+    return this;
+  }
+
+  /** The two vertical posts that frame the ends of any edge piece. */
+  endPosts(halfWidth: number, height: number): Carpentry {
+    const t = POST / 2;
+    this.box(-(halfWidth - t), height / 2, 0, t, height / 2, t);
+    this.box(halfWidth - t, height / 2, 0, t, height / 2, t);
     return this;
   }
 
@@ -381,70 +425,173 @@ class Carpentry {
   }
 }
 
+interface PieceGeo {
+  timber: BufferGeometry;
+  /** Panes, drawn by a second instanced mesh sharing the same transforms. */
+  glass?: BufferGeometry;
+}
+
 /**
  * Every piece is modelled with its underside on y = 0, which is the floor of its
- * slot — so a placed piece needs no vertical fudge factor at all. Getting that
- * wrong per shape is what previously left some pieces hovering and others sunk.
+ * slot — so a placed piece needs no vertical fudge factor at all. Getting that wrong
+ * per shape is what previously left some pieces hovering and others sunk.
  */
-function buildGeometries(): Record<PieceKind, BufferGeometry> {
+function buildGeometries(): Record<PieceKind, PieceGeo> {
   const G = BUILD_GRID;
   const s = G / 2;
-  const jamb = POST / 2;
+  const t = POST / 2;
+  const b = BOARD / 2;
 
-  // --- Wall: boards between two posts ---
-  const wall = new Carpentry().boards(0, 0, s, BOARD / 2, 0, G);
-  wall.box(-(s - jamb), G / 2, 0, jamb, G / 2, jamb);
-  wall.box(s - jamb, G / 2, 0, jamb, G / 2, jamb);
+  // --- Plain wall, and the waist-high version ---
+  const wall = new Carpentry().boards(0, 0, s, b, 0, G).endPosts(s, G);
+  const wallHalf = new Carpentry()
+    .boards(0, 0, s, b, 0, HALF_WALL)
+    .endPosts(s, HALF_WALL)
+    // A capping rail, so the top edge is finished rather than raw board ends.
+    .box(0, HALF_WALL + 0.05, 0, s, 0.06, 0.14);
 
-  // --- Doorway: the same wall with a hole, jambs framing it, a lintel over it ---
-  const doorway = new Carpentry();
+  // --- Gable: the triangle a pitched roof leaves over a wall ---
+  // Cladding that narrows as it rises, which is both what real gable ends look like
+  // and the only way to fill a triangle out of horizontal boards.
+  const gable = new Carpentry();
+  const gableRows = 5;
+  for (let i = 0; i < gableRows; i++) {
+    const y0 = (i / gableRows) * RIDGE;
+    const y1 = ((i + 1) / gableRows) * RIDGE;
+    // Width at the middle of the row, so each board stops just inside the rake.
+    const half = s * (1 - (y0 + y1) / 2 / RIDGE);
+    gable.box(0, (y0 + y1) / 2, 0, Math.max(0.05, half), (y1 - y0) / 2 - 0.03, b);
+  }
+  // The rake boards trimming the two slopes. `box` only tilts about X, and these
+  // need to lean in the XY plane, so each is a short stepped run instead — six
+  // segments per side, which at this size is indistinguishable from a straight
+  // board and keeps every face an axis-aligned quad with correct winding.
+  for (const side of [1, -1]) {
+    for (let i = 0; i < 6; i++) {
+      const f = (i + 0.5) / 6;
+      gable.box(side * s * (1 - f), RIDGE * f, 0, (s / 6) * 0.62, 0.075, t * 1.05);
+    }
+  }
+  // Collar tie along the bottom, where the gable meets the wall below it.
+  gable.box(0, 0.07, 0, s, 0.07, t);
+
+  // --- Doorway variants ---
   const doorSide = (s - DOOR_HALF) / 2;
-  doorway.boards(-(DOOR_HALF + doorSide), 0, doorSide, BOARD / 2, 0, G);
-  doorway.boards(DOOR_HALF + doorSide, 0, doorSide, BOARD / 2, 0, G);
-  doorway.boards(0, 0, DOOR_HALF, BOARD / 2, DOOR_HEAD, G);
-  doorway.box(-DOOR_HALF, DOOR_HEAD / 2, 0, jamb, DOOR_HEAD / 2, jamb);
-  doorway.box(DOOR_HALF, DOOR_HEAD / 2, 0, jamb, DOOR_HEAD / 2, jamb);
-  doorway.box(0, DOOR_HEAD, 0, DOOR_HALF + jamb, 0.11, jamb);
-  doorway.box(-(s - jamb), G / 2, 0, jamb, G / 2, jamb);
-  doorway.box(s - jamb, G / 2, 0, jamb, G / 2, jamb);
+  const doorway = new Carpentry();
+  doorway.boards(-(DOOR_HALF + doorSide), 0, doorSide, b, 0, G);
+  doorway.boards(DOOR_HALF + doorSide, 0, doorSide, b, 0, G);
+  doorway.boards(0, 0, DOOR_HALF, b, DOOR_HEAD, G);
+  doorway.box(-DOOR_HALF, DOOR_HEAD / 2, 0, t, DOOR_HEAD / 2, t);
+  doorway.box(DOOR_HALF, DOOR_HEAD / 2, 0, t, DOOR_HEAD / 2, t);
+  doorway.box(0, DOOR_HEAD, 0, DOOR_HALF + t, 0.11, t);
+  doorway.endPosts(s, G);
 
-  // --- Window: boards below the sill and above the head, framed ---
-  const win = new Carpentry();
-  const winSide = (s - WIN_HALF) / 2;
-  win.boards(-(WIN_HALF + winSide), 0, winSide, BOARD / 2, 0, G);
-  win.boards(WIN_HALF + winSide, 0, winSide, BOARD / 2, 0, G);
-  win.boards(0, 0, WIN_HALF, BOARD / 2, 0, WIN_SILL);
-  win.boards(0, 0, WIN_HALF, BOARD / 2, WIN_HEAD, G);
-  win.box(0, WIN_SILL, 0, WIN_HALF + jamb, 0.09, 0.16);
-  win.box(0, WIN_HEAD, 0, WIN_HALF + jamb, 0.09, jamb);
-  win.box(-WIN_HALF, (WIN_SILL + WIN_HEAD) / 2, 0, jamb, (WIN_HEAD - WIN_SILL) / 2, jamb);
-  win.box(WIN_HALF, (WIN_SILL + WIN_HEAD) / 2, 0, jamb, (WIN_HEAD - WIN_SILL) / 2, jamb);
-  win.box(-(s - jamb), G / 2, 0, jamb, G / 2, jamb);
-  win.box(s - jamb, G / 2, 0, jamb, G / 2, jamb);
+  // Arched: the same opening with its head stepped into a curve.
+  const doorArch = new Carpentry();
+  doorArch.boards(-(DOOR_HALF + doorSide), 0, doorSide, b, 0, G);
+  doorArch.boards(DOOR_HALF + doorSide, 0, doorSide, b, 0, G);
+  const archRows = 5;
+  for (let i = 0; i < archRows; i++) {
+    // A quarter-circle profile: the opening narrows towards its crown.
+    const f0 = i / archRows;
+    const f1 = (i + 1) / archRows;
+    const fm = (f0 + f1) / 2;
+    const halfOpen = DOOR_HALF * Math.sqrt(Math.max(0, 1 - fm * fm));
+    const y0 = DOOR_HEAD - 0.5 + f0 * (DOOR_HALF + 0.5);
+    const y1 = DOOR_HEAD - 0.5 + f1 * (DOOR_HALF + 0.5);
+    const side = (DOOR_HALF - halfOpen) / 2;
+    if (side > 0.04) {
+      doorArch.box(-(halfOpen + side), (y0 + y1) / 2, 0, side, (y1 - y0) / 2, t);
+      doorArch.box(halfOpen + side, (y0 + y1) / 2, 0, side, (y1 - y0) / 2, t);
+    }
+  }
+  doorArch.boards(0, 0, DOOR_HALF, b, DOOR_HEAD + DOOR_HALF, G);
+  doorArch.box(-DOOR_HALF, (DOOR_HEAD - 0.5) / 2, 0, t, (DOOR_HEAD - 0.5) / 2, t);
+  doorArch.box(DOOR_HALF, (DOOR_HEAD - 0.5) / 2, 0, t, (DOOR_HEAD - 0.5) / 2, t);
+  doorArch.endPosts(s, G);
 
-  // --- Railing: two rails on balusters ---
+  // Fitted with a leaf: the same frame, closed. Vertical planks and two braces.
+  const doorLeaf = new Carpentry();
+  doorLeaf.boards(-(DOOR_HALF + doorSide), 0, doorSide, b, 0, G);
+  doorLeaf.boards(DOOR_HALF + doorSide, 0, doorSide, b, 0, G);
+  doorLeaf.boards(0, 0, DOOR_HALF, b, DOOR_HEAD, G);
+  doorLeaf.box(-DOOR_HALF, DOOR_HEAD / 2, 0, t, DOOR_HEAD / 2, t);
+  doorLeaf.box(DOOR_HALF, DOOR_HEAD / 2, 0, t, DOOR_HEAD / 2, t);
+  doorLeaf.box(0, DOOR_HEAD, 0, DOOR_HALF + t, 0.11, t);
+  const leafPlanks = 6;
+  for (let i = 0; i < leafPlanks; i++) {
+    const pitch = (DOOR_HALF * 2) / leafPlanks;
+    doorLeaf.box(
+      -DOOR_HALF + (i + 0.5) * pitch,
+      (DOOR_HEAD - 0.06) / 2,
+      0,
+      pitch / 2 - 0.02,
+      (DOOR_HEAD - 0.06) / 2,
+      0.05,
+    );
+  }
+  for (const y of [0.5, DOOR_HEAD - 0.5]) {
+    doorLeaf.box(0, y, 0, DOOR_HALF - 0.05, 0.09, 0.075);
+  }
+  doorLeaf.endPosts(s, G);
+
+  /** A window of the given opening, optionally with a pane and glazing bars. */
+  const windowGeo = (half: number, sill: number, head: number, glazed: boolean): PieceGeo => {
+    const c = new Carpentry();
+    const side = (s - half) / 2;
+    c.boards(-(half + side), 0, side, b, 0, G);
+    c.boards(half + side, 0, side, b, 0, G);
+    c.boards(0, 0, half, b, 0, sill);
+    c.boards(0, 0, half, b, head, G);
+    // Sill juts out; head is flush.
+    c.box(0, sill, 0, half + t, 0.09, 0.17);
+    c.box(0, head, 0, half + t, 0.09, t);
+    c.box(-half, (sill + head) / 2, 0, t, (head - sill) / 2, t);
+    c.box(half, (sill + head) / 2, 0, t, (head - sill) / 2, t);
+    if (glazed) {
+      // Glazing bars, in timber, dividing the opening into panes.
+      c.box(0, (sill + head) / 2, 0, half, 0.035, 0.045);
+      c.box(0, (sill + head) / 2, 0, 0.035, (head - sill) / 2, 0.045);
+    }
+    c.endPosts(s, G);
+    const out: PieceGeo = { timber: c.finish() };
+    if (glazed) {
+      out.glass = new Carpentry()
+        .box(0, (sill + head) / 2, 0, half - 0.02, (head - sill) / 2 - 0.02, GLASS / 2)
+        .finish();
+    }
+    return out;
+  };
+
+  // --- Railing ---
   const rail = new Carpentry();
   rail.box(0, RAIL_TOP - 0.06, 0, s, 0.06, 0.09);
   rail.box(0, RAIL_TOP * 0.45, 0, s, 0.05, 0.07);
   for (let i = 0; i < 7; i++) {
-    const x = -s + 0.28 + (i * (G - 0.56)) / 6;
-    rail.box(x, RAIL_TOP / 2, 0, 0.05, RAIL_TOP / 2, 0.05);
+    rail.box(-s + 0.28 + (i * (G - 0.56)) / 6, RAIL_TOP / 2, 0, 0.05, RAIL_TOP / 2, 0.05);
   }
   rail.box(-(s - 0.08), RAIL_TOP / 2, 0, 0.08, RAIL_TOP / 2, 0.08);
   rail.box(s - 0.08, RAIL_TOP / 2, 0, 0.08, RAIL_TOP / 2, 0.08);
 
+  // --- Beam: a header spanning an edge, for openings and porches ---
+  const beam = new Carpentry()
+    .box(0, 0.16, 0, s, 0.16, 0.13)
+    .box(0, 0.36, 0, s, 0.055, 0.17)
+    // Corbels at each end, so it reads as carrying something.
+    .box(-(s - 0.3), 0.06, 0, 0.3, 0.06, 0.11)
+    .box(s - 0.3, 0.06, 0, 0.3, 0.06, 0.11);
+
   // --- Floor: boards across joists ---
   const floor = new Carpentry();
   const joistH = (FLOOR_TOP - BOARD) / 2;
-  floor.box(-(s - 0.5), joistH, 0, jamb, joistH, s);
-  floor.box(s - 0.5, joistH, 0, jamb, joistH, s);
-  const floorBoards = 6;
-  for (let i = 0; i < floorBoards; i++) {
-    const pitch = G / floorBoards;
-    floor.box(0, FLOOR_TOP - BOARD / 2, -s + (i + 0.5) * pitch, s, BOARD / 2, pitch / 2 - 0.03);
+  floor.box(-(s - 0.5), joistH, 0, t, joistH, s);
+  floor.box(s - 0.5, joistH, 0, t, joistH, s);
+  for (let i = 0; i < 6; i++) {
+    const pitch = G / 6;
+    floor.box(0, FLOOR_TOP - b, -s + (i + 0.5) * pitch, s, b, pitch / 2 - 0.03);
   }
 
-  // --- Foundation: the same, heavier, on four sunk posts ---
+  // --- Foundation: heavier, on four sunk posts ---
   const foundation = new Carpentry();
   for (const px of [-(s - 0.45), s - 0.45]) {
     for (const pz of [-(s - 0.45), s - 0.45]) {
@@ -453,78 +600,137 @@ function buildGeometries(): Record<PieceKind, BufferGeometry> {
   }
   const fJoist = (FOUNDATION_TOP - 0.18) / 2;
   for (const pz of [-(s - 0.45), 0, s - 0.45]) {
-    foundation.box(0, fJoist, pz, s, fJoist, jamb);
+    foundation.box(0, fJoist, pz, s, fJoist, t);
   }
   for (let i = 0; i < 5; i++) {
     const pitch = G / 5;
     foundation.box(-s + (i + 0.5) * pitch, FOUNDATION_TOP - 0.09, 0, pitch / 2 - 0.035, 0.09, s);
   }
 
-  // --- Ramp: treads on two stringers, rising along +Z ---
-  const ramp = new Carpentry();
-  const rampLen = Math.hypot(G, G);
-  // A tread's own +Z has to point up the slope. Three's X rotation sends (0,0,1)
-  // to (0,-sin a, cos a), so the angle is negative to make it rise.
-  const rampTilt = -Math.PI / 4;
+  // --- Ramp and stairs, both rising a full cell along +Z ---
+  const slopeLen = Math.hypot(G, G);
+  const slopeTilt = -Math.PI / 4;
   const up = Math.SQRT1_2;
+  const ramp = new Carpentry();
   for (const sx of [-(s - 0.12), s - 0.12]) {
-    ramp.box(sx, G / 2, 0, jamb, 0.13, rampLen / 2, rampTilt);
+    ramp.box(sx, G / 2, 0, t, 0.13, slopeLen / 2, slopeTilt);
   }
-  const treads = 8;
-  for (let i = 0; i < treads; i++) {
-    const t = -rampLen / 2 + (i + 0.5) * (rampLen / treads);
-    ramp.box(0, G / 2 + t * up + 0.1, t * up, s, BOARD / 2, rampLen / treads / 2 - 0.03, rampTilt);
+  for (let i = 0; i < 8; i++) {
+    const tt = -slopeLen / 2 + (i + 0.5) * (slopeLen / 8);
+    ramp.box(0, G / 2 + tt * up + 0.1, tt * up, s, b, slopeLen / 8 / 2 - 0.03, slopeTilt);
   }
 
-  // --- Stairs: real treads and risers, same rise and run as the ramp ---
   const stairs = new Carpentry();
   for (let i = 0; i < STEPS; i++) {
     const rise = G / STEPS;
     const run = G / STEPS;
     const zc = -s + (i + 0.5) * run;
     const yTop = (i + 1) * rise;
-    // Tread, then the riser under its leading edge.
-    stairs.box(0, yTop - BOARD / 2, zc, s, BOARD / 2, run / 2);
-    stairs.box(0, yTop - rise / 2, zc - run / 2 + BOARD / 2, s - 0.16, rise / 2, BOARD / 2);
+    stairs.box(0, yTop - b, zc, s, b, run / 2);
+    stairs.box(0, yTop - rise / 2, zc - run / 2 + b, s - 0.16, rise / 2, b);
   }
   for (const sx of [-(s - 0.1), s - 0.1]) {
-    stairs.box(sx, G / 2, 0, 0.1, 0.14, rampLen / 2, rampTilt);
+    stairs.box(sx, G / 2, 0, 0.1, 0.14, slopeLen / 2, slopeTilt);
   }
 
-  // --- Roof: a gable, two sheets to a ridge running along X ---
-  const roof = new Carpentry();
-  const slope = Math.hypot(RIDGE, s);
-  const pitchAngle = Math.atan2(RIDGE, s);
-  for (const side of [1, -1]) {
-    const my = RIDGE / 2;
-    const mz = (side * s) / 2;
-    const dy = -RIDGE / slope;
-    const dz = (side * s) / slope;
-    const sheets = 4;
+  /** Sheets of boards laid up a slope, shared by every roof shape. */
+  const slopeSheets = (
+    c: Carpentry,
+    fromZ: number,
+    fromY: number,
+    toZ: number,
+    toY: number,
+    halfWidth: number,
+  ): void => {
+    const len = Math.hypot(toY - fromY, toZ - fromZ);
+    const angle = Math.atan2(toY - fromY, -(toZ - fromZ));
+    const sheets = Math.max(2, Math.round(len / 0.8));
     for (let i = 0; i < sheets; i++) {
-      const t = -slope / 2 + (i + 0.5) * (slope / sheets);
-      roof.box(0, my + t * dy, mz + t * dz, s, BOARD / 2, slope / sheets / 2 - 0.025, side * pitchAngle);
+      const f = (i + 0.5) / sheets;
+      c.box(
+        0,
+        fromY + (toY - fromY) * f,
+        fromZ + (toZ - fromZ) * f,
+        halfWidth,
+        b,
+        len / sheets / 2 - 0.02,
+        angle,
+      );
+    }
+  };
+
+  const roofGable = new Carpentry();
+  slopeSheets(roofGable, s, 0, 0, RIDGE, s);
+  slopeSheets(roofGable, -s, 0, 0, RIDGE, s);
+  roofGable.box(0, RIDGE - 0.08, 0, s, 0.09, 0.11);
+
+  // Hip: four slopes to a point. Built as two gable sheets plus two end sheets that
+  // narrow, which is close enough to a hip at this scale and keeps every face a box.
+  const roofHip = new Carpentry();
+  slopeSheets(roofHip, s, 0, 0, RIDGE * 0.98, s * 0.72);
+  slopeSheets(roofHip, -s, 0, 0, RIDGE * 0.98, s * 0.72);
+  for (const side of [1, -1]) {
+    const steps = 4;
+    for (let i = 0; i < steps; i++) {
+      const f = (i + 0.5) / steps;
+      // A wedge closing the end, narrowing as it climbs.
+      roofHip.box(
+        side * s * (1 - f * 0.72),
+        RIDGE * f * 0.98,
+        0,
+        (s / steps) * 0.78,
+        b,
+        s * (1 - f * 0.55),
+      );
     }
   }
-  roof.box(0, RIDGE - 0.08, 0, s, 0.09, 0.11);
+  roofHip.box(0, RIDGE * 0.98 - 0.08, 0, s * 0.3, 0.09, 0.11);
 
-  // --- Pillar: a post with a collar top and bottom ---
+  const roofShed = new Carpentry();
+  slopeSheets(roofShed, -s, 0, s, RIDGE, s);
+  roofShed.box(0, RIDGE - 0.08, s - 0.1, s, 0.09, 0.11);
+
+  // Flat: a deck with a parapet, so a rooftop is a place you can stand.
+  const roofFlat = new Carpentry();
+  const dJoist = (DECK_TOP - BOARD) / 2;
+  for (const pz of [-(s - 0.5), s - 0.5]) {
+    roofFlat.box(0, dJoist, pz, s, dJoist, t);
+  }
+  for (let i = 0; i < 6; i++) {
+    const pitch = G / 6;
+    roofFlat.box(-s + (i + 0.5) * pitch, DECK_TOP - b, 0, pitch / 2 - 0.03, b, s);
+  }
+  for (const side of [1, -1]) {
+    roofFlat.box(0, DECK_TOP + PARAPET / 2, side * (s - 0.07), s, PARAPET / 2, 0.07);
+    roofFlat.box(side * (s - 0.07), DECK_TOP + PARAPET / 2, 0, 0.07, PARAPET / 2, s);
+  }
+
   const pillar = new Carpentry()
     .box(0, G / 2, 0, 0.15, G / 2, 0.15)
     .box(0, 0.09, 0, 0.22, 0.09, 0.22)
     .box(0, G - 0.09, 0, 0.22, 0.09, 0.22);
 
   return {
-    wall: wall.finish(),
-    doorway: doorway.finish(),
-    window: win.finish(),
-    railing: rail.finish(),
-    floor: floor.finish(),
-    ramp: ramp.finish(),
-    stairs: stairs.finish(),
-    roof: roof.finish(),
-    pillar: pillar.finish(),
-    foundation: foundation.finish(),
+    wall: { timber: wall.finish() },
+    wallHalf: { timber: wallHalf.finish() },
+    gable: { timber: gable.finish() },
+    doorway: { timber: doorway.finish() },
+    doorArch: { timber: doorArch.finish() },
+    doorLeaf: { timber: doorLeaf.finish() },
+    windowOpen: windowGeo(WIN_HALF, WIN_SILL, WIN_HEAD, false),
+    windowGlass: windowGeo(WIN_HALF, WIN_SILL, WIN_HEAD, true),
+    windowVent: windowGeo(VENT_HALF, VENT_SILL, VENT_HEAD, true),
+    railing: { timber: rail.finish() },
+    beam: { timber: beam.finish() },
+    floor: { timber: floor.finish() },
+    foundation: { timber: foundation.finish() },
+    ramp: { timber: ramp.finish() },
+    stairs: { timber: stairs.finish() },
+    roofGable: { timber: roofGable.finish() },
+    roofHip: { timber: roofHip.finish() },
+    roofShed: { timber: roofShed.finish() },
+    roofFlat: { timber: roofFlat.finish() },
+    pillar: { timber: pillar.finish() },
   };
 }
 
@@ -532,39 +738,78 @@ function buildGeometries(): Record<PieceKind, BufferGeometry> {
  * The solid parts of a piece, in its own frame.
  *
  * A doorway is the reason this is a list rather than one box: its opening has to be
- * walkable, so the piece is described as two jambs and a lintel with a gap between
- * them, and both collision and camera occlusion read the same description. Floors,
- * ramps, stairs and roofs return nothing — they are things you stand on, and giving
- * them sides as well would trap you on top of them.
+ * walkable, so the piece is described as two jambs and a lintel with a gap between,
+ * and collision, camera occlusion and picking all read the same description. Floors,
+ * ramps, stairs and sloped roofs return nothing — they are things you stand on, and
+ * giving them sides as well would trap you on top of them.
  */
 function solidsOf(kind: PieceKind): Slab[] {
   const G = BUILD_GRID;
   const s = G / 2;
   const t = POST / 2;
+  const full = (hx: number, cx = 0, y0 = 0, y1 = G): Slab => ({ cx, cz: 0, hx, hz: t, y0, y1 });
+
   switch (kind) {
     case 'wall':
-      return [{ cx: 0, cz: 0, hx: s, hz: t, y0: 0, y1: G }];
-    case 'doorway': {
+      return [full(s)];
+    case 'wallHalf':
+      return [full(s, 0, 0, HALF_WALL)];
+    case 'gable':
+      // Stepped like the cladding, so the triangle is solid where it is filled and
+      // open where the roof slopes away.
+      return Array.from({ length: 5 }, (_, i) => {
+        const y0 = (i / 5) * RIDGE;
+        const y1 = ((i + 1) / 5) * RIDGE;
+        return full(Math.max(0.05, s * (1 - (y0 + y1) / 2 / RIDGE)), 0, y0, y1);
+      });
+    case 'doorway':
+    case 'doorArch': {
       const side = (s - DOOR_HALF) / 2;
       return [
-        { cx: -(DOOR_HALF + side), cz: 0, hx: side, hz: t, y0: 0, y1: G },
-        { cx: DOOR_HALF + side, cz: 0, hx: side, hz: t, y0: 0, y1: G },
-        { cx: 0, cz: 0, hx: DOOR_HALF, hz: t, y0: DOOR_HEAD, y1: G },
+        full(side, -(DOOR_HALF + side)),
+        full(side, DOOR_HALF + side),
+        full(DOOR_HALF, 0, DOOR_HEAD, G),
       ];
     }
-    case 'window': {
+    case 'doorLeaf':
+      // Closed, so it is simply a wall.
+      return [full(s)];
+    case 'windowOpen':
+    case 'windowGlass': {
       const side = (s - WIN_HALF) / 2;
       return [
-        { cx: -(WIN_HALF + side), cz: 0, hx: side, hz: t, y0: 0, y1: G },
-        { cx: WIN_HALF + side, cz: 0, hx: side, hz: t, y0: 0, y1: G },
-        { cx: 0, cz: 0, hx: WIN_HALF, hz: t, y0: 0, y1: WIN_SILL },
-        { cx: 0, cz: 0, hx: WIN_HALF, hz: t, y0: WIN_HEAD, y1: G },
+        full(side, -(WIN_HALF + side)),
+        full(side, WIN_HALF + side),
+        full(WIN_HALF, 0, 0, WIN_SILL),
+        full(WIN_HALF, 0, WIN_HEAD, G),
+      ];
+    }
+    case 'windowVent': {
+      const side = (s - VENT_HALF) / 2;
+      return [
+        full(side, -(VENT_HALF + side)),
+        full(side, VENT_HALF + side),
+        full(VENT_HALF, 0, 0, VENT_SILL),
+        full(VENT_HALF, 0, VENT_HEAD, G),
       ];
     }
     case 'railing':
       return [{ cx: 0, cz: 0, hx: s, hz: 0.1, y0: 0, y1: RAIL_TOP }];
+    case 'beam':
+      return [{ cx: 0, cz: 0, hx: s, hz: 0.17, y0: 0, y1: 0.42 }];
     case 'pillar':
       return [{ cx: 0, cz: 0, hx: 0.22, hz: 0.22, y0: 0, y1: G }];
+    case 'roofFlat': {
+      // The parapet, so you cannot walk off a rooftop.
+      const y0 = DECK_TOP;
+      const y1 = DECK_TOP + PARAPET;
+      return [
+        { cx: 0, cz: s - 0.07, hx: s, hz: 0.07, y0, y1 },
+        { cx: 0, cz: -(s - 0.07), hx: s, hz: 0.07, y0, y1 },
+        { cx: s - 0.07, cz: 0, hx: 0.07, hz: s, y0, y1 },
+        { cx: -(s - 0.07), cz: 0, hx: 0.07, hz: s, y0, y1 },
+      ];
+    }
     default:
       return [];
   }
@@ -574,20 +819,35 @@ function solidsOf(kind: PieceKind): Slab[] {
 function pickBox(kind: PieceKind): Slab {
   const G = BUILD_GRID;
   const s = G / 2;
+  const edge = (y1: number, hz = POST / 2): Slab => ({ cx: 0, cz: 0, hx: s, hz, y0: 0, y1 });
   switch (kind) {
     case 'wall':
     case 'doorway':
-    case 'window':
-      return { cx: 0, cz: 0, hx: s, hz: POST / 2, y0: 0, y1: G };
+    case 'doorArch':
+    case 'doorLeaf':
+    case 'windowOpen':
+    case 'windowGlass':
+    case 'windowVent':
+      return edge(G);
+    case 'wallHalf':
+      return edge(HALF_WALL);
+    case 'gable':
+      return edge(RIDGE);
     case 'railing':
-      return { cx: 0, cz: 0, hx: s, hz: 0.12, y0: 0, y1: RAIL_TOP };
+      return edge(RAIL_TOP, 0.12);
+    case 'beam':
+      return edge(0.42, 0.18);
     case 'pillar':
       return { cx: 0, cz: 0, hx: 0.25, hz: 0.25, y0: 0, y1: G };
     case 'floor':
       return { cx: 0, cz: 0, hx: s, hz: s, y0: 0, y1: FLOOR_TOP };
     case 'foundation':
       return { cx: 0, cz: 0, hx: s, hz: s, y0: -0.65, y1: FOUNDATION_TOP };
-    case 'roof':
+    case 'roofFlat':
+      return { cx: 0, cz: 0, hx: s, hz: s, y0: 0, y1: DECK_TOP + PARAPET };
+    case 'roofGable':
+    case 'roofHip':
+    case 'roofShed':
       return { cx: 0, cz: 0, hx: s, hz: s, y0: 0, y1: RIDGE };
     default:
       return { cx: 0, cz: 0, hx: s, hz: s, y0: 0, y1: G };
@@ -605,11 +865,23 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     t.wrapS = RepeatWrapping;
     t.wrapT = RepeatWrapping;
   }
-  const solid = new MeshStandardMaterial({
+  const timberMat = new MeshStandardMaterial({
     map: tex.map,
     normalMap: tex.normalMap,
     roughnessMap: tex.roughnessMap,
     roughness: 1,
+    metalness: 0,
+  });
+
+  // Glass, kept deliberately cheap: a smooth translucent standard material picks up
+  // the scene's environment and the sun, which at a window's scale is the whole
+  // effect. A physical material with real transmission would mean an extra render of
+  // the backdrop per pane, for something you mostly see the sky through.
+  const glassMat = new MeshStandardMaterial({
+    color: 0xd6ecf5,
+    transparent: true,
+    opacity: 0.26,
+    roughness: 0.06,
     metalness: 0,
   });
 
@@ -631,8 +903,6 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     metalness: 0,
     emissive: 0x66180f,
   });
-  // Laid over the piece the crosshair is on, so removing is never a guess about
-  // which one will go.
   const markMaterial = new MeshStandardMaterial({
     color: 0xffd166,
     transparent: true,
@@ -646,26 +916,42 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   const G = BUILD_GRID;
   const geometries = buildGeometries();
 
-  // One instanced mesh per kind: a thousand pieces is ten draw calls. Culling is
-  // switched off deliberately — the alternative is recomputing a bounding sphere
-  // over every instance on every placement, to save ten draws that cost nothing.
-  const kinds = new Map<PieceKind, { mesh: InstancedMesh; live: Placed[] }>();
+  interface Bucket {
+    mesh: InstancedMesh;
+    /** A second mesh for panes, sharing the same instance transforms. */
+    glass: InstancedMesh | null;
+    live: Placed[];
+  }
+
+  // One instanced mesh per kind: a thousand pieces is a couple of dozen draw calls.
+  // Culling is off deliberately — the alternative is recomputing a bounding sphere
+  // over every instance on every placement, to save draws that cost nothing.
+  const kinds = new Map<PieceKind, Bucket>();
   for (const kind of PIECES) {
-    const mesh = new InstancedMesh(geometries[kind], solid, MAX_PER_KIND);
+    const geo = geometries[kind];
+    const mesh = new InstancedMesh(geo.timber, timberMat, MAX_PER_KIND);
     mesh.count = 0;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.frustumCulled = false;
     mesh.name = `Build:${kind}`;
     group.add(mesh);
-    kinds.set(kind, { mesh, live: [] });
+    let glass: InstancedMesh | null = null;
+    if (geo.glass) {
+      glass = new InstancedMesh(geo.glass, glassMat, MAX_PER_KIND);
+      glass.count = 0;
+      // Panes do not cast: a shadow from translucent glass reads as a solid board,
+      // and it costs a second shadow pass over every window in the scene.
+      glass.castShadow = false;
+      glass.receiveShadow = false;
+      glass.frustumCulled = false;
+      glass.name = `Glass:${kind}`;
+      group.add(glass);
+    }
+    kinds.set(kind, { mesh, glass, live: [] });
   }
 
   const placed = new Map<string, Placed>();
-  /**
-   * Pieces grouped by the grid column they stand in, so asking how high the floor
-   * is at a point costs one map lookup rather than a walk over everything built.
-   */
   const columns = new Map<string, Placed[]>();
   const colKey = (gx: number, gz: number): string => `${gx}|${gz}`;
   const columnOf = (x: number, z: number): string => colKey(Math.round(x / G), Math.round(z / G));
@@ -674,42 +960,35 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   let quarter = 0;
   let active = false;
 
-  const ghost = new Mesh(geometries.wall, ghostOk);
+  const ghost = new Mesh(geometries.wall.timber, ghostOk);
   ghost.visible = false;
   ghost.castShadow = false;
   ghost.receiveShadow = false;
   group.add(ghost);
 
-  const mark = new Mesh(geometries.wall, markMaterial);
+  const mark = new Mesh(geometries.wall.timber, markMaterial);
   mark.visible = false;
   mark.castShadow = false;
   mark.receiveShadow = false;
   group.add(mark);
 
-  /** Where the preview sits, its rotation, and whether that slot is free. */
   const at = new Vector3();
   let atTurn = 0;
   let free = true;
-  /** The piece under the crosshair, if any. */
   let aimed: Placed | null = null;
-
   const matrix = new Matrix4();
 
   /**
    * A slot's identity, on a half-cell index so cells, edges and corners all get
    * distinct keys from the same expression: a cell lands on two even indices, an
    * edge on one odd, a corner on two odd.
-   *
-   * Rotation is part of it only for the pieces where two of them in one slot is a
-   * sensible thing to want — it never is for an edge, which has exactly one
-   * orientation, and a floor rotated twice is the same floor.
    */
   const slotKey = (kind: PieceKind, p: Vector3, turn: number): string => {
     const h = G / 2;
     const gx = Math.round(p.x / h);
     const gy = Math.round(p.y / h);
     const gz = Math.round(p.z / h);
-    const facing = LATTICE[kind] === 'cell' && kind !== 'floor' ? turn % 4 : 0;
+    const facing = ROTATABLE.has(kind) ? turn % 4 : 0;
     return `${kind}:${gx}|${gy}|${gz}|${facing}`;
   };
 
@@ -717,11 +996,10 @@ export function createBuildSite(assets: AssetManager): BuildSite {
    * Snaps the raw aim point to the lattice slot the selected piece belongs in, and
    * returns the rotation that slot implies.
    *
-   * Edge pieces are the interesting case. The cell you are aiming at is found
-   * first, then the side of it you are nearest — so a wall goes on the side you are
-   * looking at, which is what makes enclosing a floor with four walls a matter of
-   * turning around rather than of lining anything up. `rotate` steps to the next
-   * side from there.
+   * Edge pieces are the interesting case. The cell you are aiming at is found first,
+   * then the side of it you are nearest — so a piece goes on the side you are looking
+   * at, which makes enclosing a floor a matter of turning around rather than of
+   * lining anything up. `rotate` steps to the next side from there.
    */
   const snap = (raw: Vector3, out: Vector3): number => {
     const lattice = LATTICE[selected];
@@ -731,7 +1009,6 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       return quarter;
     }
     if (lattice === 'corner') {
-      // Corners sit half a cell off the cell centres, where four cells meet.
       out.x = (Math.round(raw.x / G - 0.5) + 0.5) * G;
       out.z = (Math.round(raw.z / G - 0.5) + 0.5) * G;
       return quarter;
@@ -740,7 +1017,6 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     const cz = Math.round(raw.z / G) * G;
     const ox = raw.x - cx;
     const oz = raw.z - cz;
-    // Side 0 = +X, 1 = +Z, 2 = -X, 3 = -Z; whichever the aim leans towards.
     let side: number;
     if (Math.abs(ox) >= Math.abs(oz)) side = ox >= 0 ? 0 : 2;
     else side = oz >= 0 ? 1 : 3;
@@ -748,11 +1024,9 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     const half = G / 2;
     out.x = cx + (side === 0 ? half : side === 2 ? -half : 0);
     out.z = cz + (side === 1 ? half : side === 3 ? -half : 0);
-    // A wall on an X side faces along X, so it is turned a quarter.
     return side === 0 || side === 2 ? 1 : 0;
   };
 
-  /** Turns a world point into a piece's own frame, undoing its quarter turn. */
   const toLocal = (p: Placed, x: number, z: number): [number, number] => {
     const dx = x - p.x;
     const dz = z - p.z;
@@ -789,7 +1063,6 @@ export function createBuildSite(assets: AssetManager): BuildSite {
           const ang = (p.turn * Math.PI) / 2;
           const c = Math.cos(ang);
           const sn = Math.sin(ang);
-          // Ray origin and direction in the piece's frame.
           const ex = eye.x - p.x;
           const ez = eye.z - p.z;
           const ox = c * ex - sn * ez - b.cx;
@@ -799,7 +1072,6 @@ export function createBuildSite(assets: AssetManager): BuildSite {
           const dz = sn * forward.x + c * forward.z;
           const dy = forward.y;
 
-          // Slab test, one axis at a time.
           let t0 = 0;
           let t1 = bestT;
           let ok = true;
@@ -831,8 +1103,8 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   /**
    * The piece occupying the slot the preview is in, if any.
    *
-   * Bounded to just over half a cell, so it can only ever name something the
-   * preview is sitting on top of — never a piece somewhere off to the side.
+   * Bounded to just over half a cell, so it can only ever name something the preview
+   * is sitting on top of — never a piece somewhere off to the side.
    */
   const nearestToPreview = (): Placed | null => {
     if (placed.size === 0) return null;
@@ -847,8 +1119,6 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         for (const p of list) {
           const dx = p.x - at.x;
           const dz = p.z - at.z;
-          // Height matters as much as position, or a floor five storeys up would be
-          // named while you point at the ground.
           const dy = p.level - at.y;
           const d = dx * dx + dz * dz + dy * dy;
           if (d < bestD) {
@@ -873,43 +1143,41 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       return;
     }
 
-    // The target is a fixed distance ahead, then snapped. Deliberately not a
-    // raycast against the world: a ray gives a surface, and what a grid system
-    // needs is a *slot* — snapping the aim point is both cheaper and steadier,
-    // because the preview stops jittering between two cells as the crosshair
-    // crosses an edge of some distant hillside.
+    // The target is a fixed distance ahead, then snapped. Deliberately not a raycast
+    // against the world: a ray gives a surface, and what a grid system needs is a
+    // *slot* — snapping is cheaper and steadier, because the preview stops jittering
+    // between two cells as the crosshair crosses a distant hillside edge.
     at.copy(eye).addScaledVector(forward, REACH);
     atTurn = snap(at, at);
 
-    // The tier comes from *how far you looked up*, and the base from the terrain
-    // under the target. Measuring the aim height against the ground instead mixed
-    // the two together: eye height is about 1.7 m, so looking straight ahead
-    // already read as most of a tier, and whether it tipped over depended on how
-    // the ground happened to fall away in front of you.
+    // The tier comes from how far you looked up, and the base from the terrain under
+    // the target. Measuring the aim height against the ground instead mixed the two
+    // together: eye height is about 1.7 m, so looking straight ahead already read as
+    // most of a tier, and whether it tipped over depended on the slope in front.
     const ground = floorAt(at.x, at.z);
     const step = G / 2;
     const tier = Math.max(0, Math.floor((at.y - eye.y) / step));
     at.y = ground + tier * step;
 
-    ghost.geometry = geometries[selected];
+    ghost.geometry = geometries[selected].timber;
     ghost.position.copy(at);
     ghost.rotation.set(0, (atTurn * Math.PI) / 2, 0);
-    free = !placed.has(slotKey(selected, at, atTurn)) && (kinds.get(selected)?.live.length ?? 0) < MAX_PER_KIND;
+    const bucket = kinds.get(selected);
+    free = !placed.has(slotKey(selected, at, atTurn)) && (bucket?.live.length ?? 0) < MAX_PER_KIND;
     ghost.material = free ? ghostOk : ghostBad;
     ghost.visible = true;
 
     // What would be removed, shown before it is.
     //
     // The ray is the primary answer and the honest one. The fallback exists for a
-    // real case it cannot serve: a floor is three hundred millimetres thick lying
-    // on the ground, so a level gaze from eye height passes clean over it and you
-    // could not delete the slab you were standing beside without staring at your
-    // feet. When the ray finds nothing, whatever sits in the slot the preview is
-    // already showing is taken instead — which is predictable, because that slot is
-    // drawn on screen.
+    // real case it cannot serve: a floor is three hundred millimetres thick lying on
+    // the ground, so a level gaze from eye height passes clean over it and you could
+    // not delete the slab beside you without staring at your feet. When the ray finds
+    // nothing, whatever sits in the slot the preview is already drawing is taken
+    // instead — predictable, because that slot is on screen.
     aimed = pick(eye, forward) ?? nearestToPreview();
     if (aimed) {
-      mark.geometry = geometries[aimed.kind];
+      mark.geometry = geometries[aimed.kind].timber;
       mark.position.set(aimed.x, aimed.level, aimed.z);
       mark.rotation.set(0, (aimed.turn * Math.PI) / 2, 0);
       mark.visible = true;
@@ -918,7 +1186,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     }
   };
 
-  /** Writes a piece's transform into its kind's instance buffer. */
+  /** Writes a piece's transform into its kind's instance buffers. */
   const writeInstance = (p: Placed): void => {
     const bucket = kinds.get(p.kind);
     if (!bucket) return;
@@ -926,6 +1194,15 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     matrix.setPosition(p.x, p.level, p.z);
     bucket.mesh.setMatrixAt(p.slot, matrix);
     bucket.mesh.instanceMatrix.needsUpdate = true;
+    if (bucket.glass) {
+      bucket.glass.setMatrixAt(p.slot, matrix);
+      bucket.glass.instanceMatrix.needsUpdate = true;
+    }
+  };
+
+  const setCounts = (bucket: Bucket): void => {
+    bucket.mesh.count = bucket.live.length;
+    if (bucket.glass) bucket.glass.count = bucket.live.length;
   };
 
   const place = (): boolean => {
@@ -945,7 +1222,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       slot: bucket.live.length,
     };
     bucket.live.push(entry);
-    bucket.mesh.count = bucket.live.length;
+    setCounts(bucket);
     writeInstance(entry);
 
     placed.set(key, entry);
@@ -959,10 +1236,10 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   /**
    * Removes one piece.
    *
-   * The instance buffer is kept dense: the last live instance of that kind is moved
-   * into the freed slot and the count drops by one. That keeps the draw call over a
-   * contiguous range, so removing from the middle of a large structure costs the
-   * same as removing the last thing placed.
+   * The instance buffers are kept dense: the last live instance of that kind is
+   * moved into the freed slot and the count drops by one. That keeps the draw over a
+   * contiguous range, so removing from the middle of a large structure costs the same
+   * as removing the last thing placed.
    */
   const remove = (p: Placed): void => {
     const bucket = kinds.get(p.kind);
@@ -975,8 +1252,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       writeInstance(moved);
     }
     bucket.live.pop();
-    bucket.mesh.count = bucket.live.length;
-    bucket.mesh.instanceMatrix.needsUpdate = true;
+    setCounts(bucket);
 
     placed.delete(p.key);
     const col = columnOf(p.x, p.z);
@@ -992,17 +1268,12 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     }
   };
 
-  const removeAimed = (): boolean => {
-    if (!aimed) return false;
-    remove(aimed);
-    return true;
-  };
-
   const clear = (): void => {
     for (const bucket of kinds.values()) {
       bucket.live.length = 0;
-      bucket.mesh.count = 0;
+      setCounts(bucket);
       bucket.mesh.instanceMatrix.needsUpdate = true;
+      if (bucket.glass) bucket.glass.instanceMatrix.needsUpdate = true;
     }
     placed.clear();
     columns.clear();
@@ -1014,11 +1285,11 @@ export function createBuildSite(assets: AssetManager): BuildSite {
    * The walkable surface of one piece at a point, or `null` if that point is not
    * over it.
    *
-   * Worked out from the piece's own slot and rotation rather than looked up in the
-   * world's collider registry. The registry holds circles with one flat top each,
-   * which is the right shape for a tree trunk, the wrong shape for a floor slab and
-   * hopeless for a slope: it reports the highest top containing the point, so a
-   * slope approximated by overlapping circles collapses into a flat block.
+   * Worked out from the piece's own slot and rotation rather than from the world's
+   * collider registry. That registry holds circles with one flat top each, which is
+   * right for a tree trunk, wrong for a floor slab, and hopeless for a slope: it
+   * reports the highest top containing the point, so a slope approximated by
+   * overlapping circles collapses into a flat block.
    */
   const surfaceAt = (p: Placed, x: number, z: number): number | null => {
     const s = G / 2;
@@ -1029,21 +1300,24 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         return p.level + FLOOR_TOP;
       case 'foundation':
         return p.level + FOUNDATION_TOP;
+      case 'roofFlat':
+        return p.level + DECK_TOP;
       case 'ramp':
-        // The treads follow the plane that is level with the floor at the low edge
-        // and a full cell up at the high one.
         return p.level + Math.max(0, Math.min(G, lz + s));
       case 'stairs': {
-        // The tread you are standing on, so a flight feels like steps underfoot
-        // rather than a smooth slope.
+        // The tread you are standing on, so a flight feels like steps underfoot.
         const i = Math.min(STEPS - 1, Math.max(0, Math.floor(((lz + s) / G) * STEPS)));
         return p.level + ((i + 1) * G) / STEPS;
       }
-      case 'roof':
-        // A gable: highest along the ridge at lz = 0, down to nothing at the eaves.
+      case 'roofGable':
         return p.level + Math.max(0, RIDGE * (1 - Math.abs(lz) / s));
+      case 'roofHip':
+        // Four slopes to a point: the further out in either direction, the lower.
+        return p.level + Math.max(0, RIDGE * (1 - Math.max(Math.abs(lx), Math.abs(lz)) / s));
+      case 'roofShed':
+        return p.level + Math.max(0, Math.min(RIDGE, (RIDGE * (lz + s)) / G));
       default:
-        return null; // walls, doorways, windows, railings and pillars are not floors
+        return null; // walls, openings, railings, beams and pillars are not floors
     }
   };
 
@@ -1052,7 +1326,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     const list = columns.get(columnOf(x, z));
     if (!list) return ground;
     // A surface far above the body asking is a ceiling, not a floor. Without this
-    // limit, walking under a roof or a raised floor snapped the player onto it —
+    // limit, walking under a roof or a raised floor snapped the player onto it,
     // because the only question the query could answer was "what is the highest
     // thing in this column".
     const ceiling = fromY === undefined ? Infinity : fromY + STEP_UP;
@@ -1067,22 +1341,20 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   /**
    * Pushes a body out of the pieces it overlaps.
    *
-   * Box against box, in each piece's own frame — not the circle the collider
-   * registry would have used. A wall is four metres wide and a fifth of a metre
-   * thick; describing it with a circle big enough to cover its width stops the
-   * player two metres short of it in every direction, which is exactly what it
-   * used to do.
+   * Box against box, in each piece's own frame — not the circle the collider registry
+   * would have used. A wall is four metres wide and a fifth of a metre thick;
+   * describing it with a circle big enough to cover its width stops the player two
+   * metres short of it in every direction, which is exactly what it used to do.
    *
-   * The body is treated as a square of its radius. At a flat face — which is where
-   * a body meets a wall essentially always — that is exact; at an outside corner it
-   * is a few centimetres generous, and paying for a true distance test there is not
+   * The body is treated as a square of its radius. At a flat face — which is where a
+   * body meets a wall essentially always — that is exact; at an outside corner it is
+   * a few centimetres generous, and paying for a true distance test there is not
    * worth a square root per box per frame.
    */
   const collide = (p: Vector3, radius: number): void => {
     if (placed.size === 0) return;
     const gx = Math.round(p.x / G);
     const gz = Math.round(p.z / G);
-    // The body's own height range. Feet at p.y, and a head about 1.7 m up.
     const footY = p.y;
     const headY = p.y + 1.7;
     for (let ix = -1; ix <= 1; ix++) {
@@ -1098,8 +1370,8 @@ export function createBuildSite(assets: AssetManager): BuildSite {
           for (const b of slabs) {
             const y0 = piece.level + b.y0;
             const y1 = piece.level + b.y1;
-            // Clear of it vertically? The slack at the top is what lets you stand
-            // on a wall's top edge instead of being shoved off it.
+            // Clear of it vertically? The slack at the top is what lets you stand on
+            // a wall's top edge instead of being shoved off it.
             if (footY >= y1 - 0.1 || headY <= y0) continue;
 
             const dx = p.x - piece.x;
@@ -1111,8 +1383,6 @@ export function createBuildSite(assets: AssetManager): BuildSite {
             const oz = b.hz + radius - Math.abs(lz);
             if (ox <= 0 || oz <= 0) continue;
 
-            // Out along whichever axis needs moving least, so a body walking into a
-            // wall is stopped by it rather than squirted along it.
             let nx = lx;
             let nz = lz;
             if (oz <= ox) nz += (lz >= 0 ? 1 : -1) * oz;
@@ -1120,7 +1390,6 @@ export function createBuildSite(assets: AssetManager): BuildSite {
             nx += b.cx;
             nz += b.cz;
 
-            // Back to world. Inverse of the rotation above.
             p.x = piece.x + (c * nx + sn * nz);
             p.z = piece.z + (-sn * nx + c * nz);
           }
@@ -1151,6 +1420,9 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     return false;
   };
 
+  const categoryOf = (kind: PieceKind): number =>
+    CATEGORIES.findIndex((c) => c.pieces.includes(kind));
+
   return {
     group,
     get active() {
@@ -1170,29 +1442,49 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     get selected() {
       return selected;
     },
+    get category() {
+      return Math.max(0, categoryOf(selected));
+    },
+    setCategory: (index) => {
+      const cat = CATEGORIES[((index % CATEGORIES.length) + CATEGORIES.length) % CATEGORIES.length];
+      if (cat) selected = cat.pieces[0]!;
+    },
     cycle: (n) => {
-      const i = PIECES.indexOf(selected);
-      const next = (i + n + PIECES.length * 8) % PIECES.length;
-      selected = PIECES[next]!;
+      // Within the category, so the wheel never jumps you from a window to a roof.
+      const cat = CATEGORIES[Math.max(0, categoryOf(selected))]!;
+      const i = cat.pieces.indexOf(selected);
+      const len = cat.pieces.length;
+      selected = cat.pieces[((i + n) % len + len) % len]!;
     },
     rotate: () => {
       quarter = (quarter + 1) % 4;
     },
     place,
     aimedKind: () => aimed?.kind ?? null,
-    removeAimed,
+    removeAimed: () => {
+      if (!aimed) return false;
+      remove(aimed);
+      return true;
+    },
     count: () => placed.size,
     clear,
     update,
     heightAt,
     collide,
     blocksCamera,
-    geometryFor: (kind) => geometries[kind],
+    geometryFor: (kind) => geometries[kind].timber,
     dispose: () => {
       clear();
-      for (const bucket of kinds.values()) bucket.mesh.dispose();
-      for (const g of Object.values(geometries)) g.dispose();
-      solid.dispose();
+      for (const bucket of kinds.values()) {
+        bucket.mesh.dispose();
+        bucket.glass?.dispose();
+      }
+      for (const g of Object.values(geometries)) {
+        g.timber.dispose();
+        g.glass?.dispose();
+      }
+      timberMat.dispose();
+      glassMat.dispose();
       ghostOk.dispose();
       ghostBad.dispose();
       markMaterial.dispose();

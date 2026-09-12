@@ -354,15 +354,25 @@ try {
     const s = window.arena.scene.buildSite;
     const kinds = [
       'wall',
+      'wallHalf',
+      'gable',
       'doorway',
-      'window',
+      'doorArch',
+      'doorLeaf',
+      'windowOpen',
+      'windowGlass',
+      'windowVent',
+      'railing',
+      'beam',
       'floor',
+      'foundation',
       'ramp',
       'stairs',
-      'roof',
+      'roofGable',
+      'roofHip',
+      'roofShed',
+      'roofFlat',
       'pillar',
-      'railing',
-      'foundation',
     ];
     const out = {};
     for (const k of kinds) {
@@ -462,13 +472,13 @@ try {
     const sc = window.arena.scene;
     const s = sc.buildSite;
     s.clear();
-    s.select('roof');
+    s.select('roofGable');
     sc.player.spawn(-200, -200, 0);
     sc.player.pitch = 0;
     sc.player.update(0.016);
     sc.render(1, 0.016);
     if (!s.place()) return { placed: false };
-    const roof = window.probe.piece('roof', 0);
+    const roof = window.probe.piece('roofGable', 0);
     if (!roof) return { placed: true, found: false };
     const x = roof.x;
     const z = roof.z;
@@ -538,10 +548,107 @@ try {
   });
   console.log(`wood: ${JSON.stringify(wood)}`);
 
+  // ---- The wheel changes the piece and leaves the camera alone --------------
+  // Both were happening: the camera zoom listens for `wheel` on the canvas, so a
+  // bubble-phase listener on the window meant one turn of the wheel switched the
+  // piece *and* pulled the view back.
+  // Pulled out to a third-person distance first. Starting at zero would prove
+  // nothing: the zoom clamps at zero, so a broken build would still read 0 -> 0.
+  const before2 = await page.evaluate(() => {
+    window.arena.scene.player.setZoom(3);
+    return {
+      zoom: window.arena.scene.player.camDistTarget,
+      selected: window.arena.scene.buildSite.selected,
+    };
+  });
+  const wheelTest = before2.zoom;
+  await page.mouse.move(450, 300);
+  await page.mouse.wheel(0, 240);
+  await page.waitForTimeout(300);
+  const afterWheel = await page.evaluate(() => ({
+    zoom: window.arena.scene.player.camDistTarget,
+    selected: window.arena.scene.buildSite.selected,
+  }));
+  await page.mouse.wheel(0, -240);
+  await page.waitForTimeout(250);
+  const backAgain = await page.evaluate(() => window.arena.scene.buildSite.selected);
+  console.log(
+    `wheel: zoom ${wheelTest} -> ${afterWheel.zoom}, piece -> ${afterWheel.selected}, back -> ${backAgain}`,
+  );
+
+  // ---- Glazing -------------------------------------------------------------
+  // A window with a pane needs a second instanced mesh, sharing the transforms of
+  // the timber one, with a translucent material. An opening has no such mesh.
+  const glazing = await page.evaluate(() => {
+    const s = window.arena.scene.buildSite;
+    const find = (name) => s.group.children.find((c) => c.name === name) ?? null;
+    const pane = find('Glass:windowGlass');
+    const vent = find('Glass:windowVent');
+    return {
+      glassMeshes: s.group.children.filter((c) => c.name.startsWith('Glass:')).map((c) => c.name),
+      paneTransparent: pane?.material?.transparent === true,
+      paneOpacity: pane?.material?.opacity ?? null,
+      paneSmooth: (pane?.material?.roughness ?? 1) < 0.2,
+      paneCastsNoShadow: pane?.castShadow === false,
+      ventGlazed: !!vent,
+      // The plain opening is deliberately unglazed.
+      openingHasNoPane: !find('Glass:windowOpen'),
+      // Panes follow the frame: same instance count, same transform.
+      sharesTransforms: (() => {
+        const timber = find('Build:windowGlass');
+        if (!timber || !pane) return false;
+        return timber.count === pane.count;
+      })(),
+    };
+  });
+  console.log(`glazing: ${JSON.stringify(glazing)}`);
+
+  // ---- The gable fills the triangle a pitched roof leaves ------------------
+  const gable = await page.evaluate(() => {
+    const s = window.arena.scene.buildSite;
+    const g = s.geometryFor('gable');
+    const p = g.getAttribute('position');
+    // Width of the piece at several heights: a triangle narrows as it rises.
+    const bands = [0.2, 1.0, 1.8, 2.1];
+    const widths = bands.map((y) => {
+      let max = 0;
+      for (let i = 0; i < p.count; i++) {
+        if (Math.abs(p.getY(i) - y) < 0.25) max = Math.max(max, Math.abs(p.getX(i)));
+      }
+      return +max.toFixed(2);
+    });
+    return {
+      widths,
+      apex: +g.boundingBox.max.y.toFixed(2),
+      base: +g.boundingBox.min.y.toFixed(2),
+      // And it belongs on an edge, so it lands on the wall below it.
+      narrows: widths.every((w, i) => i === 0 || w <= widths[i - 1] + 0.01),
+    };
+  });
+  console.log(`gable: ${JSON.stringify(gable)}`);
+
+  // ---- Groups ---------------------------------------------------------------
+  const groups = await page.evaluate(() => ({
+    tabs: document.querySelectorAll('.buildCat').length,
+    cat: window.arena.scene.buildSite.category,
+  }));
+  await page.keyboard.press('BracketRight');
+  await page.waitForTimeout(300);
+  const afterTab = await page.evaluate(() => ({
+    cat: window.arena.scene.buildSite.category,
+    selected: window.arena.scene.buildSite.selected,
+    slots: document.querySelectorAll('.buildSlot').length,
+    litTabs: document.querySelectorAll('.buildCat.on').length,
+  }));
+  await page.keyboard.press('BracketLeft');
+  await page.waitForTimeout(300);
+  const backToWalls = await page.evaluate(() => window.arena.scene.buildSite.category);
+  console.log(`groups: ${groups} tabs, next -> ${JSON.stringify(afterTab)}, back -> ${backToWalls}`);
+
   // ---- The name is above the bar, not in the slots -------------------------
   const naming = await page.evaluate(() => {
     const s = window.arena.scene.buildSite;
-    s.select('ramp');
+    s.select('gable');
     return {
       insideSlots: document.querySelectorAll('.buildSlot .buildName').length,
       label: document.getElementById('buildLabel')?.textContent?.trim() ?? '',
@@ -556,7 +663,7 @@ try {
   // The label follows the piece in hand, so it has to change when the piece does.
   await page.keyboard.press('Digit3');
   await page.waitForTimeout(250);
-  const labelRamp = await page.evaluate(
+  const labelThird = await page.evaluate(
     () => document.getElementById('buildLabel')?.textContent?.trim() ?? '',
   );
   await page.keyboard.press('Digit1');
@@ -570,17 +677,30 @@ try {
   const litNow = await page.evaluate(() => ({
     lit: [...document.querySelectorAll('.buildSlot')].filter((s) => s.classList.contains('on'))
       .length,
-    litKind:
-      document.querySelector('.buildSlot.on')?.dataset.kind ?? null,
+    litKind: document.querySelector('.buildSlot.on')?.dataset.kind ?? null,
+    selected: window.arena.scene.buildSite.selected,
+    groupSize: [10, 6, 4][window.arena.scene.buildSite.category],
+    // The lit tab has to be the group the piece in hand belongs to. It was showing
+    // the previous group: the tab of a roof was still active while a wall was in
+    // hand and the wall row was on the bar.
+    litTab: document.querySelector('.buildCat.on')?.dataset.cat ?? null,
+    wantTab: String(window.arena.scene.buildSite.category),
     // Measured, not read off the style. Chromium can leave an identity matrix in
     // the computed transform of an element that has merely *had* a transition, so
     // the string is not evidence of anything; where the box actually is, is.
     tops: [...document.querySelectorAll('.buildSlot')].map((s) =>
       Math.round(s.getBoundingClientRect().top),
     ),
+    // The chosen slot has to *look* different, not merely carry a class. Border and
+    // fill are paint of the element itself, so unlike a transform they cannot lag
+    // behind the class that sets them.
+    styled: [...document.querySelectorAll('.buildSlot')].map((s) => {
+      const cs = getComputedStyle(s);
+      return { k: s.dataset.kind, on: s.classList.contains('on'), border: cs.borderTopColor };
+    }),
   }));
   console.log(
-    `naming: ${JSON.stringify(naming)} ramp="${labelRamp}" wall="${labelWall}" ${JSON.stringify(litNow)}`,
+    `naming: ${JSON.stringify(naming)} third="${labelThird}" wall="${labelWall}" ${JSON.stringify(litNow)}`,
   );
   await page.screenshot({ path: join(here, 'build_bar.png') });
 
@@ -851,7 +971,7 @@ try {
   // On the ground, not a level above it. A wall's underside must sit within a few
   // centimetres of the terrain it was placed on.
   const restsOnGround = !!resting && Math.abs(resting.gap) < 0.35 && Math.abs(resting.geoMinY) < 0.01;
-  const digitSelects = picked.selected === 'doorway' && picked.lit === 1;
+  const digitSelects = picked.selected === 'wallHalf' && picked.lit === 1;
   const floorWorks =
     floorStands.found === true &&
     floorStands.lift > 0.1 &&
@@ -862,7 +982,7 @@ try {
   // the see-through ramp and roof.
   const facesOutward =
     Object.values(winding).every((w) => w.tris > 0 && w.inverted === 0) &&
-    Object.keys(winding).length === 10;
+    Object.keys(winding).length === 20;
   // Half a wall's thickness plus the body radius is 0.5 m. Anything near that is a
   // wall; 2.4 m was the bubble.
   const hitboxThin =
@@ -902,11 +1022,47 @@ try {
     edges.allOnEdges === true && edges.encloseFloor === true && edges.distinct === true;
   // Ten instanced meshes plus the preview and the removal marker, and that count
   // does not move when ninety pieces are placed.
+  // Twenty timber meshes plus two for glazing, and the preview and marker on top.
+  // That count does not move when ninety pieces are placed.
   const costFlat =
     scaling.placed >= 80 &&
-    scaling.instanced === 10 &&
+    scaling.instanced === 22 &&
     scaling.childrenFull === scaling.childrenEmpty &&
-    scaling.childrenFull <= 13;
+    scaling.childrenFull <= 26;
+  // One turn changes the piece and leaves the camera exactly where it was, and the
+  // reverse turn comes back to where it started.
+  const wheelIsolated =
+    afterWheel.selected !== before2.selected &&
+    afterWheel.zoom === wheelTest &&
+    wheelTest === 3 &&
+    backAgain === before2.selected;
+  const glassWorks =
+    glazing.glassMeshes.length === 2 &&
+    glazing.paneTransparent === true &&
+    glazing.paneOpacity < 0.5 &&
+    glazing.paneSmooth === true &&
+    glazing.paneCastsNoShadow === true &&
+    glazing.ventGlazed === true &&
+    glazing.openingHasNoPane === true &&
+    glazing.sharesTransforms === true;
+  // A triangle: full width at the bottom, nothing at the apex, and it reaches the
+  // ridge height the pitched roofs use so the two actually meet.
+  const gableFits =
+    gable.narrows === true &&
+    gable.widths[0] > 1.7 &&
+    gable.widths[gable.widths.length - 1] < 0.7 &&
+    Math.abs(gable.apex - 2.2) < 0.25 &&
+    Math.abs(gable.base) < 0.05;
+  // Relative to wherever it started, and wrapping. The slot count has to follow the
+  // group, which is the part that was leaving a stale row on the bar.
+  const expectNext = (groups.cat + 1) % 3;
+  const groupSizes = [10, 6, 4];
+  const groupsWork =
+    groups.tabs === 3 &&
+    afterTab.cat === expectNext &&
+    afterTab.slots === groupSizes[expectNext] &&
+    afterTab.litTabs === 1 &&
+    backToWalls === groups.cat;
   const labelCentred =
     centred !== null && Math.abs(centred.boxOffset) < 1.5 && Math.abs(centred.textOffset) < 1.5;
   const removesOne =
@@ -920,15 +1076,27 @@ try {
   const nameAbove =
     naming.insideSlots === 0 &&
     naming.labelAbove === true &&
-    labelRamp !== '' &&
+    labelThird !== '' &&
     labelWall !== '' &&
-    labelRamp !== labelWall;
+    labelThird !== labelWall;
   // One chosen slot, one raised slot, and the chosen one is what the label names.
-  const tops = litNow.tops ?? [];
-  const highest = Math.min(...tops);
-  const raisedCount = tops.filter((v) => v <= highest + 1).length;
+  const styled = litNow.styled ?? [];
+  // The one carrying the class must be the one that is drawn differently, and every
+  // other slot must be drawn the same as each other. This is the check that caught a
+  // raised square that did not match the chosen piece.
+  const chosen = styled.filter((s) => s.on);
+  const rest = styled.filter((s) => !s.on);
+  const distinctlyDrawn =
+    chosen.length === 1 &&
+    rest.length > 0 &&
+    new Set(rest.map((s) => s.border)).size === 1 &&
+    chosen[0].border !== rest[0].border;
   const oneSelected =
-    litNow.lit === 1 && litNow.litKind === 'wall' && raisedCount === 1 && tops.indexOf(highest) === 0;
+    litNow.lit === 1 &&
+    litNow.litKind === litNow.selected &&
+    distinctlyDrawn &&
+    styled.length === litNow.groupSize &&
+    litNow.litTab === litNow.wantTab;
 
   const clearWorks = cleared === 0;
   const barCloses = !closed.active && !closed.hudShown;
@@ -964,11 +1132,11 @@ try {
     `x=${JSON.stringify(roofSolid.x)} z=${JSON.stringify(roofSolid.z)}`,
   );
   line('timber, grained and warm:', isWood, `rgb(${wood.r},${wood.g},${wood.b}) grain=${wood.alongGrain}`);
-  line('name sits above the bar:', nameAbove, `"${labelRamp}" / "${labelWall}"`);
+  line('name sits above the bar:', nameAbove, `"${labelThird}" / "${labelWall}"`);
   line(
     'exactly one slot looks chosen:',
     oneSelected,
-    `lit=${litNow.lit} kind=${litNow.litKind} raised=${raisedCount} tops=${JSON.stringify(tops)}`,
+    `kind=${litNow.litKind} selected=${litNow.selected} drawnApart=${distinctlyDrawn} slots=${styled.length} tab=${litNow.litTab}/${litNow.wantTab}`,
   );
   line(
     'under a ceiling stays down:',
@@ -981,6 +1149,18 @@ try {
     'cost flat as it grows:',
     costFlat,
     `${scaling.placed} pieces, ${scaling.instanced} instanced meshes, ${scaling.childrenFull} children`,
+  );
+  line(
+    'wheel switches, does not zoom:',
+    wheelIsolated,
+    `zoom ${wheelTest}->${afterWheel.zoom}, piece ${afterWheel.selected}`,
+  );
+  line('windows are glazed:', glassWorks, JSON.stringify(glazing.glassMeshes));
+  line('gable fills the triangle:', gableFits, `widths ${JSON.stringify(gable.widths)} apex ${gable.apex}`);
+  line(
+    'groups switch with [ ]:',
+    groupsWork,
+    `${groups.cat} -> ${afterTab.cat} (${afterTab.slots} slots) -> ${backToWalls}`,
   );
   line('label centred on the bar:', labelCentred, `off by ${centred?.textOffset}px`);
   line(
@@ -1016,6 +1196,10 @@ try {
     doorwayOpen &&
     edgeLattice &&
     costFlat &&
+    wheelIsolated &&
+    glassWorks &&
+    gableFits &&
+    groupsWork &&
     labelCentred &&
     removesOne &&
     removesLowPiece &&

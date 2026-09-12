@@ -11,16 +11,22 @@ import {
 } from 'three';
 import type { Engine } from '../core/Engine.ts';
 import { gameSession } from '../net/session.ts';
-import { BUILD_GRID, PIECES, type BuildSite, type PieceKind } from '../world/Building.ts';
+import { BUILD_GRID, CATEGORIES, PIECES, type BuildSite, type PieceKind } from '../world/Building.ts';
 import { t } from './i18n.ts';
 
 /**
  * BuildBar
  * --------
- * The hotbar along the bottom of the screen: six pieces, each drawn as a small 3D
- * render of the thing it places, with the selected one lit up. Admin only, and
- * hidden entirely otherwise — a moderator tool should not take up screen space, or
- * advertise itself, for players who cannot use it.
+ * The hotbar along the bottom of the screen: ten slots showing one category of the
+ * library at a time, each drawn as a small 3D render of the thing it places, with
+ * the piece in hand lit up and named above. Admin only, and hidden entirely
+ * otherwise — a moderator tool should not take up screen space, or advertise itself,
+ * for players who cannot use it.
+ *
+ * The library has twenty pieces, which is more than one row a hand can reach across,
+ * so they are grouped and the tabs above the bar switch groups. Slots are rebuilt on
+ * a switch rather than hidden, because a piece answers to its position in the row
+ * and that has to stay 1 to 0 in every group.
  *
  * The icons are real geometry rather than drawings, so a slot can never disagree
  * with what it places: both read the same `BufferGeometry`. Each is rendered
@@ -66,8 +72,14 @@ export class BuildBar {
   /** Names the piece the crosshair is on, so removing is never a guess. */
   private readonly aim: HTMLElement | null;
   private lastAim = '';
+  /** Which group's slots are currently on the bar. */
+  private shownCategory = -1;
   private allowed = false;
-  private icons: string[] = [];
+  /**
+   * Finished icon per kind, for the session. Keyed by kind rather than by slot index
+   * because a slot index means something different in each category.
+   */
+  private readonly icons = new Map<PieceKind, string>();
   private readonly engine: Engine;
 
   constructor(engine: Engine) {
@@ -116,26 +128,64 @@ export class BuildBar {
       this.refresh();
     });
 
-    // The wheel steps through the pieces, which is how you change what is in hand
-    // without taking a finger off the movement keys. Ten pieces is more than a hand
-    // wants to reach across.
+    // The wheel steps through the current category, which is how you change what is
+    // in hand without taking a finger off the movement keys.
+    //
+    // Capture phase, and propagation stopped. The camera zoom listens for `wheel` on
+    // the canvas, so a bubble-phase listener here left both running: the piece
+    // changed *and* the view pulled back. `preventDefault` does not help — it stops
+    // the browser's own scrolling, not another listener. A capture listener on
+    // `window` runs before the canvas is reached at all, so stopping there is what
+    // actually keeps the zoom out of it.
     window.addEventListener(
       'wheel',
       (e) => {
         if (!site?.active || !this.allowed) return;
         e.preventDefault();
+        e.stopPropagation();
         site.cycle(e.deltaY > 0 ? 1 : -1);
         void this.paintIcons();
         this.refresh();
       },
-      { passive: false },
+      { passive: false, capture: true },
     );
   }
 
+  /**
+   * Rebuilds the slot row for the current category.
+   *
+   * Twenty pieces will not fit on one bar a hand can reach across, so the bar shows
+   * one category at a time and the tabs above switch between them. The slots are
+   * rebuilt rather than hidden, because the key a piece answers to is its position in
+   * the row and that has to stay 1 to 0 in every category.
+   */
   private buildSlots(): void {
     const root = this.bar;
     if (!root) return;
-    PIECES.forEach((kind, i) => {
+    const cats = document.getElementById('buildCats');
+    if (cats && cats.childElementCount === 0) {
+      CATEGORIES.forEach((cat, ci) => {
+        const tab = document.createElement('button');
+        tab.type = 'button';
+        tab.className = 'buildCat';
+        tab.dataset.cat = String(ci);
+        tab.textContent = t(`build.cat.${cat.id}`);
+        tab.addEventListener('click', () => {
+          site?.setCategory(ci);
+          this.buildSlots();
+          void this.paintIcons();
+          this.refresh();
+          tab.blur();
+        });
+        cats.appendChild(tab);
+      });
+    }
+
+    root.replaceChildren();
+    this.slots.length = 0;
+    this.shownCategory = site?.category ?? 0;
+    const pieces = CATEGORIES[this.shownCategory]?.pieces ?? CATEGORIES[0]!.pieces;
+    pieces.forEach((kind, i) => {
       const slot = document.createElement('button');
       slot.type = 'button';
       slot.className = 'buildSlot';
@@ -157,6 +207,9 @@ export class BuildBar {
       root.appendChild(slot);
       this.slots.push(slot);
     });
+    // Icons are cached per kind for the session, so switching categories back and
+    // forth costs a map lookup and a style write.
+    this.applyIcons();
   }
 
   /** True when the bar may be shown at all. */
@@ -197,11 +250,23 @@ export class BuildBar {
     if (digit) {
       const typed = Number(digit[1]);
       const idx = typed === 0 ? 9 : typed - 1;
-      const kind = PIECES[idx];
+      // Within the category on the bar, which is what the slot under that number
+      // actually shows.
+      const kind = CATEGORIES[site.category]?.pieces[idx];
       if (kind) {
         e.preventDefault();
         this.select(kind);
       }
+      return;
+    }
+    // Square brackets step between categories, which keeps them off the letters the
+    // hands are already using to move and build.
+    if (e.code === 'BracketRight' || e.code === 'BracketLeft') {
+      e.preventDefault();
+      const delta = e.code === 'BracketRight' ? 1 : -1;
+      site.setCategory(site.category + delta);
+      this.buildSlots();
+      this.refresh();
       return;
     }
     // Enter places too. The mouse is the natural way to do it, but a keyboard path
@@ -238,10 +303,20 @@ export class BuildBar {
 
   private refresh(): void {
     const selected = site?.selected;
+    // The row on screen has to be the row the selection lives in. Anything that
+    // moves the selection across a group boundary — a tab, a bracket key, or code
+    // selecting a piece directly — would otherwise leave the previous group's slots
+    // on the bar, with nothing lit and a stale square still raised. Rebuilding here
+    // rather than at each of those call sites means it cannot be forgotten at one.
+    if (site && site.category !== this.shownCategory) this.buildSlots();
     for (const slot of this.slots) {
       slot.classList.toggle('on', slot.dataset.kind === selected);
     }
     if (this.label && selected) this.label.textContent = t(`build.${selected}`);
+    const cat = String(site?.category ?? 0);
+    for (const tab of document.querySelectorAll<HTMLElement>('.buildCat')) {
+      tab.classList.toggle('on', tab.dataset.cat === cat);
+    }
     if (this.counter) this.counter.textContent = String(site?.count() ?? 0);
     if (this.hint) this.hint.textContent = t('build.hint');
   }
@@ -268,18 +343,30 @@ export class BuildBar {
   }
 
   /**
-   * Draws the six icons, once. Awaited by nobody: slots show their name until the
-   * picture lands, which is within a frame or two of first opening the bar.
+   * Draws every icon in the library, once for the session.
+   *
+   * All twenty in one pass rather than per category: the whole set is twenty 64x64
+   * draws on a throwaway context, which is cheaper than standing that context up
+   * again each time somebody flicks between tabs.
    */
   private async paintIcons(): Promise<void> {
-    if (this.icons.length > 0 || !site) return;
-    this.icons = renderIcons(site);
-    for (let i = 0; i < this.slots.length; i++) {
-      const url = this.icons[i];
-      const box = this.slots[i]?.querySelector<HTMLElement>('.buildIcon');
+    if (this.icons.size > 0 || !site) return;
+    const drawn = renderIcons(site);
+    PIECES.forEach((kind, i) => {
+      const url = drawn[i];
+      if (url) this.icons.set(kind, url);
+    });
+    this.applyIcons();
+    this.refresh();
+  }
+
+  /** Puts the cached pictures on whichever slots are currently on the bar. */
+  private applyIcons(): void {
+    for (const slot of this.slots) {
+      const url = this.icons.get(slot.dataset.kind as PieceKind);
+      const box = slot.querySelector<HTMLElement>('.buildIcon');
       if (url && box) box.style.backgroundImage = `url(${url})`;
     }
-    this.refresh();
   }
 }
 

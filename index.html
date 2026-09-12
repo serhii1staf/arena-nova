@@ -379,21 +379,63 @@
         color: #cfe0f2;
         font: inherit;
         cursor: pointer;
-        transition:
-          border-color 0.12s,
-          background 0.12s,
-          transform 0.12s;
+        /* No transition, deliberately.
+           A transition is the one thing that can make a slot's computed style lag
+           the class that owns it, and the slot row is rebuilt whenever you switch
+           groups — so a freshly inserted button could be left showing the previous
+           selection's styling while a different slot held the class. Measured: the
+           chosen slot reported an unchanged border for a quarter of a second. The
+           animation was worth nothing; being correct on the frame the piece changes
+           is worth a lot. */
       }
       .buildSlot:hover {
         border-color: rgba(150, 190, 230, 0.5);
       }
+      /* Deliberately no `transform` here.
+         Lifting the chosen slot looked good and behaved badly: the slot row is
+         rebuilt when you switch groups, and a transform on a freshly inserted
+         element is a compositor-only property, so it could sit a frame behind the
+         class that owns it — leaving one square raised while a different one was
+         actually chosen. Border, fill and glow all affect nothing but paint of the
+         element itself and cannot disagree with the class list. */
       .buildSlot.on {
-        border-color: rgba(126, 224, 168, 0.85);
-        background: rgba(18, 44, 30, 0.85);
-        transform: translateY(-4px);
+        border-color: rgba(126, 224, 168, 0.9);
+        background: rgba(20, 52, 34, 0.92);
+        box-shadow:
+          0 0 0 1px rgba(126, 224, 168, 0.45),
+          0 0 12px rgba(90, 240, 140, 0.25);
       }
-      /* The piece in hand, named once above the bar rather than six times inside
-         it. Reserves its own line so the bar does not shift as the name changes. */
+      /* Group tabs. Twenty pieces will not fit on one row a hand can reach across,
+         so the bar shows one group and these switch between them. */
+      #buildCats {
+        display: flex;
+        gap: 5px;
+        pointer-events: auto;
+      }
+      .buildCat {
+        padding: 3px 11px;
+        border: 1px solid rgba(150, 190, 230, 0.2);
+        border-radius: 7px;
+        background: rgba(10, 16, 26, 0.66);
+        color: rgba(190, 215, 240, 0.72);
+        font: inherit;
+        font-size: 11px;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+        /* No transition, for the same reason the slots have none: it left the tab of
+           the *previous* group looking active while the bar below already showed the
+           new one. */
+      }
+      .buildCat:hover {
+        border-color: rgba(150, 190, 230, 0.45);
+      }
+      .buildCat.on {
+        border-color: rgba(126, 224, 168, 0.75);
+        background: rgba(18, 44, 30, 0.85);
+        color: #a9f0c6;
+      }
+      /* The piece in hand, named once above the bar rather than once in every slot.
+         Reserves its own line so the bar does not shift as the name changes. */
       #buildLabel {
         min-height: 17px;
         padding: 1px 12px;
@@ -1081,6 +1123,7 @@
       and the pieces can never fall out of step.
     -->
     <div id="buildHud" hidden>
+      <div id="buildCats" role="tablist" aria-label="Build groups"></div>
       <div id="buildLabel" role="status" aria-live="polite"></div>
       <div id="buildBar" role="toolbar" aria-label="Build pieces"></div>
       <div id="buildTip">
