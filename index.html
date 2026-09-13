@@ -406,40 +406,57 @@
           0 0 12px rgba(90, 240, 140, 0.25);
       }
       /* --- Inventory, crafting, vitals ---------------------------------------- */
+      /* One centred window rather than three columns spread across the screen, laid out
+         the way a survival game's inventory is: the character on the left with their
+         condition under them, what can be made on the right, and the bag itself as a
+         fixed grid of square slots along the bottom — including the empty ones, because
+         seeing how much room is left is half of what an inventory is for. */
       #inventory {
         position: fixed;
         inset: 0;
         z-index: 70;
         display: none;
-        gap: 12px;
-        align-items: stretch;
+        align-items: center;
         justify-content: center;
-        padding: 6vh 4vw;
-        background: rgba(4, 8, 14, 0.62);
-        backdrop-filter: blur(5px);
+        background: rgba(4, 8, 14, 0.66);
+        backdrop-filter: blur(6px);
       }
       #inventory.on {
         display: flex;
       }
+      .invWindow {
+        display: grid;
+        width: min(1020px, 94vw);
+        height: min(660px, 92vh);
+        gap: 10px;
+        grid-template:
+          'you craft' minmax(0, 1fr)
+          'bag bag' min-content / 268px 1fr;
+        padding: 14px;
+        border: 1px solid rgba(150, 190, 230, 0.16);
+        border-radius: 10px;
+        background: rgba(11, 15, 21, 0.96);
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+      }
       .invPane {
         display: flex;
-        flex: 1 1 0;
         flex-direction: column;
         gap: 8px;
         min-width: 0;
-        max-width: 320px;
-        padding: 14px;
-        border: 1px solid rgba(150, 190, 230, 0.18);
-        border-radius: 14px;
-        background: rgba(10, 16, 26, 0.86);
-      }
-      .invWide {
-        flex: 1.6 1 0;
-        max-width: 520px;
+        min-height: 0;
+        padding: 12px;
+        border: 1px solid rgba(150, 190, 230, 0.1);
+        border-radius: 7px;
+        background: rgba(17, 22, 30, 0.9);
       }
       .invYou {
-        flex: 0 0 264px;
-        max-width: 264px;
+        grid-area: you;
+      }
+      .invWide {
+        grid-area: craft;
+      }
+      .invBag {
+        grid-area: bag;
       }
       .invHead {
         display: flex;
@@ -482,21 +499,29 @@
         max-height: 100%;
         object-fit: contain;
       }
+      /* Eight across, three down: the twenty-four slots the bag actually holds, drawn
+         whether or not there is anything in them. */
+      /* Slots are a fixed size rather than a share of the width. Stretched to fill, three
+         rows of them ate most of the window and squeezed the character and the recipes
+         into a strip along the top. */
       #invGrid {
         display: grid;
-        overflow: hidden auto;
-        flex: 1;
-        gap: 7px;
-        grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
-        align-content: start;
+        gap: 5px;
+        grid-template-columns: repeat(8, 66px);
+        justify-content: center;
       }
       .invCell {
         position: relative;
         aspect-ratio: 1;
-        padding: 3px;
-        border: 1px solid rgba(150, 190, 230, 0.16);
-        border-radius: 9px;
-        background: rgba(16, 24, 36, 0.8);
+        padding: 2px;
+        border: 1px solid rgba(150, 190, 230, 0.13);
+        border-radius: 4px;
+        background: rgba(24, 30, 39, 0.9);
+      }
+      .invCell.empty {
+        border-style: dashed;
+        border-color: rgba(150, 190, 230, 0.07);
+        background: rgba(15, 19, 26, 0.7);
       }
       .invCell.edible {
         border-color: rgba(190, 120, 140, 0.4);
@@ -656,11 +681,7 @@
       .invMeterFill.food {
         background: linear-gradient(90deg, #a8863a, #dcc06a);
       }
-      .invClose {
-        margin-top: auto;
-        color: rgba(170, 200, 225, 0.5);
-        font-size: 10px;
-      }
+
       /* Interaction prompt, just below the crosshair where the eye already is. */
       #interactHint {
         position: fixed;
@@ -1447,46 +1468,43 @@
       questions; opened with I or by using a workbench.
     -->
     <div id="inventory">
-      <!--
-        Left: what you are carrying, in one block that fills the column. Middle: what
-        you could make. Right: the character, whole, with the meters under them.
-      -->
-      <div class="invPane">
-        <div class="invHead">
-          <span class="invTitle" data-i18n="inv.bag">Bag</span>
-          <span id="invSlots" class="invSlots"></span>
-        </div>
-        <div id="invGrid"></div>
-      </div>
-      <div class="invPane invWide">
-        <div class="invHead">
-          <span class="invTitle" data-i18n="inv.craft">Crafting</span>
-          <span id="invHint" class="invSlots"></span>
-        </div>
-        <div id="invRecipes"></div>
-      </div>
-      <div class="invPane invYou">
-        <div class="invHead">
-          <span class="invTitle" id="invWho"></span>
-        </div>
-        <div class="invBody">
-          <img id="invFace" alt="" hidden />
-        </div>
-        <div class="invBars">
-          <div class="invMeterRow">
-            <span class="invMeterLabel" data-i18n="inv.health">Health</span>
-            <span class="invMeter"><span class="invMeterFill health" id="barHealth"></span></span>
+      <div class="invWindow">
+        <div class="invPane invYou">
+          <div class="invHead">
+            <span class="invTitle" id="invWho"></span>
           </div>
-          <div class="invMeterRow">
-            <span class="invMeterLabel" data-i18n="inv.water">Water</span>
-            <span class="invMeter"><span class="invMeterFill water" id="barWater"></span></span>
+          <div class="invBody">
+            <img id="invFace" alt="" hidden />
           </div>
-          <div class="invMeterRow">
-            <span class="invMeterLabel" data-i18n="inv.food">Food</span>
-            <span class="invMeter"><span class="invMeterFill food" id="barFood"></span></span>
+          <div class="invBars">
+            <div class="invMeterRow">
+              <span class="invMeterLabel" data-i18n="inv.health">Health</span>
+              <span class="invMeter"><span class="invMeterFill health" id="barHealth"></span></span>
+            </div>
+            <div class="invMeterRow">
+              <span class="invMeterLabel" data-i18n="inv.water">Water</span>
+              <span class="invMeter"><span class="invMeterFill water" id="barWater"></span></span>
+            </div>
+            <div class="invMeterRow">
+              <span class="invMeterLabel" data-i18n="inv.food">Food</span>
+              <span class="invMeter"><span class="invMeterFill food" id="barFood"></span></span>
+            </div>
           </div>
         </div>
-        <div class="invClose" data-i18n="inv.close">I to close</div>
+        <div class="invPane invWide">
+          <div class="invHead">
+            <span class="invTitle" data-i18n="inv.craft">Crafting</span>
+            <span id="invHint" class="invSlots"></span>
+          </div>
+          <div id="invRecipes"></div>
+        </div>
+        <div class="invPane invBag">
+          <div class="invHead">
+            <span class="invTitle" data-i18n="inv.bag">Bag</span>
+            <span id="invSlots" class="invSlots"></span>
+          </div>
+          <div id="invGrid"></div>
+        </div>
       </div>
     </div>
 

@@ -619,7 +619,7 @@ try {
     const g = s.geometryFor('gable');
     const p = g.getAttribute('position');
     // Width of the piece at several heights: a triangle narrows as it rises.
-    const bands = [0.2, 1.0, 1.8, 2.1];
+    const bands = [0.2, 1.2, 2.2, 2.8];
     const widths = bands.map((y) => {
       let max = 0;
       for (let i = 0; i < p.count; i++) {
@@ -967,20 +967,35 @@ try {
     const r = window.probe.piece('roofGable', 0);
     if (!r) return { placed: true, found: false };
     const ground = sc.world.floorHeightAt(r.x, r.z);
-    // Standing underneath, at ground level: nothing pushes.
-    const mid = { x: r.x, y: ground, z: r.z };
-    s.collide(mid, 0.4);
-    // And at the eaves, walking in.
-    const eave = { x: r.x, y: ground, z: r.z + 1.9 };
-    const eaveFrom = { x: eave.x, z: eave.z };
-    s.collide(eave, 0.4);
+    // Sampled across the whole slope on both axes, because the roof may be turned. On
+    // the axis it slopes along there must be somewhere clear (under the ridge), and
+    // somewhere solid (where the slope crosses chest height) — a roof that is clear
+    // everywhere can be walked through, and one that is solid everywhere cannot be
+    // sheltered under.
+    // Standing on the floor of the roof's own slot, which is what being under it means.
+    // The terrain height at the sample point is not the same thing on a slope, and the
+    // shell's heights are measured from the piece's level.
+    const level = r.y;
+    const scan = (axis) =>
+      [0, 0.5, 1.0, 1.4, 1.8].map((d) => {
+        const p = axis === 'x' ? { x: r.x + d, y: level, z: r.z } : { x: r.x, y: level, z: r.z + d };
+        const from = { x: p.x, z: p.z };
+        s.collide(p, 0.4);
+        return +Math.hypot(p.x - from.x, p.z - from.z).toFixed(2);
+      });
+    const x = scan('x');
+    const z = scan('z');
     return {
       placed: true,
       found: true,
-      pushedUnder: +Math.hypot(mid.x - r.x, mid.z - r.z).toFixed(2),
-      pushedAtEave: +Math.hypot(eave.x - eaveFrom.x, eave.z - eaveFrom.z).toFixed(2),
-      // The ridge is still a surface, so the roof has not simply become a ghost.
-      ridgeSurface: +(s.heightAt(r.x, r.z, ground, ground + 2.4) - ground).toFixed(2),
+      x,
+      z,
+      // Under the ridge, where the roof is highest, nothing may push.
+      underRidge: Math.min(x[0], z[0]),
+      // And somewhere on the slope, something must.
+      blocksSomewhere: Math.max(...x, ...z),
+      // The ridge is still a surface, so the roof has not become a ghost.
+      ridgeSurface: +(s.heightAt(r.x, r.z, level, level + 2.4) - level).toFixed(2),
     };
   });
   console.log(`roof from the side: ${JSON.stringify(roofSide)}`);
@@ -1054,6 +1069,47 @@ try {
   await page.waitForTimeout(250);
   const regrabbed = await page.evaluate(() => window.arena.engine.input.isCursorFreed);
   console.log(`cursor: ${JSON.stringify(cursor)} -> ${JSON.stringify(freed)} -> ${regrabbed}`);
+
+  // ---- A shelf hangs on the wall, not inside it ----------------------------
+  // Both go on the same lattice, and that is the point: a wall stands on the cell edge
+  // and a fixture has to stand against it. Centred on the edge, half a shelf is buried
+  // in the wall, which is what it looked like.
+  const mounted = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    sc.player.spawn(900, 900, 0);
+    sc.player.pitch = 0;
+    // A wall first, then a shelf aimed at the same place.
+    s.select('wall');
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const w = window.probe.piece('wall', 0);
+    s.select('shelf');
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: true, shelf: false };
+    const f = window.probe.piece('shelf', 0);
+    if (!w || !f) return { placed: true, shelf: false };
+    // The wall's thin axis is its local +Z; the fixture must sit off the wall along it.
+    const nx = Math.sin(w.ry);
+    const nz = Math.cos(w.ry);
+    const offset = +Math.abs((f.x - w.x) * nx + (f.z - w.z) * nz).toFixed(3);
+    // And it must face away from the wall, into the room: its own +Z, turned by its own
+    // rotation, has to point the same way as the offset did.
+    const fx = Math.sin(f.ry);
+    const fz = Math.cos(f.ry);
+    const outward = ((f.x - w.x) * fx + (f.z - w.z) * fz) / Math.max(0.001, offset);
+    return {
+      placed: true,
+      shelf: true,
+      offset,
+      facesIn: +outward.toFixed(2),
+      // Along the wall it stays on the same line, so it is not floating off to a corner.
+      alongWall: +Math.abs((f.x - w.x) * nz - (f.z - w.z) * nx).toFixed(3),
+    };
+  });
+  console.log(`mounted: ${JSON.stringify(mounted)}`);
 
   // ---- Furniture holds you up along its whole length -----------------------
   // A bed is over two metres long and a table nearly two wide, so either can be
@@ -1271,7 +1327,7 @@ try {
     gable.narrows === true &&
     gable.widths[0] > 1.7 &&
     gable.widths[gable.widths.length - 1] < 0.7 &&
-    Math.abs(gable.apex - 2.2) < 0.25 &&
+    Math.abs(gable.apex - 3.0) < 0.3 &&
     Math.abs(gable.base) < 0.05;
   // Relative to wherever it started, and wrapping. The slot count has to follow the
   // group, which is the part that was leaving a stale row on the bar.
@@ -1293,8 +1349,8 @@ try {
     onTop.pushedLow > 0.1;
   const roofSheltersYou =
     roofSide.found === true &&
-    roofSide.pushedUnder < 0.01 &&
-    roofSide.pushedAtEave < 0.01 &&
+    roofSide.underRidge < 0.01 &&
+    roofSide.blocksSomewhere > 0.1 &&
     roofSide.ridgeSurface > 1.8;
   // Shut it stops you; open you come out the far side; shut again it stops you once
   // more, so the state really is a state and not a one-way door.
@@ -1311,6 +1367,14 @@ try {
   // Freed means the game is not holding the mouse, and pressing again gives it back.
   const cursorToggles =
     cursor.freed === false && freed.freed === true && freed.locked === false && regrabbed === false;
+  // Clear of the wall by about its half-thickness, facing into the room, and on the same
+  // line as the wall rather than shifted along it.
+  const fixturesMount =
+    mounted.shelf === true &&
+    mounted.offset > 0.08 &&
+    mounted.offset < 0.4 &&
+    mounted.facesIn > 0.9 &&
+    mounted.alongWall < 0.01;
   // Every sample over a piece is held up, and the ground away from it is untouched.
   const furnitureHolds = ['bed', 'table', 'stool'].every((k) => {
     const f = furniture[k];
@@ -1423,9 +1487,14 @@ try {
     `ground=${onTop.fromGround} up=${onTop.fromLevel} pushTop=${onTop.pushedAtTop} pushLow=${onTop.pushedLow}`,
   );
   line(
-    'roof shelters, still standable:',
+    'roof: shelter, shell, surface:',
     roofSheltersYou,
-    `under=${roofSide.pushedUnder} eave=${roofSide.pushedAtEave} ridge=${roofSide.ridgeSurface}`,
+    `x=${JSON.stringify(roofSide.x)} z=${JSON.stringify(roofSide.z)} ridge=${roofSide.ridgeSurface}`,
+  );
+  line(
+    'fixtures sit on the wall:',
+    fixturesMount,
+    `off=${mounted.offset} facing=${mounted.facesIn}`,
   );
   line(
     'doors open and shut:',
@@ -1479,6 +1548,7 @@ try {
     topsStandable &&
     roofSheltersYou &&
     furnitureHolds &&
+    fixturesMount &&
     doorsOpen &&
     cursorToggles &&
     labelCentred &&

@@ -63,8 +63,17 @@ const PICK_RANGE = 11;
 const BOARD = 0.12;
 /** Thickness of a frame member — post, joist, stringer, jamb. */
 const POST = 0.2;
-/** Height of a roof ridge or a gable apex above its slot floor. */
-const RIDGE = BUILD_GRID * 0.55;
+/**
+ * Height of a roof ridge or a gable apex above its slot floor.
+ *
+ * Three metres, not the 2.2 it was. At 2.2 the slope had already dropped below head
+ * height half a metre either side of the ridge, so a roof was only standable under along
+ * a single line down its middle — measured, a body half a metre off centre was pushed
+ * 0.23 m by its own roof. That is arithmetic rather than a bug: a shelter has to be
+ * taller than the person sheltering. The gable piece reads the same constant, so the two
+ * still meet.
+ */
+const RIDGE = BUILD_GRID * 0.75;
 /** Walkable heights above a piece's own slot floor. */
 const FLOOR_TOP = 0.3;
 const FOUNDATION_TOP = 0.42;
@@ -92,6 +101,19 @@ const GLASS = 0.03;
 const UV_METRES = 1.15;
 /** How far above your feet a surface can be and still be something you step onto. */
 const STEP_UP = 0.65;
+/**
+ * Thickness of a roof's solid shell.
+ *
+ * Thin, and it has to be. A ridge stands 2.2 m over its floor, so a shell of half a
+ * metre leaves its underside at 1.7 m — exactly head height — and standing in the middle
+ * of your own roof was blocked. Measured: at 0.55 a body under the ridge was pushed
+ * 0.6 m; at this thickness it is not touched.
+ *
+ * A thin shell cannot be slipped through between bands, because the bands sit side by
+ * side across the slope rather than stacked above one another: a body moving level meets
+ * whichever band covers the ground it is over, whatever its thickness.
+ */
+const SHELL = 0.24;
 /** How far a door swings open, in radians. */
 const DOOR_SWING = Math.PI * 0.52;
 /** How close you have to be for a door to offer itself. */
@@ -261,6 +283,18 @@ const ROTATABLE = new Set<PieceKind>([
 
 /** Kinds that can be opened and shut. */
 const OPENABLE = new Set<PieceKind>(['doorLeaf']);
+
+/**
+ * Fixtures that hang on a wall.
+ *
+ * They share the wall's lattice, but a wall stands *on* the edge and a fixture has to
+ * stand *against* it — centred on the edge, half of a shelf is inside the wall. So they
+ * are pushed off the line by a wall's own half-thickness and turned to face the cell
+ * you were aiming at, which is the room side.
+ */
+const MOUNTED = new Set<PieceKind>(['shelf', 'torch', 'lantern']);
+/** How far off the edge line a fixture sits: a wall's half-thickness and a little air. */
+const MOUNT_OFF = POST / 2 + 0.04;
 
 /** A box in a piece's own frame: centre and half-extents across, and a Y range. */
 interface Slab {
@@ -1019,6 +1053,34 @@ function solidsOf(kind: PieceKind, open = false): Slab[] {
   const t = POST / 2;
   const full = (hx: number, cx = 0, y0 = 0, y1 = G): Slab => ({ cx, cz: 0, hx, hz: t, y0, y1 });
 
+  /**
+   * A sloped roof as bands of shell, mirrored either side of the ridge.
+   *
+   * Each band is only as tall as the boards are, sitting at the height the roof reaches
+   * at that distance from the ridge — so the solid part is the roof rather than
+   * everything beneath it.
+   */
+  const shell = (height: (f: number) => number, along: 'z' | 'x' = 'z'): Slab[] => {
+    const out: Slab[] = [];
+    // Six bands a side: fine enough that the steps between them are smaller than the
+    // shell, so the surface a body meets is continuous.
+    const n = 6;
+    for (const side of [1, -1]) {
+      for (let i = 0; i < n; i++) {
+        const mid = 1 - (i + 0.5) / n;
+        const top = Math.max(0.06, height(mid));
+        const c = side * s * mid;
+        const h = s / n;
+        out.push(
+          along === 'z'
+            ? { cx: 0, cz: c, hx: s, hz: h, y0: Math.max(0, top - SHELL), y1: top }
+            : { cx: c, cz: 0, hx: h, hz: s, y0: Math.max(0, top - SHELL), y1: top },
+        );
+      }
+    }
+    return out;
+  };
+
   switch (kind) {
     case 'wall':
       return [full(s)];
@@ -1100,10 +1162,28 @@ function solidsOf(kind: PieceKind, open = false): Slab[] {
     // between "cannot walk under a roof" and "can put your head through one", and a
     // shelter you cannot shelter in is the worse of the two. You can stand on them —
     // `heightAt` gives them a real surface — and you can walk under them.
+    // Sloped roofs are a thin shell that follows the slope, and that is the third and
+    // correct answer after two wrong ones.
+    //
+    // Filled from the ground up, a canopy became a solid wedge nobody could get under.
+    // With no sides at all, you could walk straight through the inside of your own roof.
+    // A shell only as thick as the boards, at the height the roof actually is, gives
+    // both: under the ridge your head passes well beneath it, at the eaves it is low
+    // enough to step onto, and in between — where the slope crosses chest height — it
+    // stops you, which is exactly where a real roof would.
     case 'roofGable':
+      return shell((f) => RIDGE * (1 - f));
     case 'roofHip':
+      return [...shell((f) => RIDGE * (1 - f)), ...shell((f) => RIDGE * (1 - f), 'x')];
     case 'roofShed':
-      return [];
+      return [0.125, 0.375, 0.625, 0.875].map((f) => ({
+        cx: 0,
+        cz: -s + f * G,
+        hx: s,
+        hz: s / 4,
+        y0: Math.max(0, RIDGE * f - SHELL),
+        y1: RIDGE * f,
+      }));
     // Furnishings are solid at their own size, so a table is furniture rather than
     // a hologram. Small enough that walking round them is never a nuisance.
     case 'bed':
@@ -1194,6 +1274,13 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     opacity: 0.26,
     roughness: 0.06,
     metalness: 0,
+    // Glass must not write depth.
+    //
+    // A pane that writes depth hides whatever is behind it from every transparent thing
+    // drawn afterwards — which is why a lit lantern looked dark from outside and lit
+    // only once your head was through the glass: the flame was there, and the pane it
+    // sits inside had already claimed the depth buffer in front of it.
+    depthWrite: false,
   });
 
   /**
@@ -1288,6 +1375,10 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       m.receiveShadow = false;
       m.frustumCulled = false;
       m.name = `${prefix}:${kind}`;
+      // A flame is drawn after the glass around it, so it is visible through the pane
+      // rather than sorted behind it by distance.
+      if (prefix === 'Glow') m.renderOrder = 4;
+      else if (prefix === 'Glass') m.renderOrder = 3;
       group.add(m);
       return m;
     };
@@ -1384,6 +1475,17 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     const half = G / 2;
     out.x = cx + (side === 0 ? half : side === 2 ? -half : 0);
     out.z = cz + (side === 1 ? half : side === 3 ? -half : 0);
+
+    if (MOUNTED.has(selected)) {
+      // Off the line, towards the middle of the cell, and turned to face that way.
+      // The fixture shapes all project along their own +Z, so the turn is whichever one
+      // sends +Z from the edge back into the room.
+      const inX = side === 0 ? -1 : side === 2 ? 1 : 0;
+      const inZ = side === 1 ? -1 : side === 3 ? 1 : 0;
+      out.x += inX * MOUNT_OFF;
+      out.z += inZ * MOUNT_OFF;
+      return side === 0 ? 3 : side === 2 ? 1 : side === 1 ? 2 : 0;
+    }
     return side === 0 || side === 2 ? 1 : 0;
   };
 

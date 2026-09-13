@@ -48,6 +48,8 @@ export class InventoryPanel {
   /** Set by the scene each frame; the panel never reaches into the world itself. */
   private benchProbe: (() => boolean) | null = null;
   private benchPlacer: (() => boolean) | null = null;
+  /** Which character the figure on screen is of, so a change is noticed. */
+  private shownSkin: string | null = null;
 
   constructor() {
     this.root = document.getElementById('inventory');
@@ -171,13 +173,19 @@ export class InventoryPanel {
    * on change could be never.
    */
   private drawFace(): void {
-    if (!this.face || this.face.getAttribute('src')) return;
-    // The whole character, not a head crop blown up to fill the column — which is
-    // what made this corner of the panel look wrong.
-    const url = bodyFor(savedSkin());
+    if (!this.face) return;
+    const want = savedSkin();
+    // Keyed on which character it is showing, not merely on whether it is showing
+    // something. Bailing out as soon as a picture existed meant the first character ever
+    // drawn stayed there for the session — so after changing character the panel showed
+    // somebody else, which is exactly what it looked like.
+    if (this.shownSkin === want) return;
+    // The whole figure, not a head crop blown up to fill the column.
+    const url = bodyFor(want);
     if (!url) return;
     this.face.src = url;
     this.face.hidden = false;
+    this.shownSkin = want;
   }
 
   private paintIcons(): void {
@@ -232,8 +240,10 @@ export class InventoryPanel {
     // --- The bag ---
     if (this.grid) {
       const held = ITEM_ORDER.filter((id) => inv.count(id) > 0);
-      this.grid.replaceChildren(
-        ...held.map((id) => {
+      // Every slot, not only the full ones. An inventory that shrinks to fit what is in
+      // it cannot answer the question you actually open it to ask, which is how much
+      // room is left.
+      const cells: HTMLElement[] = held.map((id) => {
           const cell = document.createElement('div');
           cell.className = 'invCell';
           cell.title = t(`item.${id}`);
@@ -275,14 +285,13 @@ export class InventoryPanel {
             });
           }
           return cell;
-        }),
-      );
-      if (held.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'invEmpty';
-        empty.textContent = t('inv.empty');
-        this.grid.appendChild(empty);
+      });
+      for (let i = held.length; i < SLOTS; i++) {
+        const blank = document.createElement('div');
+        blank.className = 'invCell empty';
+        cells.push(blank);
       }
+      this.grid.replaceChildren(...cells);
     }
 
     // --- Recipes, the ones you can make first ---

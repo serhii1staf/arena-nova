@@ -201,9 +201,11 @@ try {
       })(),
     }));
     // Real pixels in the icons, not just <img> elements.
+    // Only the filled slots. The grid draws all twenty-four so the room left is visible,
+    // and an empty one legitimately has no picture in it.
     const drawn = cells.map((c) => {
       const img = c.querySelector('img.invIcon');
-      if (!img) return null;
+      if (!img) return undefined;
       const cv = document.createElement('canvas');
       cv.width = img.naturalWidth;
       cv.height = img.naturalHeight;
@@ -499,10 +501,13 @@ try {
   const gotMaterials =
     (gathered.bag.stick ?? 0) >= 2 && (gathered.bag.stone ?? 0) >= 1 && (gathered.bag.fibre ?? 0) >= 1;
   const panelOpens = panel.open === true && panel.cells > 0;
+  const filled = panel.drawn.filter((d) => d !== undefined && d !== null);
   const iconsDrawn =
-    panel.drawn.length > 0 &&
-    panel.drawn.every((d) => d && d.coverage > 0.02 && d.coverage < 0.99) &&
-    new Set(panel.drawn.map((d) => d?.fp)).size === panel.drawn.length;
+    filled.length > 0 &&
+    filled.every((d) => d.coverage > 0.02 && d.coverage < 0.99) &&
+    new Set(filled.map((d) => d.fp)).size === filled.length &&
+    // And the grid really does show every slot, full or not.
+    panel.cells === 24;
   const faceAndBars =
     panel.face === true && panel.bars.length === 3 && panel.bars.every((b) => /%$/.test(b));
   const benchGated = panel.recipes.some((r) => r.id === 'workbench' && r.blocked);
@@ -561,7 +566,11 @@ try {
   line('E picks one up:', tookIt, JSON.stringify(pickup.prompt));
   line('materials can be gathered:', gotMaterials, JSON.stringify(gathered.bag));
   line('I opens the bag:', panelOpens, `${panel.cells} cells`);
-  line('icons drawn and distinct:', iconsDrawn, JSON.stringify(panel.drawn.map((d) => d?.coverage)));
+  line(
+    'icons drawn and distinct:',
+    iconsDrawn,
+    `${filled.length} filled of ${panel.cells} slots ${JSON.stringify(filled.map((d) => d.coverage))}`,
+  );
   line('full figure and three meters:', faceAndBars, `${panel.faceSize} ${JSON.stringify(panel.bars)}`);
   line('bench recipes gated:', benchGated);
   line('spear crafted, inputs spent:', craftedSpear, JSON.stringify(crafted.after));
