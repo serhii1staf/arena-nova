@@ -1,5 +1,10 @@
 import {
+  AdditiveBlending,
+  CylinderGeometry,
+  DoubleSide,
   Group,
+  Mesh,
+  MeshBasicMaterial,
   InstancedMesh,
   Matrix4,
   MeshStandardMaterial,
@@ -79,6 +84,15 @@ const WALL_IN = 0.25;
 const VILLAGE_KEEP_OUT = 57;
 
 /**
+ * How many people live in a settlement.
+ *
+ * Declared here, with the village itself, because two separate things have to agree on it: the
+ * crew of bodies that walks around, and the number of beds the houses must provide. They were
+ * two literals in two files, which is how a village ends up with more villagers than beds.
+ */
+export const VILLAGE_POPULATION = 6;
+
+/**
  * How far above a slot's own level the floor of that slot is.
  *
  * Ground floors are laid on `foundation`, whose deck is 0.42 m up; upper storeys are `floor`
@@ -116,6 +130,8 @@ interface Slot {
   /** Sub-cell offset in metres, for the half-lattice furnishings. */
   ox?: number;
   oz?: number;
+  /** Metres below the slot level, for anything hanging from a ceiling. */
+  hang?: number;
 }
 
 /** Which timber a biome builds in, and what it roofs with. */
@@ -245,7 +261,7 @@ export interface VillageStreamer {
   /**
    * The settlements' own collision, to be composed into the world's.
    *
-   * Analytic boxes, not the circle registry � see `createPieceField` for why that mattered.
+   * Analytic boxes, not the circle registry � see `createPieceField` for why that mattered.
    */
   field: PieceField;
   /**
@@ -256,6 +272,8 @@ export interface VillageStreamer {
    * built-up area, so you can build up against a village but never in it.
    */
   buildBlocked(x: number, z: number): boolean;
+  /** Shows or hides the keep-out ring. Driven by whether build mode is open. */
+  showBoundary(on: boolean): void;
   dispose(): void;
 }
 
@@ -401,7 +419,13 @@ function planBuilding(
  * and a bed is 2.1 m long, so half of it went through the wall behind it. Nothing here can do
  * that, because a piece is inset by its own measured footprint before it is placed.
  */
-function furnishBuilding(plan: Plan, rand: (n: number) => number, seed: number): Slot[] {
+function furnishBuilding(
+  plan: Plan,
+  rand: (n: number) => number,
+  seed: number,
+  /** Where the door ended up, so the way in can be kept clear. */
+  doorAt: DoorAt | null,
+): Slot[] {
   const out: Slot[] = [];
   const { w, d } = plan;
   const G = BUILD_GRID;
@@ -413,18 +437,66 @@ function furnishBuilding(plan: Plan, rand: (n: number) => number, seed: number):
    * `fx`/`fz` are −1..1 across the room. The piece is then pulled in by its own size, so a
    * value of exactly −1 means "against that wall" for a bed as much as for a stool.
    */
-  const put = (kind: PieceKind, fx: number, fz: number, turn = 0): void => {
+  /**
+   * Rectangles already claimed, in room coordinates, so nothing is placed on top of anything
+   * else and nothing is placed in the way of the door.
+   *
+   * The previous version placed every item independently with no notion of what was already
+   * there, which is why a bed could be inside a cupboard and why a chair could stand in a
+   * doorway with the house then unenterable. A claim list is the smallest thing that cannot do
+   * that: a piece that does not fit is simply not placed.
+   */
+  let claims: { x0: number; x1: number; z0: number; z1: number }[] = [];
+  const fits = (x0: number, x1: number, z0: number, z1: number): boolean =>
+    !claims.some((c) => x0 < c.x1 && x1 > c.x0 && z0 < c.z1 && z1 > c.z0);
+
+  /** Claims a whole cell, used for the staircase and its landing. */
+  const claimCell = (cx: number, cz: number): void => {
+    const x = (cx - (w - 1) / 2) * G;
+    const z = (cz - (d - 1) / 2) * G;
+    claims.push({ x0: x - G / 2, x1: x + G / 2, z0: z - G / 2, z1: z + G / 2 });
+  };
+
+  /** The strip in front of the door, claimed before anything else so it stays walkable. */
+  const clearDoorway = (): void => {
+    if (!doorAt) return;
+    const nx = doorAt.side === 0 ? 1 : doorAt.side === 2 ? -1 : 0;
+    const nz = doorAt.side === 1 ? 1 : doorAt.side === 3 ? -1 : 0;
+    // The door's own cell centre in room coordinates, then a 2 m wide, 2.4 m deep corridor
+    // running inward from it.
+    const cx = (doorAt.cx - (w - 1) / 2) * G;
+    const cz = (doorAt.cz - (d - 1) / 2) * G;
+    const doorX = cx + nx * (G / 2);
+    const doorZ = cz + nz * (G / 2);
+    const halfAcross = 1.1;
+    const depth = 2.4;
+    claims.push({
+      x0: Math.min(doorX, doorX - nx * depth) - (nx === 0 ? halfAcross : 0),
+      x1: Math.max(doorX, doorX - nx * depth) + (nx === 0 ? halfAcross : 0),
+      z0: Math.min(doorZ, doorZ - nz * depth) - (nz === 0 ? halfAcross : 0),
+      z1: Math.max(doorZ, doorZ - nz * depth) + (nz === 0 ? halfAcross : 0),
+    });
+  };
+
+  /** Places a piece if it fits, and reports whether it did. */
+  const put = (kind: PieceKind, fx: number, fz: number, turn = 0, tier = 0): boolean => {
     const fp = pieceFootprint(kind);
     // A turned piece presents its other axis to the wall.
     const halfX = turn % 2 === 0 ? fp.hx : fp.hz;
     const halfZ = turn % 2 === 0 ? fp.hz : fp.hx;
     const x = Math.max(-1, Math.min(1, fx)) * Math.max(0, roomHX - halfX);
     const z = Math.max(-1, Math.min(1, fz)) * Math.max(0, roomHZ - halfZ);
+    // A rug is walked over, so it claims nothing and is blocked by nothing.
+    if (kind !== 'rug') {
+      if (!fits(x - halfX, x + halfX, z - halfZ, z + halfZ)) return false;
+      claims.push({ x0: x - halfX, x1: x + halfX, z0: z - halfZ, z1: z + halfZ });
+    }
     // Back to cell coordinates: the building's own origin is the corner of cell (0,0), whose
     // centre is at (0,0) in the plan's frame, so the room's middle is offset by half of it.
     const midX = ((w - 1) * G) / 2;
     const midZ = ((d - 1) * G) / 2;
-    out.push({ kind, cx: 0, cz: 0, tier: 0, turn, ox: midX + x, oz: midZ + z });
+    out.push({ kind, cx: 0, cz: 0, tier, turn, ox: midX + x, oz: midZ + z });
+    return true;
   };
 
   // Everything sits on the half-cell lattice, offset from its cell's centre, so a table and
@@ -440,50 +512,88 @@ function furnishBuilding(plan: Plan, rand: (n: number) => number, seed: number):
   /** Spreads `n` items evenly along the long axis, in −1..1. */
   const spread = (i: number, n: number): number => (n === 1 ? 0 : (i / (n - 1)) * 1.7 - 0.85);
 
-  switch (plan.role) {
-    case 'home':
-      // A bed per two metres of long wall, so a larger house sleeps more people rather than
-      // being a bigger room with one bed in it.
-      for (let i = 0; i < runs; i++) put('bed', spread(i, runs), -1, 0);
-      put('table', 0.55, 0.6);
-      put('stool', 0.05, 0.6);
-      put('stool', 0.95, 0.1);
-      put('cabinet', -0.2, -1, 0);
-      put('rug', 0.2, 0.1);
-      for (let i = 0; i < runs; i++) put('chest', spread(i, runs), 1, 0);
-      break;
-    case 'forge':
-      put('brazier', 0, -0.5);
-      put('bench', -1, 0.7, 0);
-      for (let i = 0; i < runs + 1; i++) put('barrel', spread(i, runs + 1), 1);
-      put('crate', 1, -1);
-      put('table', 0.7, 0.2);
-      break;
-    case 'store':
-      for (let i = 0; i < runs * 2; i++) {
-        put('crate', spread(i, runs * 2), -1);
-        put('barrel', spread(i, runs * 2), 1);
+  /**
+   * Every storey gets furnished, not just the ground floor.
+   *
+   * "On the upper floor you again added nothing" was accurate: the layout ran once, at tier 0,
+   * and a two-storey building was a furnished room with an empty loft over it. The layout is
+   * now a function of the storey, so an upstairs is a bedroom or a store room depending on what
+   * the building is for.
+   *
+   * Claims reset per storey — a table downstairs cannot block a bed upstairs — but the
+   * staircase is claimed on *every* floor: it occupies a ground-floor cell, and the floor above
+   * it is deliberately left open so there is a hole to come up through. Furniture in either
+   * place would block the way up or hang over a void.
+   */
+  for (let storey = 0; storey < plan.storeys; storey++) {
+    const tier = storey * 2;
+    claims = [];
+    if (plan.storeys > 1) claimCell(w - 1, 0);
+    // Only the ground floor has a door to keep clear.
+    if (storey === 0) clearDoorway();
+
+    if (storey > 0) {
+      // Upstairs. Sleeping quarters over a home or a hall, stores over a workplace.
+      if (plan.role === 'home' || plan.role === 'hall') {
+        for (let i = 0; i < runs; i++) put('bed', spread(i, runs), -1, 0, tier);
+        for (let i = 0; i < runs; i++) put('bed', spread(i, runs), 1, 2, tier);
+        put('cabinet', -1, 0, 1, tier);
+        put('chest', 1, 0, 3, tier);
+        put('rug', 0, 0, 0, tier);
+      } else {
+        for (let i = 0; i < runs * 2; i++) put('crate', spread(i, runs * 2), -1, 0, tier);
+        for (let i = 0; i < runs; i++) put('barrel', spread(i, runs), 1, 0, tier);
+        put('shelf', -1, 0, 1, tier);
+        put('table', 0.5, 0.4, 0, tier);
       }
-      put('chest', -1, 0);
-      put('table', 0.4, 0);
-      break;
-    case 'workshop':
-      put('table', -0.4, -0.6);
-      put('bench', -0.4, 0.4, 0);
-      for (let i = 0; i < runs; i++) put('crate', spread(i, runs), 1);
-      put('chest', 1, -1);
-      put('barrel', 1, 0.6);
-      break;
-    case 'hall':
-      // A long table down the middle with benches either side, which is what a hall is.
-      put('table', 0, 0);
-      put('bench', 0, -0.55, 0);
-      put('bench', 0, 0.55, 0);
-      put('chair', -1, 0);
-      put('chair', 1, 0);
-      put('rug', 0, 0);
-      for (let i = 0; i < runs; i++) put('barrel', spread(i, runs), -1);
-      break;
+      continue;
+    }
+
+    switch (plan.role) {
+      case 'home':
+        // A bed per two metres of long wall, so a larger house sleeps more people rather than
+        // being a bigger room with one bed in it.
+        for (let i = 0; i < runs; i++) put('bed', spread(i, runs), -1, 0, tier);
+        put('table', 0.55, 0.6, 0, tier);
+        put('stool', 0.05, 0.6, 0, tier);
+        put('stool', 0.95, 0.1, 0, tier);
+        put('cabinet', -0.2, -1, 0, tier);
+        put('rug', 0.2, 0.1, 0, tier);
+        for (let i = 0; i < runs; i++) put('chest', spread(i, runs), 1, 0, tier);
+        break;
+      case 'forge':
+        put('brazier', 0, -0.5, 0, tier);
+        put('bench', -1, 0.7, 0, tier);
+        for (let i = 0; i < runs + 1; i++) put('barrel', spread(i, runs + 1), 1, 0, tier);
+        put('crate', 1, -1, 0, tier);
+        put('table', 0.7, 0.2, 0, tier);
+        break;
+      case 'store':
+        for (let i = 0; i < runs * 2; i++) {
+          put('crate', spread(i, runs * 2), -1, 0, tier);
+          put('barrel', spread(i, runs * 2), 1, 0, tier);
+        }
+        put('chest', -1, 0, 0, tier);
+        put('table', 0.4, 0, 0, tier);
+        break;
+      case 'workshop':
+        put('table', -0.4, -0.6, 0, tier);
+        put('bench', -0.4, 0.4, 0, tier);
+        for (let i = 0; i < runs; i++) put('crate', spread(i, runs), 1, 0, tier);
+        put('chest', 1, -1, 0, tier);
+        put('barrel', 1, 0.6, 0, tier);
+        break;
+      case 'hall':
+        // A long table down the middle with benches either side, which is what a hall is.
+        put('table', 0, 0, 0, tier);
+        put('bench', 0, -0.55, 0, tier);
+        put('bench', 0, 0.55, 0, tier);
+        put('chair', -1, 0, 0, tier);
+        put('chair', 1, 0, 0, tier);
+        put('rug', 0, 0, 0, tier);
+        for (let i = 0; i < runs; i++) put('barrel', spread(i, runs), -1, 0, tier);
+        break;
+    }
   }
 
   /**
@@ -494,12 +604,33 @@ function furnishBuilding(plan: Plan, rand: (n: number) => number, seed: number):
    * the room means nothing to something that hangs on a boundary. The lantern goes on the back
    * wall, which is the side opposite the door, so it is not behind you as you walk in.
    */
-  const back = (doorFacing: number): number => (doorFacing + 2) % 4;
-  out.push({ kind: 'lantern', cx: Math.floor(w / 2), cz: Math.floor(d / 2), tier: 0, turn: 1 });
+  /**
+   * A lantern hanging from the ceiling of every storey, and a shelf on a wall.
+   *
+   * From the *ceiling*, which is what was asked for and what the player's own placement already
+   * supports: a lantern was previously put on a wall bracket and read as floating in the middle
+   * of the room. Hung means its top goes at the soffit and it drops below it, so the height is
+   * the ceiling's level minus the model's own reach — the same arithmetic `hungHeight` does.
+   */
+  for (let storey = 0; storey < plan.storeys; storey++) {
+    const ceilingTier = (storey + 1) * 2;
+    const box = pieceFootprint('lantern');
+    out.push({
+      kind: 'lantern',
+      cx: Math.floor(w / 2),
+      cz: Math.floor(d / 2),
+      tier: ceilingTier,
+      turn: 0,
+      // Hung from the soffit rather than resting on the slot: the ceiling's boards hang below
+      // its own level, and the lantern hangs below those.
+      hang: PIECE_METRICS.ceilDrop + box.top,
+      ox: 0,
+      oz: 0,
+    });
+  }
   if (rand(seed + 40) < 0.6) {
     out.push({ kind: 'shelf', cx: 0, cz: Math.floor(d / 2), tier: 0, turn: 2 });
   }
-  void back;
   return out;
 }
 
@@ -516,6 +647,8 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
    * bookkeeping a per-cell field would need to answer a query that straddles two of them.
    */
   const field = createPieceField();
+  /** Whether the keep-out ring is wanted this frame. */
+  let showRing = false;
 
   const shared = pieceAssets(assets);
   const G = BUILD_GRID;
@@ -559,6 +692,33 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     group.add(light);
     lamps.push(light);
   }
+
+  /**
+   * The keep-out boundary, drawn.
+   *
+   * A rule you cannot see is a rule that reads as a bug: the pieces turned red and there was
+   * nothing to say why. One ring, moved and resized to whichever settlement is nearest, shown
+   * only while build mode is on — it is a builder's guide, not scenery.
+   *
+   * A cylinder open at both ends rather than a flat disc, so it reads as a boundary you are
+   * inside or outside of rather than as a mark on the ground, and it is visible from within the
+   * village as well as from the approach. Additive and depth-write-free so it never occludes
+   * anything and never fights the sort order.
+   */
+  const ringGeo = new CylinderGeometry(1, 1, 3.4, 72, 1, true);
+  const ringMat = new MeshBasicMaterial({
+    color: 0xff6a4a,
+    transparent: true,
+    opacity: 0.16,
+    side: DoubleSide,
+    depthWrite: false,
+    blending: AdditiveBlending,
+    toneMapped: false,
+  });
+  const ring = new Mesh(ringGeo, ringMat);
+  ring.visible = false;
+  ring.renderOrder = 6;
+  group.add(ring);
 
   const matrix = new Matrix4();
   const quat = new Quaternion();
@@ -648,6 +808,15 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
       taken.add(r);
     }
 
+    /**
+     * Beds laid in this settlement, counted as they are placed.
+     *
+     * "There must be beds in every house — as many villagers as there are in the village, that
+     * many beds." A bed is only placed if it fits, so the count cannot be assumed from the
+     * number of houses: it has to be tallied and then topped up.
+     */
+    let bedTally = 0;
+
     /** Tries to fit a plan with its near edge on a road. Returns true when it lands. */
     const tryPlace = (plan: Plan, seed: number): boolean => {
       for (let attempt = 0; attempt < 12; attempt++) {
@@ -693,10 +862,11 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
           // The side facing the road: the plot was chosen by stepping off one, so `onX` and
           // `side` between them say which way that is. The door goes there.
           ...planBuilding(rotated, style, rand, seed + 100, roadSide, door),
-          ...furnishBuilding(rotated, rand, seed + 200),
+          ...furnishBuilding(rotated, rand, seed + 200, door.at),
         ];
         for (const s of inner) {
           slots.push({ ...s, cx: baseX + s.cx, cz: baseZ + s.cz });
+          if (s.kind === 'bed') bedTally++;
         }
         // Record what this building is for and where its middle is, so somebody can live or
         // work in it. Taken from the plan while it is being laid out — the only moment
@@ -737,6 +907,20 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     for (let i = 0; i < wanted * 3 && placedCount < wanted; i++) {
       const pick = Math.floor(rand(400 + i) * 6) % 6;
       if (tryPlace(PLANS[pick]!, 500 + i * 17)) placedCount++;
+    }
+
+    /**
+     * Enough beds for everyone who lives here.
+     *
+     * The crew is a fixed size, so the settlement keeps taking homes until it has at least that
+     * many beds. Bounded, because a small terrace can genuinely run out of plots — and in that
+     * case fewer beds is the honest outcome rather than a hang.
+     */
+    for (let i = 0; i < 24 && bedTally < VILLAGE_POPULATION; i++) {
+      // Plans 0..2 are the homes, and they are the small footprints, so they still fit when
+      // the roadside is mostly taken.
+      const home = PLANS[i % 3]!;
+      if (tryPlace(home, 900 + i * 23)) placedCount++;
     }
 
     // Farm plots: planters in rows, fenced if the biome fences.
@@ -814,6 +998,20 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
       });
     }
 
+    /**
+     * Which cells actually got a deck laid.
+     *
+     * Its own pass over the finished slot list, deliberately, rather than being filled during
+     * the instancing loop: that loop walks the slots grouped by kind, so a chair could be
+     * positioned long before the floor it stands on was seen, and the answer would depend on
+     * the order the kinds happened to come out of the map.
+     */
+    const paved = new Set<string>();
+    const cellKeyOf = cellKey;
+    for (const s of slots) {
+      if (s.kind === 'foundation' || s.kind === 'floor') paved.add(cellKeyOf(s.cx, s.cz));
+    }
+
     // ---- Instancing -------------------------------------------------------------------
     // One mesh per kind per village, sized to what the plan actually produced. A village is
     // then thirty-odd draw calls however many buildings it has, and a village out of range is
@@ -866,7 +1064,12 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         let px = cellX + (s.ox ?? 0);
         let pz = cellZ + (s.oz ?? 0);
 
-        if (lattice === 'edge') {
+        if (s.hang !== undefined) {
+          // Hanging from a ceiling: measured down from the slot, not up from a floor. Checked
+          // before the lattice, because a lantern is an edge piece and would otherwise be
+          // pushed onto a wall by the branch below.
+          y -= s.hang;
+        } else if (lattice === 'edge') {
           /**
            * Edge pieces stand on a cell *boundary*, and getting this wrong is why the first
            * villages had no walls, no doors and no fences at all.
@@ -909,8 +1112,13 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
            * A floor piece's walking surface is above its origin — 0.42 m for a foundation,
            * 0.3 m for a floor — so furniture placed at the bare slot level is buried in the
            * plinth up to its knees. Every bed and table in the first villages was.
+           *
+           * But only where there *is* a deck. Outdoor clutter round the square was being lifted
+           * by a foundation's thickness whether or not that cell was paved, which is the
+           * "barrels and stools hovering above the ground" report. The paved set is the record
+           * of what was actually laid, so the lift is looked up rather than assumed.
            */
-          y += floorLift(s);
+          if (paved.has(cellKeyOf(s.cx, s.cz)) || s.tier > 0) y += floorLift(s);
         }
 
         pos.set(px, y, pz);
@@ -1069,6 +1277,16 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         nearest.push({ d2, ...l });
       }
     }
+    // The keep-out ring follows the nearest settlement, and only while building.
+    const near = nearest_(position);
+    if (showRing && near) {
+      ring.visible = true;
+      ring.position.set(near.x, near.y + 1.7, near.z);
+      ring.scale.set(VILLAGE_KEEP_OUT, 1, VILLAGE_KEEP_OUT);
+    } else {
+      ring.visible = false;
+    }
+
     nearest.sort((a, b) => a.d2 - b.d2);
     for (let i = 0; i < lamps.length; i++) {
       const light = lamps[i]!;
@@ -1116,6 +1334,9 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
       pair.furnish.dispose();
     }
     tinted.clear();
+    ringGeo.dispose();
+    ringMat.dispose();
+    group.remove(ring);
     for (const light of lamps) group.remove(light);
     lamps.length = 0;
   };
@@ -1138,7 +1359,19 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     return false;
   };
 
-  return { group, update, pump, prime, nearest: nearest_, field, buildBlocked, dispose };
+  return {
+    group,
+    update,
+    pump,
+    prime,
+    nearest: nearest_,
+    field,
+    buildBlocked,
+    showBoundary: (on) => {
+      showRing = on;
+    },
+    dispose,
+  };
 }
 
 /** Metrics the diagnostics read. Exported so a probe can assert on layout, not pixels. */

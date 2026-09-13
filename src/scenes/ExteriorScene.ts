@@ -181,7 +181,15 @@ export class ExteriorScene implements GameScene {
       // few lines below, so these are written to survive being asked before it
       // exists.
       floorHeightAt: (x, z, fromY) => {
-        const ground = this.world.floorHeightAt(x, z);
+        // `fromY` is passed *through* to the world, and dropping it here is what kept
+        // teleporting anyone who walked into a villager's house onto its roof.
+        //
+        // The controller does supply it — it asks from its own feet — and the build site was
+        // already receiving it. But the world's own answer now includes the villages, and this
+        // adapter was calling `world.floorHeightAt(x, z)` with the bound thrown away. Unbounded,
+        // that query means "the highest surface in this column", which inside a house is the
+        // ceiling. Two layers deep, one missing argument.
+        const ground = this.world.floorHeightAt(x, z, fromY);
         return this.buildSite?.heightAt(x, z, ground, fromY) ?? ground;
       },
       blocksCamera: (x, y, z) =>
@@ -372,6 +380,11 @@ export class ExteriorScene implements GameScene {
     // Also runs with the mode shut once anything is standing, because doors have to
     // be usable without entering a construction mode to open one. Still nothing at
     // all for a session that has built nothing, which is every normal session.
+    // The village keep-out ring, every frame and outside the branch below. Inside it, a session
+    // that had built nothing would never run the line that hides the ring again, so closing
+    // build mode left the boundary on screen for good.
+    this.world.showBuildBoundary(this.buildSite.active);
+
     if (this.buildSite.active || this.buildSite.count() > 0) {
       this.camera.getWorldPosition(this.aimFrom);
       this.camera.getWorldDirection(this.aimDir);

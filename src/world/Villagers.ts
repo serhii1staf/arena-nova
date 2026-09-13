@@ -1,5 +1,6 @@
 import { Group, Vector3 } from 'three';
 import { makeVillagerBody, type VillagerBody, type VillagerModel } from './VillagerModels.ts';
+import { VILLAGE_POPULATION } from './Village.ts';
 import type { VillageInfo, VillagePlace, VillageStreamer } from './Village.ts';
 
 /**
@@ -33,7 +34,7 @@ import type { VillageInfo, VillagePlace, VillageStreamer } from './Village.ts';
  * meshes, so each is a draw call and a mixer update. This is about as many as the game already
  * carries in remote players.
  */
-const CREW = 6;
+const CREW = VILLAGE_POPULATION;
 
 /** Beyond this the settlement is not worth peopling. Inside the village view distance. */
 const ACTIVE_RANGE = 170;
@@ -68,6 +69,15 @@ interface Villager {
   /** Metres per second actually achieved last frame, after collision. */
   speed: number;
   jitter: number;
+  /**
+   * Which way round an obstacle this one goes, +1 or −1.
+   *
+   * Held rather than chosen per frame, because a villager that picks a side afresh every frame
+   * oscillates on the spot in front of a corner instead of getting round it.
+   */
+  avoidSide: number;
+  /** Seconds spent making no progress. Used to give up on a genuinely unreachable errand. */
+  stuck: number;
 }
 
 export interface VillagerCrew {
@@ -110,6 +120,8 @@ export function createVillagers(): VillagerCrew {
     yaw: 0,
     speed: 0,
     jitter: (i * 0.37) % 1,
+    avoidSide: i % 2 === 0 ? 1 : -1,
+    stuck: 0,
   }));
 
   // Bodies arrive asynchronously and the crew simply has none until they do. Requested once,
@@ -270,33 +282,73 @@ export function createVillagers(): VillagerCrew {
         const dist = Math.hypot(dx, dz);
         if (dist < ARRIVE) {
           v.target = null;
+          v.stuck = 0;
         } else {
           const wantStep = Math.min(dist, WALK * dt);
           const fromX = v.at.x;
           const fromZ = v.at.z;
-          v.at.x += (dx / dist) * wantStep;
-          v.at.z += (dz / dist) * wantStep;
-          // The world's own pushout, so a villager is stopped by exactly what stops the
-          // player — walls, doors, fences and furniture, all through the shared registry.
-          collide(v.at);
+          const ux = dx / dist;
+          const uz = dz / dist;
+
+          /**
+           * Walk round obstacles instead of giving up in front of them.
+           *
+           * This is the "villagers are brainless, they just stand there staring at a wall"
+           * report, and the cause was the old blocked-handler: the first frame a villager
+           * brushed anything — a fence post, a planter, the corner of a house on the way to its
+           * own door — the errand was abandoned. The scheduler then handed back a target in the
+           * same direction, so it walked into the same corner again, forever. From outside that
+           * looks exactly like standing still facing a wall.
+           *
+           * Instead: try straight on, then progressively deflected headings to one side and the
+           * other, and take the first that actually makes progress. That is enough to slide
+           * along a wall and round a corner, which is most of what looks like navigation. The
+           * side is remembered so it commits to going one way round rather than dithering in
+           * the middle, and the errand is only abandoned after being stuck for a real couple of
+           * seconds rather than a single frame.
+           *
+           * Honest about what this is not: there is still no path planning. A villager whose
+           * door is round the far side of the building will feel its way there along the wall
+           * rather than setting off in the right direction, and a genuine dead end still ends
+           * in giving up. It is local steering, not a route.
+           */
+          const side = v.avoidSide;
+          const DEFLECT = [0, side * 0.55, -side * 0.55, side * 1.15, -side * 1.15, side * 1.9];
+          for (const a of DEFLECT) {
+            const c = Math.cos(a);
+            const s = Math.sin(a);
+            v.at.x = fromX + (ux * c - uz * s) * wantStep;
+            v.at.z = fromZ + (ux * s + uz * c) * wantStep;
+            // The world's own pushout, so a villager is stopped by exactly what stops the
+            // player — walls, doors, fences and furniture.
+            collide(v.at);
+            moved = Math.hypot(v.at.x - fromX, v.at.z - fromZ);
+            if (moved > wantStep * 0.5) break;
+            v.at.x = fromX;
+            v.at.z = fromZ;
+            moved = 0;
+          }
           v.at.y = ground(v.at.x, v.at.z);
-          // How far they *actually* got. A villager pressed against a wall makes no progress,
-          // and the animation has to know that or it walks on the spot forever.
+
           const gotX = v.at.x - fromX;
           const gotZ = v.at.z - fromZ;
-          moved = Math.hypot(gotX, gotZ);
           if (moved > 1e-4) {
             const wantYaw = Math.atan2(-gotX, -gotZ);
             let turn = wantYaw - v.yaw;
             while (turn > Math.PI) turn -= Math.PI * 2;
             while (turn < -Math.PI) turn += Math.PI * 2;
             v.yaw += turn * Math.min(1, dt * 5);
-          }
-          // Blocked: give up on this errand rather than grinding into the obstacle. This is
-          // what stops a villager standing in a wall for the rest of the day.
-          if (moved < wantStep * 0.25) {
-            v.target = null;
-            v.dwell = 1.5;
+            v.stuck = Math.max(0, v.stuck - dt);
+          } else {
+            // Nothing worked from here. Count it, swap the side being tried, and only abandon
+            // the errand once it has been hopeless for a couple of seconds.
+            v.stuck += dt;
+            if (v.stuck > 0.6) v.avoidSide = -v.avoidSide;
+            if (v.stuck > 2.4) {
+              v.target = null;
+              v.dwell = 1.2;
+              v.stuck = 0;
+            }
           }
         }
       }

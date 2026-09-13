@@ -16,7 +16,7 @@ import type { QualitySettings } from '../core/QualityManager.ts';
 import { applyTriplanarUV, boxAt } from './builders/geometry.ts';
 import { createLandmarks, type LandmarkStreamer } from './Landmarks.ts';
 import { createVillages, type VillageStreamer } from './Village.ts';
-import { disposePieceAssets } from './Building.ts';
+import { disposePieceAssets, STEP_UP } from './Building.ts';
 import { createVillagers, type VillagerCrew } from './Villagers.ts';
 import { createLivestock, type LivestockHerd } from './Livestock.ts';
 import { buildPortal, type PortalBuild } from './Portal.ts';
@@ -78,6 +78,8 @@ export interface ExteriorBuild {
   floorHeightAt(x: number, z: number, fromY?: number): number;
   /** True where the player may not build: inside a settlement, plus a margin. */
   buildBlocked(x: number, z: number): boolean;
+  /** Shows the village keep-out boundary. Driven by whether build mode is open. */
+  showBuildBoundary(on: boolean): void;
 
   collide(pos: Vector3): void;
   blocksCamera(x: number, y: number, z: number): boolean;
@@ -183,7 +185,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
 
   // The people and the animals that live in them. Both are a fixed crew reassigned to
   // whichever settlement the player is near, so a world of two hundred villages costs what
-  // one does — see the headers of Villagers.ts and Livestock.ts.
+  // one does ï¿½ see the headers of Villagers.ts and Livestock.ts.
   const villagers: VillagerCrew = createVillagers();
   group.add(villagers.group);
   const livestock: LivestockHerd = createLivestock();
@@ -382,8 +384,12 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     // Settlements, through their own analytic field. Bounded by `fromY` where the caller knows
     // it, which is what keeps a ceiling from being mistaken for the floor.
     h = villages.field.heightAt(x, z, h, fromY);
+    // The registry gets the same bound. It holds circles with a single `top` and no notion of
+    // who is asking, so an unbounded pass here can lift you onto anything registered overhead â€”
+    // the same failure the village field was given `fromY` to avoid, one layer along.
+    const ceiling = fromY === undefined ? Infinity : fromY + STEP_UP;
     registry.forEachNear(x, z, (p) => {
-      if (p.top <= h) return;
+      if (p.top <= h || p.top > ceiling) return;
       const dx = x - p.x;
       const dz = z - p.z;
       const r = p.r * 0.85;
@@ -592,7 +598,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     // Villages: the cell underfoot only.
     //
     // Nine cells of a kilometre each around the origin, and a settlement is the most
-    // expensive single thing this world builds — so priming them meant building up to nine
+    // expensive single thing this world builds ï¿½ so priming them meant building up to nine
     // whole villages synchronously before the first frame of the exterior. None of them is
     // within two hundred metres of the spawn portal in any case, because illageSiteFor`r
     // keeps them four plaza radii clear of it. One cell can still hold one settlement, which is
@@ -644,6 +650,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     group,
     floorHeightAt,
     buildBlocked: villages.buildBlocked,
+    showBuildBoundary: villages.showBoundary,
     collide,
     blocksCamera,
     skyMaterial,

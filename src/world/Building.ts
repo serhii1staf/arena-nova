@@ -113,7 +113,7 @@ const GLASS = 0.03;
 /** How many metres of timber one tile of the wood texture covers. */
 const UV_METRES = 1.15;
 /** How far above your feet a surface can be and still be something you step onto. */
-const STEP_UP = 0.65;
+export const STEP_UP = 0.65;
 /**
  * Thickness of a roof's solid shell.
  *
@@ -1027,6 +1027,7 @@ export const PIECE_METRICS = {
   floorTop: FLOOR_TOP,
   foundationTop: FOUNDATION_TOP,
   ceilTop: CEIL_TOP,
+  ceilDrop: CEIL_DROP,
   wallHeight: BUILD_GRID,
   ridge: RIDGE,
 } as const;
