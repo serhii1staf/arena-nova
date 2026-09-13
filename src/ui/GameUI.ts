@@ -77,7 +77,7 @@ export class GameUI {
     this.waypoint = new Waypoint(engine);
     this.squad = new Squad(engine);
     this.buildBar = new BuildBar(engine);
-    this.inventory = new InventoryPanel();
+    this.inventory = new InventoryPanel(engine);
     panel = this.inventory;
     // The player list is where you see who is here, so it is where inviting belongs.
     this.playerList.onInvite((id) => this.squad.invite(id));

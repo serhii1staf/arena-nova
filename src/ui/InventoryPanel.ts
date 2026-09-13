@@ -1,4 +1,5 @@
 import { SLOTS, inventory } from '../game/Inventory.ts';
+import type { Engine } from '../core/Engine.ts';
 import { savedName } from '../net/identity.ts';
 import { ITEMS, ITEM_ORDER, itemGeometry, type ItemId } from '../game/Items.ts';
 import { RECIPES, blockedBy, craft, recommended, type Recipe } from '../game/Recipes.ts';
@@ -33,6 +34,7 @@ interface Progress {
 }
 
 export class InventoryPanel {
+  private readonly engine: Engine;
   private readonly root: HTMLElement | null;
   private readonly grid: HTMLElement | null;
   private readonly list: HTMLElement | null;
@@ -51,7 +53,8 @@ export class InventoryPanel {
   /** Which character the figure on screen is of, so a change is noticed. */
   private shownSkin: string | null = null;
 
-  constructor() {
+  constructor(engine: Engine) {
+    this.engine = engine;
     this.root = document.getElementById('inventory');
     this.grid = document.getElementById('invGrid');
     this.list = document.getElementById('invRecipes');
@@ -107,6 +110,13 @@ export class InventoryPanel {
   private setOpen(on: boolean): void {
     this.open = on;
     this.root?.classList.toggle('on', on);
+    // The cursor comes back on its own, and goes away again on close.
+    //
+    // A panel full of things to click, opened by a key, with the mouse still captured by
+    // the game is a panel you cannot use — you had to know to press Alt as well. The
+    // pause menu has always done this; there was no reason this did not.
+    const input = this.engine.input;
+    if (on !== input.isCursorFreed) input.toggleCursor();
     if (on) {
       this.paintIcons();
       this.draw();
@@ -270,7 +280,7 @@ export class InventoryPanel {
             cell.classList.add('edible');
             cell.title = `${t(`item.${id}`)} — ${t('inv.eat')}`;
             cell.addEventListener('click', () => {
-              inv.eat(id);
+              if (inv.eat(id)) this.engine.audio?.eat();
               this.draw();
             });
           } else if (id === 'workbench') {

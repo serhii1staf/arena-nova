@@ -426,12 +426,12 @@
       }
       .invWindow {
         display: grid;
-        width: min(1020px, 94vw);
-        height: min(660px, 92vh);
+        width: min(1240px, 96vw);
+        height: min(800px, 94vh);
         gap: 10px;
         grid-template:
           'you craft' minmax(0, 1fr)
-          'bag bag' min-content / 268px 1fr;
+          'bag bag' min-content / 320px 1fr;
         padding: 14px;
         border: 1px solid rgba(150, 190, 230, 0.16);
         border-radius: 10px;
@@ -507,16 +507,21 @@
       #invGrid {
         display: grid;
         gap: 5px;
-        grid-template-columns: repeat(8, 66px);
+        grid-template-columns: repeat(8, 78px);
         justify-content: center;
       }
+      /* Filled slots are lifted well clear of the empty ones. Against a dark panel a
+         timber icon on a dark square is hard to pick out, so the square a thing is in gets
+         a lighter face and a brighter edge — the contrast carries the reading, not the
+         icon fighting the background. */
       .invCell {
         position: relative;
         aspect-ratio: 1;
         padding: 2px;
-        border: 1px solid rgba(150, 190, 230, 0.13);
+        border: 1px solid rgba(170, 205, 240, 0.28);
         border-radius: 4px;
-        background: rgba(24, 30, 39, 0.9);
+        background: linear-gradient(180deg, rgba(52, 62, 78, 0.95), rgba(34, 42, 54, 0.95));
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
       }
       .invCell.empty {
         border-style: dashed;

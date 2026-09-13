@@ -221,6 +221,38 @@ export class AudioManager {
     src.stop(now + 0.16);
   }
 
+  /**
+   * Eating: two soft, close bites.
+   *
+   * Built from the same noise buffer and band-pass the footsteps use, just lower and
+   * shorter — a bite is a muffled crunch, which is a narrow band of noise with a fast
+   * decay. Two of them a beat apart, because one reads as a click rather than as eating.
+   */
+  eat(): void {
+    const ctx = this.ctx;
+    if (!ctx || !this.master || !this.noiseBuffer || !this.unlocked) return;
+    const now = ctx.currentTime;
+    for (const [at, level] of [
+      [0, 0.16],
+      [0.13, 0.11],
+    ] as const) {
+      const src = ctx.createBufferSource();
+      src.buffer = this.noiseBuffer;
+      src.loop = true;
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 380 + Math.random() * 220;
+      bp.Q.value = 1.6;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.0001, now + at);
+      g.gain.exponentialRampToValueAtTime(level, now + at + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + at + 0.1);
+      src.connect(bp).connect(g).connect(this.sfxBus ?? this.master);
+      src.start(now + at);
+      src.stop(now + at + 0.12);
+    }
+  }
+
   jump(): void {
     const ctx = this.ctx;
     if (!ctx || !this.master || !this.noiseBuffer || !this.unlocked) return;

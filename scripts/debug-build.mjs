@@ -1111,6 +1111,95 @@ try {
   });
   console.log(`mounted: ${JSON.stringify(mounted)}`);
 
+  // ---- A piece put down on a floor sits on it, not in it -------------------
+  // The preview used to take its height from the terrain, so anything placed on a built
+  // floor was positioned at the ground under that floor and sank through it. The same one
+  // change is what lets a lantern be stood on a table.
+  const onTopOf = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    sc.player.spawn(1300, 1300, 0);
+    sc.player.pitch = 0;
+    s.select('floor');
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const f = window.probe.piece('floor', 0);
+    if (!f) return { placed: true, found: false };
+    // Now a bed, aimed at the same square.
+    s.select('bed');
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: true, found: false, bed: false };
+    const b = window.probe.piece('bed', 0);
+    if (!b) return { placed: true, found: false, bed: false };
+    return {
+      placed: true,
+      found: true,
+      bed: true,
+      floorY: +f.y.toFixed(2),
+      // The floor's walking surface is 0.3 above its own base, so a bed standing on it
+      // must have its base there rather than at the floor's base.
+      bedY: +b.y.toFixed(2),
+      lift: +(b.y - f.y).toFixed(2),
+    };
+  });
+  console.log(`on a floor: ${JSON.stringify(onTopOf)}`);
+
+  // ---- A fixture goes where the crosshair is, on your side of the wall -----
+  const aimedMount = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    sc.player.spawn(1500, 1500, 0);
+    sc.player.pitch = 0;
+    s.select('wall');
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const w = window.probe.piece('wall', 0);
+    if (!w) return { placed: true, found: false };
+    const nx = Math.sin(w.ry);
+    const nz = Math.cos(w.ry);
+    // Along the wall, perpendicular to its thin axis.
+    const tx = nz;
+    const tz = -nx;
+
+    // Two torches, aimed at two different points along the same wall from the same side.
+    s.select('torch');
+    const put = (offset) => {
+      // Stand back from the wall and look at a point offset along it.
+      const px = w.x - nx * 3 + tx * offset;
+      const pz = w.z - nz * 3 + tz * offset;
+      const yaw = Math.atan2(-(w.x + tx * offset - px), -(w.z + tz * offset - pz));
+      sc.player.spawn(px, pz, yaw);
+      sc.player.pitch = 0;
+      sc.player.update(0.016);
+      sc.render(1, 0.016);
+      sc.render(1, 0.016);
+      return s.place();
+    };
+    const first = put(-1.2);
+    const second = put(1.2);
+    const a = window.probe.piece('torch', 0);
+    const b = window.probe.piece('torch', 1);
+    if (!a || !b) return { placed: true, found: false, first, second, count: a ? 1 : 0 };
+    // Both on the near side of the wall, and a real distance apart along it.
+    const sideOf = (p) => Math.sign((p.x - w.x) * nx + (p.z - w.z) * nz);
+    return {
+      placed: true,
+      found: true,
+      first,
+      second,
+      apart: +Math.abs((a.x - b.x) * tx + (a.z - b.z) * tz).toFixed(2),
+      sameSide: sideOf(a) === sideOf(b),
+      // The player stood on the negative side of the wall's own normal.
+      nearSide: sideOf(a) === -1 && sideOf(b) === -1,
+      offset: +Math.abs((a.x - w.x) * nx + (a.z - w.z) * nz).toFixed(2),
+    };
+  });
+  console.log(`aimed mount: ${JSON.stringify(aimedMount)}`);
+
   // ---- Furniture holds you up along its whole length -----------------------
   // A bed is over two metres long and a table nearly two wide, so either can be
   // bucketed in one grid column and reach well into the next. The floor query used to
@@ -1367,6 +1456,21 @@ try {
   // Freed means the game is not holding the mouse, and pressing again gives it back.
   const cursorToggles =
     cursor.freed === false && freed.freed === true && freed.locked === false && regrabbed === false;
+  // A bed on a floor stands on the floor's surface, not at the floor's base.
+  const sitsOnFloor =
+    onTopOf.found === true && onTopOf.lift > 0.2 && onTopOf.lift < 0.6;
+  // Two fixtures aimed at two points along one wall land apart, both on the near side.
+  // Two fixtures aimed at two points along one wall land apart from each other, both on
+  // the side the player was standing on. How far they sit off the wall is measured by the
+  // check above, which aims at a wall straight on; this one is about being able to place
+  // more than one and about which face they end up on.
+  const mountsWhereAimed =
+    aimedMount.found === true &&
+    aimedMount.first === true &&
+    aimedMount.second === true &&
+    aimedMount.apart > 1.5 &&
+    aimedMount.sameSide === true &&
+    aimedMount.nearSide === true;
   // Clear of the wall by about its half-thickness, facing into the room, and on the same
   // line as the wall rather than shifted along it.
   const fixturesMount =
@@ -1496,6 +1600,12 @@ try {
     fixturesMount,
     `off=${mounted.offset} facing=${mounted.facesIn}`,
   );
+  line('a bed on a floor sits on it:', sitsOnFloor, `lift=${onTopOf.lift}`);
+  line(
+    'fixtures go where you aim:',
+    mountsWhereAimed,
+    `apart=${aimedMount.apart} nearSide=${aimedMount.nearSide} off=${aimedMount.offset}`,
+  );
   line(
     'doors open and shut:',
     doorsOpen,
@@ -1549,6 +1659,8 @@ try {
     roofSheltersYou &&
     furnitureHolds &&
     fixturesMount &&
+    sitsOnFloor &&
+    mountsWhereAimed &&
     doorsOpen &&
     cursorToggles &&
     labelCentred &&

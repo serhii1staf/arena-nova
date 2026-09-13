@@ -351,8 +351,13 @@ export class ExteriorScene implements GameScene {
     if (this.buildSite.active || this.buildSite.count() > 0) {
       this.camera.getWorldPosition(this.aimFrom);
       this.camera.getWorldDirection(this.aimDir);
+      // The height a piece lands on includes what has already been built, not just the
+      // terrain. Asking the world alone is why a bed put down on a floor sank into it and
+      // a lantern could not be stood on a table: the preview was measuring the ground
+      // under the floor rather than the floor. Unbounded on purpose — for placing, the
+      // top of whatever is there is exactly what you want.
       this.buildSite.update(this.aimFrom, this.aimDir, this.player.feetPosition, (x, z) =>
-        this.world.floorHeightAt(x, z),
+        this.buildSite.heightAt(x, z, this.world.floorHeightAt(x, z)),
       );
     }
   }

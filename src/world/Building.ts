@@ -1175,6 +1175,19 @@ function solidsOf(kind: PieceKind, open = false): Slab[] {
       return shell((f) => RIDGE * (1 - f));
     case 'roofHip':
       return [...shell((f) => RIDGE * (1 - f)), ...shell((f) => RIDGE * (1 - f), 'x')];
+    // A flight of stairs is solid underneath, unlike a roof: you cannot walk beneath a
+    // staircase that sits on the ground, and leaving it hollow is what let a body walk in
+    // through the side and the high end as if the whole thing were scenery. Filled from
+    // the floor to each band's tread, so the step-up allowance still carries you up it.
+    case 'stairs':
+      return [0.125, 0.375, 0.625, 0.875].map((f) => ({
+        cx: 0,
+        cz: -s + f * G,
+        hx: s,
+        hz: s / 4,
+        y0: 0,
+        y1: Math.max(0.1, G * f),
+      }));
     case 'roofShed':
       return [0.125, 0.375, 0.625, 0.875].map((f) => ({
         cx: 0,
@@ -1429,11 +1442,16 @@ export function createBuildSite(assets: AssetManager): BuildSite {
    * edge on one odd, a corner on two odd.
    */
   const slotKey = (kind: PieceKind, p: Vector3, turn: number): string => {
-    const h = G / 2;
+    // Fixtures slide along a wall in half-metre steps, so their slots have to be counted
+    // in half metres too — on the half-cell grid, two torches a metre apart on the same
+    // wall would be the same slot and the second would be refused.
+    const h = MOUNTED.has(kind) ? 0.5 : G / 2;
     const gx = Math.round(p.x / h);
-    const gy = Math.round(p.y / h);
+    const gy = Math.round(p.y / (G / 2));
     const gz = Math.round(p.z / h);
-    const facing = ROTATABLE.has(kind) ? turn % 4 : 0;
+    // Which side of the wall a fixture is on is part of what it is, or the far side of a
+    // wall could never hold one opposite the near side.
+    const facing = ROTATABLE.has(kind) || MOUNTED.has(kind) ? turn % 4 : 0;
     return `${kind}:${gx}|${gy}|${gz}|${facing}`;
   };
 
@@ -1446,8 +1464,117 @@ export function createBuildSite(assets: AssetManager): BuildSite {
    * at, which makes enclosing a floor a matter of turning around rather than of
    * lining anything up. `rotate` steps to the next side from there.
    */
-  const snap = (raw: Vector3, out: Vector3): number => {
+  /**
+   * True when a wall, a door or a window stands at this point at this height.
+   *
+   * What a fixture needs to know: is there something here to hang on. Read off the pieces
+   * themselves rather than from a slot key, because a doorway and a window sit on the same
+   * line as a wall and are just as good to hang a torch beside.
+   */
+  const wallAt = (x: number, z: number, y: number): boolean => {
+    const gx = Math.round(x / G);
+    const gz = Math.round(z / G);
+    for (let ix = -1; ix <= 1; ix++) {
+      for (let iz = -1; iz <= 1; iz++) {
+        const list = columns.get(colKey(gx + ix, gz + iz));
+        if (!list) continue;
+        for (const p of list) {
+          if (LATTICE[p.kind] !== 'edge' || MOUNTED.has(p.kind)) continue;
+          if (y < p.level - 0.6 || y > p.level + G) continue;
+          // In the wall's own frame: close to its plane, and anywhere along its width.
+          // Measuring to its centre instead meant a wall was only found when aimed at
+          // dead middle — a torch a metre to one side of it reported bare ground.
+          const [lx, lz] = toLocal(p, x, z);
+          if (Math.abs(lz) > 0.45 || Math.abs(lx) > G / 2 + 0.05) continue;
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  const snap = (raw: Vector3, out: Vector3, eye: Vector3, forward: Vector3): number => {
     const lattice = LATTICE[selected];
+
+    if (MOUNTED.has(selected)) {
+      // Fixtures are put where you point, not in the middle of a panel.
+      //
+      // Snapping them to the centre of a cell edge gave one position per wall and always
+      // the same face of it, so hanging two torches along a corridor was impossible and
+      // half the time the one torch appeared on the far side. Instead: find the wall line
+      // the crosshair is nearest, slide along it in half-metre steps, and come out on
+      // whichever side the player is standing on.
+      const h = G / 2;
+      const STEP_ALONG = 0.5;
+
+      /**
+       * Every wall line the ray crosses within reach, nearest first.
+       *
+       * Taking simply the first was wrong in the ordinary case: lines are every four
+       * metres, so aiming across a room at a wall seven metres away crosses an empty line
+       * at three — and the torch went there, four metres short of the wall it was pointed
+       * at. What is wanted is the first line that has something to hang on.
+       */
+      const crossings: { t: number; axis: 'x' | 'z' }[] = [];
+      for (const axis of ['x', 'z'] as const) {
+        const o = axis === 'x' ? eye.x : eye.z;
+        const d = axis === 'x' ? forward.x : forward.z;
+        if (Math.abs(d) < 1e-4) continue;
+        let k = d > 0 ? Math.ceil((o - h) / G) : Math.floor((o - h) / G);
+        for (let n = 0; n < 4; n++) {
+          const tt = (k * G + h - o) / d;
+          if (tt > 0.05 && tt <= REACH + 3) crossings.push({ t: tt, axis });
+          k += d > 0 ? 1 : -1;
+        }
+      }
+      crossings.sort((a, b) => a.t - b.t);
+
+      // The first crossing with a wall on it; failing that, the first crossing at all, so
+      // a fixture can still be lined up before its wall exists.
+      let chosen = crossings[0] ?? null;
+      for (const c of crossings) {
+        const px = eye.x + forward.x * c.t;
+        const pz = eye.z + forward.z * c.t;
+        if (wallAt(px, pz, eye.y)) {
+          chosen = c;
+          break;
+        }
+      }
+
+      if (chosen) {
+        const t = chosen.t;
+        const hx = eye.x + forward.x * t;
+        const hz = eye.z + forward.z * t;
+        if (chosen.axis === 'x') {
+          // The wall runs along Z. Slide along it in Z; stand off it in X, on the side
+          // the ray came from, which is the side the player is on.
+          const side = forward.x >= 0 ? -1 : 1;
+          out.x = Math.round((hx - h) / G) * G + h + side * MOUNT_OFF;
+          out.z = Math.round(hz / STEP_ALONG) * STEP_ALONG;
+          return side > 0 ? 1 : 3;
+        }
+        const side = forward.z >= 0 ? -1 : 1;
+        out.z = Math.round((hz - h) / G) * G + h + side * MOUNT_OFF;
+        out.x = Math.round(hx / STEP_ALONG) * STEP_ALONG;
+        return side > 0 ? 0 : 2;
+      }
+
+      // Looking along a wall rather than at one, or at nothing within reach: fall back to
+      // the nearest line to the fixed aim point so there is always something to preview.
+      const lineX = Math.round((raw.x - h) / G) * G + h;
+      const lineZ = Math.round((raw.z - h) / G) * G + h;
+      if (Math.abs(raw.x - lineX) <= Math.abs(raw.z - lineZ)) {
+        const side = eye.x >= lineX ? 1 : -1;
+        out.x = lineX + side * MOUNT_OFF;
+        out.z = Math.round(raw.z / STEP_ALONG) * STEP_ALONG;
+        return side > 0 ? 1 : 3;
+      }
+      const side = eye.z >= lineZ ? 1 : -1;
+      out.z = lineZ + side * MOUNT_OFF;
+      out.x = Math.round(raw.x / STEP_ALONG) * STEP_ALONG;
+      return side > 0 ? 0 : 2;
+    }
+
     if (lattice === 'cell') {
       out.x = Math.round(raw.x / G) * G;
       out.z = Math.round(raw.z / G) * G;
@@ -1476,16 +1603,6 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     out.x = cx + (side === 0 ? half : side === 2 ? -half : 0);
     out.z = cz + (side === 1 ? half : side === 3 ? -half : 0);
 
-    if (MOUNTED.has(selected)) {
-      // Off the line, towards the middle of the cell, and turned to face that way.
-      // The fixture shapes all project along their own +Z, so the turn is whichever one
-      // sends +Z from the edge back into the room.
-      const inX = side === 0 ? -1 : side === 2 ? 1 : 0;
-      const inZ = side === 1 ? -1 : side === 3 ? 1 : 0;
-      out.x += inX * MOUNT_OFF;
-      out.z += inZ * MOUNT_OFF;
-      return side === 0 ? 3 : side === 2 ? 1 : side === 1 ? 2 : 0;
-    }
     return side === 0 || side === 2 ? 1 : 0;
   };
 
@@ -1652,7 +1769,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     // *slot* — snapping is cheaper and steadier, because the preview stops jittering
     // between two cells as the crosshair crosses a distant hillside edge.
     at.copy(eye).addScaledVector(forward, REACH);
-    atTurn = snap(at, at);
+    atTurn = snap(at, at, eye, forward);
 
     // The tier comes from how far you looked up, and the base from the terrain under
     // the target. Measuring the aim height against the ground instead mixed the two
@@ -1827,11 +1944,15 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         return p.level + DECK_TOP;
       case 'ramp':
         return p.level + Math.max(0, Math.min(G, lz + s));
-      case 'stairs': {
-        // The tread you are standing on, so a flight feels like steps underfoot.
-        const i = Math.min(STEPS - 1, Math.max(0, Math.floor(((lz + s) / G) * STEPS)));
-        return p.level + ((i + 1) * G) / STEPS;
-      }
+      case 'stairs':
+        // The same smooth plane a ramp uses, even though the treads are modelled.
+        //
+        // Returning the tread you are standing on read well on paper and shook the camera
+        // apart in practice: the controller snaps to the floor every frame, so a surface
+        // that jumps half a metre between one step and the next hands it a jolt per
+        // tread. Real staircases are climbed by a smoothed capsule in every engine that
+        // has them, for exactly this reason. The steps are still what you see.
+        return p.level + Math.max(0, Math.min(G, lz + s));
       case 'roofGable':
         return p.level + Math.max(0, RIDGE * (1 - Math.abs(lz) / s));
       case 'roofHip':
