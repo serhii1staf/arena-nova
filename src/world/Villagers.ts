@@ -43,6 +43,22 @@ const ACTIVE_RANGE = 170;
 const WALK = 1.1;
 /** How close counts as arrived. */
 const ARRIVE = 1.3;
+/**
+ * How close counts as reaching an intermediate waypoint.
+ *
+ * Tighter than `ARRIVE`, because the waypoints that matter are doorways: cutting the corner on
+ * one leaves the next leg starting from beside the opening instead of square in front of it, and
+ * then the villager walks into the wall next to its own door.
+ */
+const WAYPOINT = 0.55;
+/**
+ * How far above the feet a surface can be and still be a floor rather than a ceiling.
+ *
+ * The same value the player uses. Kept here as its own constant rather than imported from the
+ * build system, because what it means for a villager is the bound on a height query, not a
+ * step-up allowance.
+ */
+const STEP_UP = 0.65;
 
 /** Which model each of the crew wears. Fixed, so nobody changes clothes mid-village. */
 const CAST: readonly VillagerModel[] = [
@@ -65,6 +81,14 @@ interface Villager {
   dwell: number;
   at: Vector3;
   target: Vector3 | null;
+  /**
+   * Remaining legs of the current route, in order.
+   *
+   * A route rather than a destination is what gets them through doorways: the last leg into a
+   * building is aimed from directly outside the door to directly inside it, so the approach is
+   * perpendicular to the wall and the one-cell opening is entered square on.
+   */
+  path: Vector3[];
   yaw: number;
   /** Metres per second actually achieved last frame, after collision. */
   speed: number;
@@ -96,10 +120,16 @@ export interface VillagerCrew {
      * The world's own ground height, which includes what the village has paved.
      *
      * Not `surfaceGroundHeightAt`: that is the bare terrain, and a village's decks sit half a
-     * metre above it � so villagers walked at terrain level and were buried to the shins in
+     * metre above it, so villagers walked at terrain level and were buried to the shins in
      * their own square, which is the levitating-and-sinking report.
+     *
+     * `fromY` is the bound that says "a surface far above me is a ceiling, not a floor", and
+     * leaving it off is why villagers were flung onto the roof at their own front door. The
+     * world has taken it since 0.36 and the player has passed it since 0.38; this signature
+     * simply never did, so every villager query answered "the highest surface in this column",
+     * which one step inside a doorway is the roof.
      */
-    floorAt: (x: number, z: number) => number,
+    floorAt: (x: number, z: number, fromY?: number) => number,
   ): void;
   active(): number;
   dispose(): void;
@@ -117,6 +147,7 @@ export function createVillagers(): VillagerCrew {
     dwell: 0,
     at: new Vector3(),
     target: null,
+    path: [],
     yaw: 0,
     speed: 0,
     jitter: (i * 0.37) % 1,
@@ -157,7 +188,7 @@ export function createVillagers(): VillagerCrew {
    * neither is called from anywhere but `update`, so a binding is simpler than five extra
    * parameters and cannot fall out of step with the frame.
    */
-  let ground: (x: number, z: number) => number = () => 0;
+  let ground: (x: number, z: number, fromY?: number) => number = () => 0;
 
   /** Hands the crew to a settlement, standing each one at their own front door. */
   const assign = (info: VillageInfo | null): void => {
@@ -187,10 +218,13 @@ export function createVillagers(): VillagerCrew {
             ? info.homes[(i + 1) % info.homes.length]!
             : info.centre;
       v.at.set(v.home.doorX, v.home.y, v.home.doorZ);
-      v.at.y = ground(v.at.x, v.at.z);
+      // Bounded from the pad's own level: they are being stood on their doorstep, outdoors, and
+      // an unbounded query there can find the eaves overhead.
+      v.at.y = ground(v.at.x, v.at.z, v.home.y + STEP_UP);
       v.phase = 'atHome';
       v.dwell = 1 + i * 0.6;
       v.target = null;
+      v.path.length = 0;
       v.speed = 0;
       if (v.body) v.body.object.visible = true;
     }
@@ -205,8 +239,78 @@ export function createVillagers(): VillagerCrew {
   const doorstep = (place: VillagePlace, v: Villager, spread: number): Vector3 => {
     const a = v.jitter * Math.PI * 2;
     step.set(place.doorX + Math.cos(a) * spread, place.y, place.doorZ + Math.sin(a) * spread);
-    step.y = ground(step.x, step.z);
+    step.y = ground(step.x, step.z, place.y + STEP_UP);
     return step;
+  };
+
+  /**
+   * Sets a route rather than a single destination.
+   *
+   * Waypoints are consumed in order, and this is what lets a villager actually get through a
+   * door. A doorway is a hole one cell wide in a wall four metres long; steering straight at
+   * something on the far side of it only passes through when the approach happens to line up,
+   * and any other angle ends with a villager grinding along the wall beside the opening. Which
+   * is what "they stand at the door and just can't go in" was.
+   *
+   * A route of "outside the door, then just inside it" makes the last leg perpendicular to the
+   * wall by construction, so the doorway is entered square on.
+   */
+  const route = (v: Villager, points: Vector3[]): void => {
+    v.path.length = 0;
+    for (const p of points) v.path.push(p.clone());
+    v.target = v.path.shift() ?? null;
+    v.stuck = 0;
+  };
+
+  /** A point on the ground at a place, bounded so a roof is never mistaken for a floor. */
+  const spot = (x: number, z: number, fromY: number): Vector3 =>
+    step.set(x, ground(x, z, fromY + STEP_UP), z);
+
+  /**
+   * The way into a building: stand at the door, then step through it.
+   *
+   * The scatter is applied to the *outside* waypoint only. Inside is a doorway, and six people
+   * aiming at six slightly different points in a one-cell gap is how you get a jam in it.
+   */
+  const routeIndoors = (v: Villager, place: VillagePlace, spread: number): void => {
+    const outside = doorstep(place, v, spread).clone();
+    const inside = spot(place.insideX, place.insideZ, place.y).clone();
+    route(v, [outside, inside]);
+  };
+
+  /**
+   * The way upstairs: in through the door, over to the foot of the stairs, then up them.
+   *
+   * There is no climbing here and none is needed. The staircase piece presents a continuous
+   * ramp, and the ground query returns its surface, so walking horizontally across that cell
+   * carries a villager up it — the same way it carries the player. What was missing was any
+   * reason to walk over that cell at all, so they never went up. Three waypoints supply one.
+   */
+  const routeUpstairs = (v: Villager, place: VillagePlace): boolean => {
+    const { stairFootX, stairFootZ, stairTopX, stairTopZ, upperY } = place;
+    if (
+      stairFootX === null ||
+      stairFootZ === null ||
+      stairTopX === null ||
+      stairTopZ === null ||
+      upperY === null
+    ) {
+      return false;
+    }
+    const outside = doorstep(place, v, 1.4).clone();
+    const inside = spot(place.insideX, place.insideZ, place.y).clone();
+    // The foot of the flight, on the ground, then the head of it at the upper deck. The two ends
+    // come from the village, which knows which way the flight runs.
+    const foot = spot(stairFootX, stairFootZ, place.y).clone();
+    const top = new Vector3(stairTopX, upperY, stairTopZ);
+    // And off the stairs into the room, or they stand on the top step against the wall. Stepped
+    // towards the building's middle, which from a corner cell is always inward.
+    const inward = new Vector3(place.x - stairTopX, 0, place.z - stairTopZ);
+    if (inward.lengthSq() < 1e-4) inward.set(-1, 0, 0);
+    inward.normalize().multiplyScalar(3.4);
+    const landing = new Vector3(stairTopX + inward.x, upperY, stairTopZ + inward.z);
+    route(v, [outside, inside, foot, top, landing]);
+    return true;
   };
 
   /** Advances one villager's schedule. Dwell is counted in seconds. */
@@ -219,24 +323,40 @@ export function createVillagers(): VillagerCrew {
     switch (v.phase) {
       case 'atHome':
         if (night < 0.35) {
+          // Out of the house and off to work. Leaving is a route too: from inside, the way out
+          // is back through the same doorway, and aiming straight at a workplace across the
+          // village from an armchair means aiming at the inside of your own wall.
           v.phase = 'toWork';
-          v.target = doorstep(v.work, v, 1.8).clone();
+          route(v, [
+            spot(v.home.insideX, v.home.insideZ, v.home.y).clone(),
+            doorstep(v.home, v, 1.6).clone(),
+            doorstep(v.work, v, 1.8).clone(),
+          ]);
         } else {
           v.dwell = 3;
         }
         break;
       case 'toWork':
+        // Work happens indoors. A forge with nobody in it and a smith standing in the road
+        // outside it was the whole of "they just stand there".
         v.phase = 'atWork';
+        routeIndoors(v, v.work, 1.6);
         v.dwell = 12 + v.jitter * 10;
         break;
       case 'atWork':
         if (night > 0.3) {
           v.phase = 'toSquare';
-          v.target = doorstep(current.centre, v, 3).clone();
+          route(v, [
+            spot(v.work.insideX, v.work.insideZ, v.work.y).clone(),
+            doorstep(v.work, v, 1.6).clone(),
+            doorstep(current.centre, v, 3).clone(),
+          ]);
         } else {
-          // Potter about the workplace rather than standing rigid all day.
+          // Potter about the workplace rather than standing rigid all day, and go up if there
+          // is an upstairs to go up to.
           v.phase = 'toWork';
-          v.target = doorstep(v.work, v, 1.2 + v.jitter * 2.4).clone();
+          if (v.jitter > 0.55 && routeUpstairs(v, v.work)) break;
+          routeIndoors(v, v.work, 1.2 + v.jitter * 2.4);
         }
         break;
       case 'toSquare':
@@ -244,8 +364,10 @@ export function createVillagers(): VillagerCrew {
         v.dwell = 9 + v.jitter * 7;
         break;
       case 'atSquare':
+        // Home for the night, and *into* the house — up to a bed where the house has one
+        // upstairs, otherwise in through the door and no further.
         v.phase = 'toHome';
-        v.target = doorstep(v.home, v, 1.4).clone();
+        if (!routeUpstairs(v, v.home)) routeIndoors(v, v.home, 1.4);
         break;
       case 'toHome':
         v.phase = 'atHome';
@@ -260,7 +382,7 @@ export function createVillagers(): VillagerCrew {
     night: number,
     villages: VillageStreamer,
     collide: (p: Vector3) => void,
-    floorAt: (x: number, z: number) => number,
+    floorAt: (x: number, z: number, fromY?: number) => number,
   ): void => {
     const info = villages.nearest(playerPos);
     const inRange =
@@ -280,8 +402,11 @@ export function createVillagers(): VillagerCrew {
         const dx = v.target.x - v.at.x;
         const dz = v.target.z - v.at.z;
         const dist = Math.hypot(dx, dz);
-        if (dist < ARRIVE) {
-          v.target = null;
+        // Arrived at this waypoint: take the next leg of the route, if there is one. A doorway
+        // waypoint has to be reached closely or the "inside" leg starts from beside the opening
+        // rather than in front of it, so the tolerance is tighter than the old single-target one.
+        if (dist < (v.path.length > 0 ? WAYPOINT : ARRIVE)) {
+          v.target = v.path.shift() ?? null;
           v.stuck = 0;
         } else {
           const wantStep = Math.min(dist, WALK * dt);
@@ -328,7 +453,22 @@ export function createVillagers(): VillagerCrew {
             v.at.z = fromZ;
             moved = 0;
           }
-          v.at.y = ground(v.at.x, v.at.z);
+          /**
+           * Bounded, and this is the fix for villagers being flung onto the roof at their own
+           * front door.
+           *
+           * Unbounded, this query means "the highest surface in this column", and one step
+           * inside a doorway that is the roof. So a villager reaching its door was lifted four
+           * metres, walked off the eaves, fell back down and tried again — which is exactly what
+           * was described. The bound says a surface more than a step above the feet is a
+           * ceiling. The world has accepted it since 0.36; villagers were never passing it.
+           *
+           * Measured from the *previous* height rather than the target's, so climbing a
+           * staircase works: each frame the feet rise by at most a step, and the next frame's
+           * bound rises with them.
+           */
+          const wasY = v.at.y;
+          v.at.y = ground(v.at.x, v.at.z, wasY);
 
           const gotX = v.at.x - fromX;
           const gotZ = v.at.z - fromZ;
@@ -346,6 +486,9 @@ export function createVillagers(): VillagerCrew {
             if (v.stuck > 0.6) v.avoidSide = -v.avoidSide;
             if (v.stuck > 2.4) {
               v.target = null;
+              // The rest of the route goes with it: the legs after a doorway assume you got
+              // through the doorway, and walking them from outside means walking at a wall.
+              v.path.length = 0;
               v.dwell = 1.2;
               v.stuck = 0;
             }

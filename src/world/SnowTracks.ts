@@ -48,6 +48,16 @@ const PRINT_RADIUS = 0.34;
  * ridge it was walked up.
  */
 const REFILL_RATE = 0.06;
+/**
+ * How fast wind alone fills tracks back in, as a fraction per second.
+ *
+ * Needed now that the summits carry snow in clear weather. Healing used to depend entirely on
+ * snowfall, which was safe while snow itself did — no snow, no tracks to heal. On a permanent
+ * cap under a blue sky nothing ever healed, so a few minutes on a peak packed the whole map
+ * down and the summit turned grey. An order of magnitude slower than a real fall, so a trail is
+ * still there when you look back at it from the next ridge.
+ */
+const WIND_FILL_RATE = 0.006;
 
 export interface SnowTrackMap {
   texture: Texture;
@@ -161,8 +171,9 @@ export function createSnowTracks(): SnowTrackMap | null {
     // Snowfall fills tracks in. Accumulated rather than applied per frame: at a
     // light fall the per-frame alpha rounds to nothing at 8 bits, so the fade
     // would silently never happen.
-    if (snowfall > 0.02) {
-      pendingFade += snowfall * REFILL_RATE * frameDelta;
+    {
+      pendingFade += (snowfall > 0.02 ? snowfall * REFILL_RATE : 0) * frameDelta;
+      pendingFade += WIND_FILL_RATE * frameDelta;
       if (pendingFade > 0.012) {
         ctx.globalCompositeOperation = 'source-over';
         ctx.fillStyle = `rgba(0,0,0,${Math.min(0.5, pendingFade)})`;

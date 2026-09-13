@@ -595,7 +595,13 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     terrain.prime(start, 1);
     scatter.prime(start, 1);
     landmarks.prime(start, 1);
-    // Villages: the cell underfoot only.
+    // Villages: queued, never built here. `prime` records the empty cells, which is free, and
+    // hands any settlement to the per-frame budget in steps — building one outright put its
+    // whole cost on the frame the player came through the portal, which is a large part of the
+    // drop felt there. Nothing is lost: settlements are kept four plaza radii clear of the
+    // spawn portal, so there is never one close enough to notice arriving.
+    //
+    // Original note, kept because the reasoning still applies to the cell count:
     //
     // Nine cells of a kilometre each around the origin, and a settlement is the most
     // expensive single thing this world builds � so priming them meant building up to nine

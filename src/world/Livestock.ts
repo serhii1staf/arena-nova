@@ -24,6 +24,13 @@ import type { VillageInfo, VillageStreamer } from './Village.ts';
 
 /** Beyond this a settlement's animals are not worth simulating. */
 const ACTIVE_RANGE = 170;
+/**
+ * How far above the feet a surface can be and still be a floor rather than a ceiling.
+ *
+ * Bounds every ground query. Without it the query answers "the highest surface in this column",
+ * so an animal that wandered under the eaves of a barn was stood on the barn.
+ */
+const STEP_UP = 0.65;
 
 interface Head {
   model: VillagerModel;
@@ -73,7 +80,7 @@ export interface LivestockHerd {
     villages: VillageStreamer,
     collide: (p: Vector3) => void,
     /** The world's ground, decks included � not the bare terrain under them. */
-    floorAt: (x: number, z: number) => number,
+    floorAt: (x: number, z: number, fromY?: number) => number,
   ): void;
   count(): number;
   dispose(): void;
@@ -119,7 +126,7 @@ export function createLivestock(): LivestockHerd {
   let current: VillageInfo | null = null;
   const scratch = new Vector3();
   /** Rebound each frame from what `update` is handed; see the villagers for why. */
-  let ground: (x: number, z: number) => number = () => 0;
+  let ground: (x: number, z: number, fromY?: number) => number = () => 0;
 
   /** Puts the animals in a settlement, each species in its own patch. */
   const assign = (info: VillageInfo | null): void => {
@@ -144,7 +151,9 @@ export function createLivestock(): LivestockHerd {
       an.hz = pz;
       an.x = px + Math.cos(spread) * an.head.range * 0.4;
       an.z = pz + Math.sin(spread) * an.head.range * 0.4;
-      an.y = ground(an.x, an.z);
+      // Bounded by the paddock's own level: an unbounded query in a village finds roofs, and
+      // livestock were being stood on them exactly as the villagers were.
+      an.y = ground(an.x, an.z, info.y + STEP_UP);
       an.yaw = spread;
       an.tx = null;
       an.wait = 1 + inHead;
@@ -158,7 +167,7 @@ export function createLivestock(): LivestockHerd {
     playerPos: Vector3,
     villages: VillageStreamer,
     collide: (p: Vector3) => void,
-    floorAt: (x: number, z: number) => number,
+    floorAt: (x: number, z: number, fromY?: number) => number,
   ): void => {
     const info = villages.nearest(playerPos);
     const inRange =
@@ -201,7 +210,7 @@ export function createLivestock(): LivestockHerd {
           collide(scratch);
           an.x = scratch.x;
           an.z = scratch.z;
-          an.y = ground(an.x, an.z);
+          an.y = ground(an.x, an.z, an.y + STEP_UP);
           moved = Math.hypot(an.x - fromX, an.z - fromZ);
           if (moved > 1e-4) {
             const wantYaw = Math.atan2(-(an.x - fromX), -(an.z - fromZ));

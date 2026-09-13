@@ -71,6 +71,17 @@ const VIEW_CELLS = 1;
 const MAX_PER_KIND = 200;
 
 /** Lanterns lit at night, per village. A pool, for the reason every light pool exists. */
+/**
+ * Beyond this a loaded settlement is not drawn, in metres.
+ *
+ * Loading and drawing are separate questions and were being answered by the same number. A cell
+ * is 960 m and a ring is held either side, so villages up to about 1.4 km out were being
+ * submitted every frame; at that range a settlement is a smudge, and because an instanced mesh
+ * covers the whole village, frustum culling cannot drop any of it.
+ *
+ * Comfortably past the point a village stops being legible, so the switch is never visible.
+ */
+const DRAW_RANGE = 620;
 const LAMP_POOL = 3;
 const LAMP_RANGE = 46;
 
@@ -231,6 +242,37 @@ export interface VillagePlace {
    */
   doorX: number;
   doorZ: number;
+  /**
+   * A clear spot *inside*, a short way past the threshold.
+   *
+   * The reason villagers could not enter their own houses. They were only ever sent to the
+   * doorstep, so they stood outside pressing against the door frame — and the frame is a hole
+   * one cell wide, which straight-line steering only passes through if it happens to be aimed
+   * dead at it. Two waypoints, one outside and one inside, make the approach perpendicular to
+   * the wall, which is what walking through a doorway needs.
+   *
+   * Taken from the door's own cell stepped inward, not from the building's middle: the middle of
+   * an L of rooms can be behind an internal wall, and the middle of a big building is far enough
+   * in that the run from the threshold can clip a corner.
+   */
+  insideX: number;
+  insideZ: number;
+  /**
+   * Foot and head of the staircase, or null in a single-storey building.
+   *
+   * Given as two points rather than a cell plus an axis, because which way a flight rises is a
+   * fact about how the piece was placed and belongs with the placing. `planBuilding` puts the
+   * stairs in the last cell of the back row with a quarter turn on, and the field's own surface
+   * function reads that as a ramp rising along +X — so the low end is on the −X side of the cell
+   * and the high end on the +X side. Anything outside this file guessing that would get it
+   * wrong, which is what makes it worth writing down here.
+   */
+  stairFootX: number | null;
+  stairFootZ: number | null;
+  stairTopX: number | null;
+  stairTopZ: number | null;
+  /** Walking surface of the upper storey, for an errand that goes up. */
+  upperY: number | null;
   role: Plan['role'];
 }
 
@@ -726,7 +768,22 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
   const one = new Vector3(1, 1, 1);
   const up = new Vector3(0, 1, 0);
 
-  const buildCell = (cx: number, cz: number): void => {
+  /**
+   * Builds one village cell, in steps.
+   *
+   * A generator rather than a plain function, and this is the fix for the micro-freezes felt
+   * while running towards a settlement. A village was atomic: one call laid out every building,
+   * furnished it, grouped thirty-odd kinds and uploaded an instance buffer for each, all inside
+   * a single frame — measured in this file's own comments at over 200 ms against a 5 ms
+   * streaming budget. A time budget cannot help with that, because it only decides whether a
+   * build may *start*; once begun it runs to the end. The existing mitigation was to refuse to
+   * start one while the near field was busy, which moves the stall rather than removing it.
+   *
+   * Now the work yields: after each building is placed, and after each kind is instanced. The
+   * pump spends what budget it has and comes back next frame. Nothing is added to the scene
+   * until the last step, so a half-built village is never visible.
+   */
+  function* buildCellSteps(cx: number, cz: number): Generator<void> {
     const k = key(cx, cz);
     if (loaded.has(k)) return;
     const site = villageSiteFor(cx, cz);
@@ -877,18 +934,43 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         // 1.4 m clear of it so somebody standing there is outside the wall rather than in it.
         let doorX = midX;
         let doorZ = midZ;
+        // And the matching point *inside*: the same door cell stepped the other way, far enough
+        // past the threshold to be clear of the frame but not so far as to be across the room.
+        let insideX = midX;
+        let insideZ = midZ;
         if (door.at) {
           const nx = door.at.side === 0 ? 1 : door.at.side === 2 ? -1 : 0;
           const nz = door.at.side === 1 ? 1 : door.at.side === 3 ? -1 : 0;
-          doorX = site.x + (baseX + door.at.cx) * G + nx * (G / 2 + 1.4);
-          doorZ = site.z + (baseZ + door.at.cz) * G + nz * (G / 2 + 1.4);
+          const cellCentreX = site.x + (baseX + door.at.cx) * G;
+          const cellCentreZ = site.z + (baseZ + door.at.cz) * G;
+          doorX = cellCentreX + nx * (G / 2 + 1.4);
+          doorZ = cellCentreZ + nz * (G / 2 + 1.4);
+          // The door cell's own centre: two metres past the threshold, so unambiguously indoors,
+          // and inside the strip `furnishBuilding` keeps clear of furniture. Deeper than that
+          // and the waypoint can land under a table, which a villager cannot reach and so gives
+          // up on — the clearance and the waypoint have to agree, and this is where they do.
+          insideX = cellCentreX;
+          insideZ = cellCentreZ;
         }
+        // The staircase, where there is one. `planBuilding` always puts it in the last cell of
+        // the back row and leaves the floor above it open, so its position is known rather than
+        // searched for.
+        const hasStairs = plan.storeys > 1;
         const place: VillagePlace = {
           x: midX,
           y: baseY,
           z: midZ,
           doorX,
           doorZ,
+          insideX,
+          insideZ,
+          // The stair cell's centre, then a little short of each end of the flight.
+          stairFootX: hasStairs ? site.x + (baseX + w - 1) * G - G * 0.62 : null,
+          stairFootZ: hasStairs ? site.z + baseZ * G : null,
+          stairTopX: hasStairs ? site.x + (baseX + w - 1) * G + G * 0.42 : null,
+          stairTopZ: hasStairs ? site.z + baseZ * G : null,
+          // Upper storeys sit at tier 2, which is one half-cell up, and its deck is above that.
+          upperY: hasStairs ? baseY + G / 2 + PIECE_METRICS.floorTop : null,
           role: plan.role,
         };
         if (plan.role === 'home') homes.push(place);
@@ -907,6 +989,9 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     for (let i = 0; i < wanted * 3 && placedCount < wanted; i++) {
       const pick = Math.floor(rand(400 + i) * 6) % 6;
       if (tryPlace(PLANS[pick]!, 500 + i * 17)) placedCount++;
+      // One building per step. Laying out and furnishing a house is the expensive half of a
+      // village, so this is where the budget has to be able to stop.
+      yield;
     }
 
     /**
@@ -921,6 +1006,7 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
       // the roadside is mostly taken.
       const home = PLANS[i % 3]!;
       if (tryPlace(home, 900 + i * 23)) placedCount++;
+      yield;
     }
 
     // Farm plots: planters in rows, fenced if the biome fences.
@@ -1051,7 +1137,17 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
       const isFurnish = shared.furnished.has(kind);
       const bodyMat =
         kind === 'rug' ? shared.materials.cloth : isFurnish ? mats.furnish : mats.timber;
-      const timber = addLayer(geo.timber, bodyMat, true);
+      /**
+       * Only the structure casts shadows.
+       *
+       * A settlement's furnishings outnumber its walls, and nearly all of them are indoors,
+       * where the shadow they cast is a dark smudge under a stool in a room lit by a lantern
+       * that does not cast shadows either. They were all in the shadow pass, so every stool,
+       * barrel, rug and chest in every loaded village was drawn a second time each frame for a
+       * result nobody can see. Structure still casts, because a building's own shadow is most of
+       * what makes it sit on the ground.
+       */
+      const timber = addLayer(geo.timber, bodyMat, !isFurnish);
       const glass = addLayer(geo.glass, shared.materials.glass, false, 3);
       const glow = addLayer(geo.glow, shared.materials.glow, false, 4);
 
@@ -1177,6 +1273,9 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
       timber?.computeBoundingSphere();
       glass?.computeBoundingSphere();
       glow?.computeBoundingSphere();
+      // One kind per step: an instanced mesh plus up to two hundred matrices and a bounding
+      // sphere is a unit of work worth stopping after.
+      yield;
     }
 
     group.add(root);
@@ -1200,13 +1299,30 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
           x: site.x,
           y: baseY,
           z: site.z,
-          // The square is open ground, so its "doorstep" is the square itself.
+          // The square is open ground, so its "doorstep" is the square itself, there is no
+          // inside to step into and nothing to climb.
           doorX: site.x,
           doorZ: site.z,
+          insideX: site.x,
+          insideZ: site.z,
+          stairFootX: null,
+          stairFootZ: null,
+          stairTopX: null,
+          stairTopZ: null,
+          upperY: null,
           role: 'hall',
         },
       },
     });
+    rebuildField();
+  }
+
+  /** Runs a cell's build to completion. For priming, where a stall is preferable to a gap. */
+  const buildCell = (cx: number, cz: number): void => {
+    const it = buildCellSteps(cx, cz);
+    while (!it.next().done) {
+      // Deliberately empty: drain it.
+    }
   };
 
   const nearest_ = (position: Vector3): VillageInfo | null => {
@@ -1263,6 +1379,25 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
       const ring = Math.max(Math.abs(cell.cx - pcx), Math.abs(cell.cz - pcz));
       if (ring > VIEW_CELLS + 1) dropCell(cell);
     }
+
+    /**
+     * Hide settlements that are too far away to read, without unloading them.
+     *
+     * Cells are 960 m across and one ring is kept either side, so a village up to about 1.4 km
+     * away was loaded — and being loaded meant being drawn. An instanced mesh spans its whole
+     * settlement, so frustum culling cannot help: if any corner of the village is on screen,
+     * every instance of every kind is submitted. That is up to ninety draw calls for something
+     * a few pixels across, times however many settlements are in range.
+     *
+     * Visibility on the root is one boolean and takes the whole subtree out of the render with
+     * it. Kept generous — well past the distance a village stops being legible — so it is never
+     * something you can see happen.
+     */
+    for (const cell of loaded.values()) {
+      if (!cell.info) continue;
+      const d2 = (cell.info.x - position.x) ** 2 + (cell.info.z - position.z) ** 2;
+      cell.root.visible = d2 < DRAW_RANGE * DRAW_RANGE;
+    }
     for (const [k, want] of [...pending]) {
       const ring = Math.max(Math.abs(want.cx - pcx), Math.abs(want.cz - pcz));
       if (ring > VIEW_CELLS + 1) pending.delete(k);
@@ -1301,32 +1436,83 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     }
   };
 
+  /** The cell currently part-built, carried between frames. */
+  let inFlight: Generator<void> | null = null;
+
+  /**
+   * Spends whatever budget is offered on the settlement queue.
+   *
+   * The unit of work is now a *step* rather than a whole village, so this can stop as soon as
+   * the deadline passes and resume next frame where it left off. `force` guarantees a single
+   * step of progress on the frame it is this layer's turn, which is what keeps a village
+   * arriving at all while the ground under the player is eating the budget — one step, not one
+   * settlement, so the guarantee costs a fraction of a millisecond instead of a fifth of a
+   * second.
+   */
   const pump = (deadline: number, force = true): number => {
-    if (pending.size === 0) return 0;
-    const queue = [...pending.entries()].sort((a, b) => a[1].dist - b[1].dist);
-    // Clock only, no count cap: a cell is either a whole settlement or empty, so a count
-    // would mean nothing either way. `force` lets one build start past the deadline.
-    for (let i = 0; i < queue.length; i++) {
-      if ((i > 0 || !force) && performance.now() >= deadline) break;
-      const [k, want] = queue[i]!;
-      pending.delete(k);
-      buildCell(want.cx, want.cz);
+    let first = true;
+    for (;;) {
+      if (!inFlight) {
+        if (pending.size === 0) return 0;
+        // Nearest first: the one the player is walking towards matters more than the one
+        // behind them.
+        let bestKey: string | null = null;
+        let bestDist = Infinity;
+        for (const [k, want] of pending) {
+          if (want.dist < bestDist) {
+            bestDist = want.dist;
+            bestKey = k;
+          }
+        }
+        if (bestKey === null) return 0;
+        const want = pending.get(bestKey)!;
+        pending.delete(bestKey);
+        inFlight = buildCellSteps(want.cx, want.cz);
+      }
+      if (!(first && force) && performance.now() >= deadline) break;
+      first = false;
+      if (inFlight.next().done) inFlight = null;
     }
-    return pending.size;
+    return pending.size + (inFlight ? 1 : 0);
   };
 
+  /**
+   * Queues the cells around a point instead of building them.
+   *
+   * Priming used to build synchronously, which put a whole settlement — the single most
+   * expensive thing the world constructs — on the frame the player came through the portal.
+   * That is a large part of the drop felt on entering the world.
+   *
+   * A settlement is at least a few hundred metres away by construction, so there is nothing to
+   * see if it arrives a second later; unlike the ground, its absence is not felt. Queued at the
+   * front, and the ordinary per-frame budget builds it in steps.
+   *
+   * `buildCell` is still used for the empty cells: `villageSiteFor` says immediately when a cell
+   * holds no settlement, and recording that costs nothing.
+   */
   const prime = (position: Vector3, cells: number): void => {
     const pcx = Math.floor(position.x / VILLAGE_CELL);
     const pcz = Math.floor(position.z / VILLAGE_CELL);
     for (let dz = -cells; dz <= cells; dz++) {
       for (let dx = -cells; dx <= cells; dx++) {
-        buildCell(pcx + dx, pcz + dz);
-        pending.delete(key(pcx + dx, pcz + dz));
+        const cx = pcx + dx;
+        const cz = pcz + dz;
+        const k = key(cx, cz);
+        if (loaded.has(k)) continue;
+        if (!villageSiteFor(cx, cz)) {
+          // Empty: settle it now so it is never retried.
+          buildCell(cx, cz);
+          continue;
+        }
+        pending.set(k, { cx, cz, dist: dx * dx + dz * dz });
       }
     }
   };
 
   const dispose = (): void => {
+    // Abandon any part-built cell: its meshes are not in the scene yet and its generator holds
+    // references to everything it has made so far.
+    inFlight = null;
     for (const cell of [...loaded.values()]) dropCell(cell);
     pending.clear();
     for (const pair of tinted.values()) {

@@ -31,6 +31,22 @@ import type { SnowTrackMap } from './SnowTracks.ts';
 export const SNOW_CEILING = WORLD.snowLine;
 export const SNOW_FLOOR = WORLD.waterLevel + 6;
 
+/**
+ * Where snow lies whatever the weather is doing, in metres.
+ *
+ * The summits are white all year, and until now they were not: every gram of snow in the world
+ * was weather-driven, so on a clear day `snowAt` returned zero everywhere and the peaks were
+ * carrying nothing but the `snow` biome's pale rock texture. Which is why walking on a mountain
+ * top left no tracks — there was no snow there to leave them in, only a colour.
+ *
+ * A little below `WORLD.snowLine` so the band the biome already calls snow is properly covered
+ * rather than starting exactly where the rock texture changes; the two lining up perfectly is
+ * what makes a snowline look drawn on.
+ */
+export const SNOW_PERMANENT = WORLD.snowLine - 18;
+/** Metres over which the permanent cap fades in. Wide, so a summit is not a hard ring. */
+const PERMANENT_RAMP = 58;
+
 export interface SnowUniforms {
   uSnowCover: IUniform<number>;
   uTrackOrigin: IUniform<Vector2>;
@@ -87,10 +103,21 @@ export const SNOW_UNIFORM_DECL = /* glsl */ `
  */
 export const SNOW_GLSL = /* glsl */ `
   float snowAt( vec3 world, vec3 up ) {
-    if ( uSnowCover <= 0.001 ) return 0.0;
+    // The permanent cap. Independent of the weather, because the summits are white all year —
+    // and because without it there was no snow to walk in on a clear day, and so no tracks.
+    float lying = smoothstep(
+      ${SNOW_PERMANENT.toFixed(1)},
+      ${(SNOW_PERMANENT + PERMANENT_RAMP).toFixed(1)},
+      world.y
+    );
 
-    float snowHeight = mix( ${SNOW_CEILING.toFixed(1)}, ${SNOW_FLOOR.toFixed(1)}, uSnowCover );
-    float lying = smoothstep( snowHeight, snowHeight + 42.0, world.y );
+    // Fresh fall on top, which is what walks the line down the range as cover builds. The two
+    // are combined with a max rather than added: two sources of snow in one place is still snow,
+    // and adding them made a summit in a storm clip to flat white.
+    if ( uSnowCover > 0.001 ) {
+      float snowHeight = mix( ${SNOW_CEILING.toFixed(1)}, ${SNOW_FLOOR.toFixed(1)}, uSnowCover );
+      lying = max( lying, smoothstep( snowHeight, snowHeight + 42.0, world.y ) );
+    }
 
     // Snow holds to about 50 degrees and sheds above that. Deliberately not called
     // "flat": that is an interpolation qualifier in GLSL ES 3.0 and using it as an
@@ -105,6 +132,10 @@ export const SNOW_GLSL = /* glsl */ `
       sin( world.x * 0.021 ) * cos( world.z * 0.019 ) * 0.5 +
       sin( world.x * 0.006 + world.z * 0.008 ) * 0.5;
     lying = clamp( lying + drift * 0.16 * ( 1.0 - uSnowCover ), 0.0, 1.0 );
+
+    // Nothing further to do where nothing lies, and this is also the early-out that the
+    // weather check used to provide.
+    if ( lying <= 0.0 ) return 0.0;
 
     // Tracks, in world space around the player, so a footprint has to be looked up
     // rather than baked — the ground it sits on may be streamed away and rebuilt.
