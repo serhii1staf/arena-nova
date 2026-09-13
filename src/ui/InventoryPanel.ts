@@ -1,6 +1,6 @@
 import { inventory } from '../game/Inventory.ts';
 import { ITEMS, ITEM_ORDER, itemGeometry, type ItemId } from '../game/Items.ts';
-import { RECIPES, craft, recommended, type Recipe } from '../game/Recipes.ts';
+import { RECIPES, blockedBy, craft, recommended, type Recipe } from '../game/Recipes.ts';
 import { savedSkin } from '../player/skins.ts';
 import { renderIcons } from './IconRenderer.ts';
 import { portraitFor } from './Portraits.ts';
@@ -46,6 +46,7 @@ export class InventoryPanel {
   private progress: Progress | null = null;
   /** Set by the scene each frame; the panel never reaches into the world itself. */
   private benchProbe: (() => boolean) | null = null;
+  private benchPlacer: (() => boolean) | null = null;
 
   constructor() {
     this.root = document.getElementById('inventory');
@@ -87,6 +88,11 @@ export class InventoryPanel {
     this.benchProbe = fn;
   }
 
+  /** And how to put one down, since only the scene knows where "in front" is. */
+  setBenchPlacer(fn: (() => boolean) | null): void {
+    this.benchPlacer = fn;
+  }
+
   get isOpen(): boolean {
     return this.open;
   }
@@ -115,9 +121,43 @@ export class InventoryPanel {
     this.atBench = this.benchProbe?.() ?? false;
     if (!this.open) return;
     if (this.atBench !== this.benchShown) this.draw();
+    // And the states are reconciled every frame regardless.
+    //
+    // Relying on the flag above alone was wrong: it only fires on the frame the bench
+    // range changes, so anything that made a recipe available or unavailable without
+    // crossing that boundary — a stack running out, a craft completing — left the rows
+    // saying otherwise. This is a handful of class writes against values already
+    // computed, so there is no reason not to simply be correct.
+    this.refreshRecipeStates();
     this.drawBars();
     this.drawFace();
     this.drawProgress();
+  }
+
+  /** Re-marks each recipe row as available or not, without rebuilding the list. */
+  private refreshRecipeStates(): void {
+    if (!this.list) return;
+    const inv = inventory();
+    for (const row of this.list.querySelectorAll<HTMLButtonElement>('.invRecipe')) {
+      const r = RECIPES.find((x) => x.id === row.dataset.recipe);
+      if (!r) continue;
+      const blocked = blockedBy(r, inv, this.atBench);
+      row.classList.toggle('blocked', blocked !== null);
+      row.disabled = blocked !== null || this.progress !== null;
+      const tag = row.querySelector<HTMLElement>('.invRecipeTag');
+      if (tag) {
+        const text = blocked === 'bench' ? t('inv.needBench') : r.bench ? t('inv.bench') : t('inv.hand');
+        if (tag.textContent !== text) tag.textContent = text;
+      }
+      // Held-against-required moves as materials do, so the numbers are never stale.
+      const needs = row.querySelector<HTMLElement>('.invRecipeNeeds');
+      if (needs) {
+        const text = r.needs
+          .map((nd) => `${t(`item.${nd.id}`)} ${inv.count(nd.id)}/${nd.count}`)
+          .join(' · ');
+        if (needs.textContent !== text) needs.textContent = text;
+      }
+    }
   }
 
   /**
@@ -209,12 +249,26 @@ export class InventoryPanel {
           name.className = 'invName';
           name.textContent = t(`item.${id}`);
           cell.append(n, name);
-          // Food is eaten by clicking it, which is the only verb an item has here.
+          // Clicking is the only verb an item has, and what it means depends on the
+          // item: food is eaten, a workbench is put down. Both are marked so the cell
+          // shows it can be clicked at all, because an affordance nobody notices is
+          // the same as not having one.
           if (ITEMS[id].eat) {
             cell.classList.add('edible');
+            cell.title = `${t(`item.${id}`)} — ${t('inv.eat')}`;
             cell.addEventListener('click', () => {
               inv.eat(id);
               this.draw();
+            });
+          } else if (id === 'workbench') {
+            cell.classList.add('placeable');
+            cell.title = `${t(`item.${id}`)} — ${t('inv.place')}`;
+            cell.addEventListener('click', () => {
+              // Taken only if it actually went down. Somewhere blocked leaves it in
+              // the bag rather than consuming it into nothing.
+              if (this.benchPlacer?.() !== true) return;
+              inv.take('workbench', 1);
+              this.setOpen(false);
             });
           }
           return cell;

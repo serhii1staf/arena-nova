@@ -21,7 +21,7 @@ import { squadIds } from '../ui/Squad.ts';
 import { surfaceGroundHeightAt, WORLD } from '../world/WorldGen.ts';
 import { createGatherSite, type GatherSite } from '../world/Gatherables.ts';
 import { consumeUse, initInteract, setPrompt } from '../ui/Interact.ts';
-import { openInventory, setBenchProbe } from '../ui/GameUI.ts';
+import { openInventory, setBenchPlacer, setBenchProbe } from '../ui/GameUI.ts';
 import { inventory } from '../game/Inventory.ts';
 import { ITEMS, type ItemId } from '../game/Items.ts';
 import { t } from '../ui/i18n.ts';
@@ -167,6 +167,9 @@ export class ExteriorScene implements GameScene {
       collide: (p) => {
         this.world.collide(p);
         this.buildSite?.collide(p, 0.4);
+        // Trunks and benches. Sticks and stones deliberately do not push: being
+        // stopped by an ankle-high twig is worse than walking over it.
+        this.gather?.collide(p, 0.4);
       },
       // Composed, not replaced: the world answers first and the build site raises
       // the answer where it has a floor, a ramp or a roof. The site is created a
@@ -207,6 +210,17 @@ export class ExteriorScene implements GameScene {
     this.scene.add(this.gather.group);
     initInteract();
     setBenchProbe(() => this.gather.atBench(this.player.feetPosition));
+    // Putting down a bench you made. The panel asks; the scene knows where "in front
+    // of you" is and whether anything is already standing there.
+    setBenchPlacer(() => {
+      const feet = this.player.feetPosition;
+      const yaw = this.player.viewYaw;
+      // Two and a half metres ahead, and turned to face you — you build a bench to
+      // stand at, not to look at the back of.
+      const x = feet.x - Math.sin(yaw) * 2.5;
+      const z = feet.z - Math.cos(yaw) * 2.5;
+      return this.gather.placeBench(x, z, yaw + Math.PI);
+    });
 
     // Compile every program now, while the transition is still faded out.
     // Otherwise the first frame in the open world has to compile the terrain, the
@@ -357,7 +371,7 @@ export class ExteriorScene implements GameScene {
    */
   private stepSurvival(dt: number): void {
     const feet = this.player.feetPosition;
-    this.gather.update(feet);
+    this.gather.update(feet, dt);
     inventory().tick(dt);
 
     // Standing in water fills the water meter. Cheap, and it is the one source of
@@ -432,6 +446,7 @@ export class ExteriorScene implements GameScene {
     // into a disposed world for even one frame.
     setBuildSite(null);
     setBenchProbe(null);
+    setBenchPlacer(null);
     this.gather?.dispose();
     this.buildSite?.dispose();
     this.crowd?.dispose();

@@ -37,6 +37,11 @@ export function setBenchProbe(fn: (() => boolean) | null): void {
   panel?.setBenchProbe(fn);
 }
 
+/** Tells the panel how to put a bench down. Returns false if there is no room. */
+export function setBenchPlacer(fn: (() => boolean) | null): void {
+  panel?.setBenchPlacer(fn);
+}
+
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T | null =>
   document.getElementById(id) as T | null;
 

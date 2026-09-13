@@ -329,10 +329,116 @@ try {
     const pickAway = document
       .querySelector('.invRecipe[data-recipe="pickaxe"]')
       ?.classList.contains('blocked');
-    return { found: true, awayFrom, at, prompt, opened, pickAt, awayNow, pickAway, hint };
+    // Which of the two is stale, if either: the panel's own idea of being at a bench,
+    // or the rows it drew from it.
+    const hintAway = document.getElementById('invHint')?.textContent ?? '';
+    const stillOpen = document.getElementById('inventory')?.classList.contains('on') ?? false;
+    return {
+      found: true,
+      awayFrom,
+      at,
+      prompt,
+      opened,
+      pickAt,
+      awayNow,
+      pickAway,
+      hint,
+      hintAway,
+      stillOpen,
+    };
   });
   console.log(`bench: ${JSON.stringify(bench)}`);
   await page.screenshot({ path: join(here, 'craft_bench.png') });
+
+  // ---- A tree goes over rather than vanishing ------------------------------
+  const fall = await page.evaluate(async () => {
+    const sc = window.arena.scene;
+    const g = sc.gather;
+    const near = window.probe.approach('snag');
+    if (!near) return { found: false };
+    window.arena.inventory().add('axe', 1);
+    window.probe.approach('snag');
+    window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyE', bubbles: true }));
+    // The key is only read inside the scene's own frame pass, so the press has to be
+    // followed by a frame. Without this the tree was never actually cut and the probe
+    // reported no fall — which looked like the feature was missing.
+    sc.render(1, 0.016);
+
+    // A real Mesh appears among the instanced ones for the length of the fall, and its
+    // roll angle has to grow. Sampled over a few advances rather than trusted to be
+    // there: a tree that snapped flat in one frame would satisfy any check that only
+    // looked at the start and the end.
+    const trunk = () => g.group.children.find((c) => c.isMesh && !c.isInstancedMesh) ?? null;
+    const angles = [];
+    for (let i = 0; i < 12; i++) {
+      g.update(sc.player.feetPosition, 0.12);
+      const t = trunk();
+      angles.push(t ? +t.rotation.z.toFixed(3) : null);
+      if (!t) break;
+    }
+    // Advance well past the end so it lands and drops its timber.
+    for (let i = 0; i < 12; i++) g.update(sc.player.feetPosition, 0.2);
+    return {
+      found: true,
+      angles,
+      rose: angles.filter((a) => a !== null).length >= 3,
+      cleared: trunk() === null,
+      logs: window.probe.spawned().byKind.log ?? 0,
+    };
+  });
+  console.log(`fall: ${JSON.stringify(fall)}`);
+
+  // ---- Trunks and benches are solid, twigs are not ------------------------
+  const solids = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const g = sc.gather;
+    const probeAt = (kind) => {
+      const mesh = g.group.children.find((c) => c.name === `Gather:${kind}`);
+      if (!mesh || mesh.count === 0) return null;
+      const m = mesh.matrixWorld.clone();
+      mesh.getMatrixAt(0, m);
+      const x = m.elements[12];
+      const y = m.elements[13];
+      const z = m.elements[14];
+      // Slightly off the axis, which is where a body walking into something actually
+      // is. Dead centre is a separate case and the world handles it, but testing only
+      // there would say nothing about the ordinary one.
+      const p = { x: x + 0.15, y: y + 0.2, z: z + 0.1 };
+      g.collide(p, 0.4);
+      return +Math.hypot(p.x - (x + 0.15), p.z - (z + 0.1)).toFixed(2);
+    };
+    return { snag: probeAt('snag'), bench: probeAt('bench'), stick: probeAt('stick') };
+  });
+  console.log(`solid: ${JSON.stringify(solids)}`);
+
+  // ---- Putting down a bench you made --------------------------------------
+  const placed = await page.evaluate(async () => {
+    const sc = window.arena.scene;
+    const g = sc.gather;
+    // Somewhere with no generated bench nearby, so the test is about the placement.
+    window.probe.go(-2400, 2400);
+    g.update(sc.player.feetPosition, 0.016);
+    const before = g.atBench(sc.player.feetPosition);
+    window.arena.inventory().add('workbench', 1);
+    // Through the panel, the way a player does it.
+    if (!document.getElementById('inventory')?.classList.contains('on')) {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyI', bubbles: true }));
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    const cell = [...document.querySelectorAll('.invCell.placeable')][0] ?? null;
+    if (!cell) return { found: false, before };
+    cell.click();
+    await new Promise((r) => setTimeout(r, 400));
+    sc.render(1, 0.016);
+    return {
+      found: true,
+      before,
+      after: g.atBench(sc.player.feetPosition),
+      held: window.probe.bag().workbench ?? 0,
+      closed: !(document.getElementById('inventory')?.classList.contains('on') ?? false),
+    };
+  });
+  console.log(`placed bench: ${JSON.stringify(placed)}`);
 
   // ---- Meters move, and cost stays flat -----------------------------------
   const v0 = await page.evaluate(() => window.probe.vitals());
@@ -378,8 +484,9 @@ try {
     felling.found === true &&
     felling.stillThereNoAxe === true &&
     /топор|axe/i.test(felling.promptNoAxe) &&
-    felling.goneWithAxe === true &&
-    felling.logsAfter > felling.logsBefore;
+    felling.goneWithAxe === true;
+  // Logs are no longer checked here: they arrive when the trunk lands, which is what
+  // the fall test below drives and asserts on.
   // The bench is the gate: with the materials in hand the recipe opens at the bench and
   // closes again when you walk away from it.
   const benchWorks =
@@ -393,6 +500,27 @@ try {
   const metersMove = v1.water < v0.water && v1.food < v0.food;
   // Seven instanced meshes and nothing else, however far the player walks.
   const costFlat = cost.children === 7 && cost.total > 0;
+
+  // Went over gradually, then cleared itself and left timber.
+  const fallsOver =
+    fall.found === true &&
+    fall.rose === true &&
+    fall.angles.filter((a) => a !== null).length >= 3 &&
+    (() => {
+      const seen = fall.angles.filter((a) => a !== null);
+      return seen[seen.length - 1] > seen[0] && seen[0] < 0.6;
+    })() &&
+    fall.cleared === true &&
+    fall.logs > 0;
+  // A trunk and a bench push; a twig on the ground does not.
+  const solidWhereItShould =
+    solids.snag !== null && solids.snag > 0.1 && solids.bench !== null && solids.bench > 0.1 && solids.stick === 0;
+  const benchPlaced =
+    placed.found === true &&
+    placed.before === false &&
+    placed.after === true &&
+    placed.held === 0 &&
+    placed.closed === true;
 
   const line = (label, ok, extra = '') =>
     console.log(`${label.padEnd(38)}${ok ? 'ok' : 'FAIL'}${extra ? ` ${extra}` : ''}`);
@@ -414,6 +542,9 @@ try {
     benchWorks,
     `at=${bench.at} pickAtBench=${bench.pickAt} pickAway=${bench.pickAway}`,
   );
+  line('tree falls, then leaves logs:', fallsOver, `angles ${JSON.stringify(fall.angles)}`);
+  line('trunks solid, twigs not:', solidWhereItShould, JSON.stringify(solids));
+  line('own bench placed and works:', benchPlaced, `atBench ${placed.before}->${placed.after}`);
   line('meters drain:', metersMove, `${v0.water}->${v1.water}`);
   line('cost flat while walking:', costFlat, `${cost.children} children, ${cost.total} things`);
   console.log(`errors: ${errors.length}`);
@@ -430,6 +561,9 @@ try {
     craftedSpear &&
     axeGates &&
     benchWorks &&
+    fallsOver &&
+    solidWhereItShould &&
+    benchPlaced &&
     metersMove &&
     costFlat &&
     errors.length === 0;

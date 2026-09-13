@@ -2,6 +2,7 @@ import {
   Group,
   InstancedMesh,
   Matrix4,
+  Mesh,
   MeshStandardMaterial,
   Vector3,
   type BufferGeometry,
@@ -48,6 +49,7 @@ export const REACH = 3.4;
 /** Cap on the remembered-taken set, so a long session cannot grow without bound. */
 const TAKEN_CAP = 4000;
 const TAKEN_KEY = 'arena.gathered';
+const OWN_BENCH_KEY = 'arena.benches';
 
 /** What one spawned thing is. */
 export type GatherKind = ItemId | 'snag' | 'bench';
@@ -66,8 +68,20 @@ export interface Gatherable {
 
 export interface GatherSite {
   group: Group;
-  /** Rebuilds what is nearby. Cheap, and does nothing until a cell is crossed. */
-  update(body: Vector3): void;
+  /**
+   * Rebuilds what is nearby and advances anything falling.
+   *
+   * The rebuild does nothing until the player crosses a cell boundary; the fall is a
+   * handful of transforms. Neither scales with how large the world is.
+   */
+  update(body: Vector3, dt: number): void;
+  /** Pushes a body out of tree trunks and benches. */
+  collide(p: Vector3, radius: number): void;
+  /**
+   * Stands a workbench of the player's own in front of them. False if there is one
+   * there already.
+   */
+  placeBench(x: number, z: number, turn: number): boolean;
   /** The thing in reach that the player is facing, or null. */
   aimed(body: Vector3, forward: Vector3): Gatherable | null;
   /** Removes one, permanently for this player. Snags leave logs where they fell. */
@@ -139,7 +153,9 @@ export function createGatherSite(): GatherSite {
     // Logs only exist where a snag was felled, so a much smaller pool is plenty.
     log: 48,
     snag: 48,
-    bench: 12,
+    // Generous, because the range covers several 800 m cells and the player's own
+    // benches share the pool with the generated ones.
+    bench: 32,
   };
 
   interface Bucket {
@@ -150,10 +166,13 @@ export function createGatherSite(): GatherSite {
   const geoFor = (kind: GatherKind): BufferGeometry =>
     kind === 'snag' ? snagGeo() : kind === 'bench' ? workbenchGeo() : itemGeometry(kind);
   const owned: BufferGeometry[] = [];
+  /** The trunk shape, kept so a falling tree reuses it instead of rebuilding it. */
+  let snagShape: BufferGeometry | null = null;
 
   for (const kind of kinds) {
     const geo = geoFor(kind);
     if (kind === 'snag' || kind === 'bench') owned.push(geo);
+    if (kind === 'snag') snagShape = geo;
     const mat = new MeshStandardMaterial({ color: tint[kind], roughness: 0.92, metalness: 0 });
     mats.set(kind, mat);
     const mesh = new InstancedMesh(geo, mat, caps[kind]!);
@@ -197,6 +216,46 @@ export function createGatherSite(): GatherSite {
   /** Logs dropped by felled snags, which are ordinary pickups with no cell of origin. */
   const dropped: Gatherable[] = [];
   let dropSeq = 0;
+
+  /**
+   * Benches the player put down themselves, kept apart from the ones the map
+   * generates: those come out of a hash and cannot be added to, and these have to
+   * survive a reload because they cost materials.
+   */
+  const ownBenches: { x: number; z: number; turn: number }[] = [];
+  try {
+    const raw = localStorage.getItem(OWN_BENCH_KEY);
+    if (raw) {
+      for (const b of JSON.parse(raw) as { x: number; z: number; turn: number }[]) {
+        const x = Number(b?.x);
+        const z = Number(b?.z);
+        if (Number.isFinite(x) && Number.isFinite(z)) {
+          ownBenches.push({ x, z, turn: Number(b?.turn) || 0 });
+        }
+      }
+    }
+  } catch {
+    /* unreadable — the player's own benches are simply gone, which is honest */
+  }
+  const saveOwn = (): void => {
+    try {
+      localStorage.setItem(OWN_BENCH_KEY, JSON.stringify(ownBenches));
+    } catch {
+      /* ignore */
+    }
+  };
+
+  /**
+   * Trees in the act of falling.
+   *
+   * A real mesh each rather than an instance, for the seconds it takes: an instanced
+   * transform can express the rotation perfectly well, but the tree also has to leave
+   * the pool of standing snags the moment it is cut, and juggling one instance between
+   * two meanings is how a tree ends up both fallen and standing. There are never more
+   * than a few at once.
+   */
+  const falling: { mesh: Mesh; t: number; drop: () => void }[] = [];
+  const FALL_SECONDS = 1.6;
 
   /**
    * What lives in one cell, or null.
@@ -283,6 +342,16 @@ export function createGatherSite(): GatherSite {
       }
     }
 
+    // The player's own benches, wherever they put them — and put at the *front* of the
+    // list, because the commit below truncates to the instance cap and a bench somebody
+    // paid materials for must never be the one dropped.
+    const own: Gatherable[] = [];
+    ownBenches.forEach((b, i) => {
+      if (Math.hypot(b.x - body.x, b.z - body.z) > BENCH_RANGE) return;
+      place(own, 'bench', `own:${i}`, b.x, b.z, b.turn);
+    });
+    if (own.length > 0) pending.set('bench', [...own, ...pending.get('bench')!]);
+
     // Logs already on the ground stay wherever they were dropped, so felling a tree
     // and then walking a cell away does not lose the timber.
     for (const d of dropped) {
@@ -308,12 +377,113 @@ export function createGatherSite(): GatherSite {
     }
   };
 
-  const update = (body: Vector3): void => {
+  const update = (body: Vector3, dt: number): void => {
+    // Anything mid-fall, first: it is a fixed handful of transforms and must advance
+    // whether or not the player is moving.
+    for (let i = falling.length - 1; i >= 0; i--) {
+      const f = falling[i]!;
+      f.t += dt;
+      const p = Math.min(1, f.t / FALL_SECONDS);
+      // Eased in, not linear. A trunk starts by giving way slowly and finishes fast,
+      // which is what makes it read as weight rather than as an object being rotated.
+      // Quartic in, then a small settle past the horizontal so it lands rather than
+      // stopping dead.
+      const eased = p * p * p * (2 - p);
+      f.mesh.rotation.z = eased * (Math.PI / 2 + 0.06);
+      if (p >= 1) {
+        f.drop();
+        group.remove(f.mesh);
+        falling.splice(i, 1);
+      }
+    }
+
     const cx = Math.round(body.x / CELL);
     const cz = Math.round(body.z / CELL);
     if (cx === atCell.x && cz === atCell.z) return;
     atCell = { x: cx, z: cz };
     rebuild(body);
+  };
+
+  /**
+   * Pushes a body out of the things that are actually in the way.
+   *
+   * Trunks and benches only. Sticks and stones on the ground are deliberately not
+   * solid: they are ankle height, and being stopped by a twig is worse than walking
+   * over it. Round for a trunk, a box for a bench, because that is what each is.
+   */
+  const collide = (p: Vector3, radius: number): void => {
+    for (const kind of ['snag', 'bench'] as const) {
+      for (const g of buckets.get(kind)!.live) {
+        // Clear of it vertically? A bench is waist high and can be stood on top of.
+        const top = g.y + (kind === 'snag' ? 4.2 : 0.82);
+        if (p.y >= top - 0.25) continue;
+        const dx = p.x - g.x;
+        const dz = p.z - g.z;
+        if (kind === 'snag') {
+          const minD = 0.5 + radius;
+          const d2 = dx * dx + dz * dz;
+          if (d2 >= minD * minD) continue;
+          if (d2 < 1e-6) {
+            // Dead on the trunk's own axis there is no direction to push along, so one
+            // is chosen. Rare, but it is exactly the case where being inside the tree
+            // matters most — bailing out here is how a body ends up standing in the
+            // middle of a trunk with nothing able to move it.
+            p.x += minD;
+            continue;
+          }
+          const d = Math.sqrt(d2);
+          const push = (minD - d) / d;
+          p.x += dx * push;
+          p.z += dz * push;
+        } else {
+          // In the bench's own frame, so a rotated bench is not a rotated bug.
+          const c = Math.cos(g.turn);
+          const s = Math.sin(g.turn);
+          const lx = c * dx - s * dz;
+          const lz = s * dx + c * dz;
+          const hx = 0.72 + radius;
+          const hz = 0.42 + radius;
+          const ox = hx - Math.abs(lx);
+          const oz = hz - Math.abs(lz);
+          if (ox <= 0 || oz <= 0) continue;
+          let nx = lx;
+          let nz = lz;
+          if (oz <= ox) nz += (lz >= 0 ? 1 : -1) * oz;
+          else nx += (lx >= 0 ? 1 : -1) * ox;
+          p.x = g.x + (c * nx + s * nz);
+          p.z = g.z + (-s * nx + c * nz);
+        }
+      }
+    }
+  };
+
+  /** Stands a workbench the player made. */
+  const placeBench = (x: number, z: number, turn: number): boolean => {
+    // Not on top of another one, generated or their own.
+    for (const g of buckets.get('bench')!.live) {
+      if (Math.hypot(g.x - x, g.z - z) < 2.2) return false;
+    }
+    ownBenches.push({ x, z, turn });
+    saveOwn();
+    const bucket = buckets.get('bench')!;
+    if (bucket.live.length < caps['bench']!) {
+      const g: Gatherable = {
+        key: `own:${ownBenches.length - 1}`,
+        kind: 'bench',
+        x,
+        y: surfaceGroundHeightAt(x, z),
+        z,
+        turn,
+        slot: bucket.live.length,
+      };
+      bucket.live.push(g);
+      matrix.makeRotationY(turn);
+      matrix.setPosition(g.x, g.y, g.z);
+      bucket.mesh.setMatrixAt(g.slot, matrix);
+      bucket.mesh.count = bucket.live.length;
+      bucket.mesh.instanceMatrix.needsUpdate = true;
+    }
+    return true;
   };
 
   /**
@@ -348,9 +518,21 @@ export function createGatherSite(): GatherSite {
     return best;
   };
 
+  /**
+   * Whether a bench is within reach.
+   *
+   * Asks the world, not the draw list. The instanced pool has a cap, and once it is
+   * full the next bench simply is not drawn — so a player standing at their own bench
+   * was told there was none, because the answer was being read off what happened to
+   * fit on screen. Being at a bench is a fact about where things are.
+   */
   const atBench = (body: Vector3): boolean => {
+    const limit = REACH + 2.4;
     for (const g of buckets.get('bench')!.live) {
-      if (Math.hypot(g.x - body.x, g.z - body.z) <= REACH + 2.4) return true;
+      if (Math.hypot(g.x - body.x, g.z - body.z) <= limit) return true;
+    }
+    for (const b of ownBenches) {
+      if (Math.hypot(b.x - body.x, b.z - body.z) <= limit) return true;
     }
     return false;
   };
@@ -384,34 +566,51 @@ export function createGatherSite(): GatherSite {
       const i = dropped.indexOf(g);
       if (i >= 0) dropped.splice(i, 1);
     }
-    // A felled snag leaves its timber on the ground rather than teleporting it into
-    // the bag: you fell it, then you carry the logs, which is both the obvious
-    // behaviour and what makes an axe worth having before a big inventory.
+    // A felled snag falls, and only then leaves its timber.
+    //
+    // Two separate things, and the order matters. It stops being a standing tree the
+    // instant it is cut — so it cannot be chopped twice, and nothing collides with it
+    // any more — while what you *see* is a trunk going over. The logs appear when it
+    // lands, because logs that appear while the tree is still upright look like the
+    // tree was deleted and replaced.
     if (g.kind === 'snag') {
-      const bucket = buckets.get('log')!;
-      for (let i = 0; i < 3; i++) {
-        const a = (i / 3) * Math.PI * 2 + g.turn;
-        const x = g.x + Math.cos(a) * 1.1;
-        const z = g.z + Math.sin(a) * 1.1;
-        const log: Gatherable = {
-          key: `drop:${dropSeq++}`,
-          kind: 'log',
-          x,
-          y: surfaceGroundHeightAt(x, z),
-          z,
-          turn: a,
-          slot: 0,
-        };
-        dropped.push(log);
-        if (bucket.live.length < caps['log']!) {
-          log.slot = bucket.live.length;
-          bucket.live.push(log);
-          matrix.makeRotationY(log.turn);
-          matrix.setPosition(log.x, log.y, log.z);
-          bucket.mesh.setMatrixAt(log.slot, matrix);
-          bucket.mesh.count = bucket.live.length;
-          bucket.mesh.instanceMatrix.needsUpdate = true;
-        }
+      const trunk = new Mesh(snagShape ?? geoFor('snag'), mats.get('snag')!);
+      trunk.position.set(g.x, g.y, g.z);
+      trunk.rotation.y = g.turn;
+      trunk.castShadow = true;
+      group.add(trunk);
+      falling.push({ mesh: trunk, t: 0, drop: () => dropLogs(g) });
+    }
+  };
+
+  /** Puts three logs on the ground where a tree came down. */
+  const dropLogs = (g: Gatherable): void => {
+    const bucket = buckets.get('log')!;
+    for (let i = 0; i < 3; i++) {
+      // Along the direction it fell rather than in a ring, so the timber lies where
+      // the trunk did.
+      const a = g.turn + Math.PI / 2;
+      const along = 1.1 + i * 1.15;
+      const x = g.x + Math.cos(a) * along;
+      const z = g.z + Math.sin(a) * along;
+      const log: Gatherable = {
+        key: `drop:${dropSeq++}`,
+        kind: 'log',
+        x,
+        y: surfaceGroundHeightAt(x, z),
+        z,
+        turn: a,
+        slot: 0,
+      };
+      dropped.push(log);
+      if (bucket.live.length < caps['log']!) {
+        log.slot = bucket.live.length;
+        bucket.live.push(log);
+        matrix.makeRotationY(log.turn);
+        matrix.setPosition(log.x, log.y, log.z);
+        bucket.mesh.setMatrixAt(log.slot, matrix);
+        bucket.mesh.count = bucket.live.length;
+        bucket.mesh.instanceMatrix.needsUpdate = true;
       }
     }
   };
@@ -419,6 +618,8 @@ export function createGatherSite(): GatherSite {
   return {
     group,
     update,
+    collide,
+    placeBench,
     aimed,
     take,
     atBench,
@@ -428,6 +629,8 @@ export function createGatherSite(): GatherSite {
       return n;
     },
     dispose: () => {
+      for (const f of falling) group.remove(f.mesh);
+      falling.length = 0;
       for (const b of buckets.values()) b.mesh.dispose();
       for (const m of mats.values()) m.dispose();
       // Only the shapes this module made. The item geometries are shared with the
