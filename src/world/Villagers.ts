@@ -86,7 +86,7 @@ export interface VillagerCrew {
      * The world's own ground height, which includes what the village has paved.
      *
      * Not `surfaceGroundHeightAt`: that is the bare terrain, and a village's decks sit half a
-     * metre above it � so villagers walked at terrain level and were buried to the shins in
+     * metre above it � so villagers walked at terrain level and were buried to the shins in
      * their own square, which is the levitating-and-sinking report.
      */
     floorAt: (x: number, z: number) => number,
@@ -118,9 +118,21 @@ export function createVillagers(): VillagerCrew {
   for (let i = 0; i < CREW; i++) {
     void makeVillagerBody(CAST[i % CAST.length]!).then((body) => {
       if (torndown || !body) return;
-      body.object.visible = false;
       group.add(body.object);
-      crew[i]!.body = body;
+      const v = crew[i]!;
+      v.body = body;
+      /**
+       * Visible if there is already a settlement to be in.
+       *
+       * This is the bug that made villagers stand about as invisible statues and the livestock
+       * disappear entirely. Bodies arrive over the network, `assign` runs the moment the player
+       * comes within range of a village, and the two race — so when a body landed *after* the
+       * assignment, it was created hidden and nothing ever showed it again. Its schedule ran,
+       * it walked its rounds, and none of it could be seen.
+       */
+      body.object.visible = current !== null;
+      body.object.position.copy(v.at);
+      body.object.rotation.y = v.yaw;
     });
   }
 
@@ -146,8 +158,22 @@ export function createVillagers(): VillagerCrew {
         if (v.body) v.body.object.visible = false;
         continue;
       }
+      /**
+       * One villager per house until the houses run out, then two, and so on.
+       *
+       * `i % homes.length` looks like it does this and does not: with six villagers and four
+       * homes it gives 0,1,2,3,0,1 — which is the same distribution, but it also gave *every*
+       * villager the same workplace whenever there was one workplace, so they all converged on
+       * it and stood in a heap. Spreading the work assignment by a different stride keeps them
+       * apart.
+       */
       v.home = info.homes.length > 0 ? info.homes[i % info.homes.length]! : info.centre;
-      v.work = info.works.length > 0 ? info.works[i % info.works.length]! : info.centre;
+      v.work =
+        info.works.length > 0
+          ? info.works[(i * 3 + 1) % info.works.length]!
+          : info.homes.length > 0
+            ? info.homes[(i + 1) % info.homes.length]!
+            : info.centre;
       v.at.set(v.home.doorX, v.home.y, v.home.doorZ);
       v.at.y = ground(v.at.x, v.at.z);
       v.phase = 'atHome';

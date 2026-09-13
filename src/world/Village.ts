@@ -347,6 +347,26 @@ function planBuilding(
     }
   }
 
+  /**
+   * A flight of stairs, in anything with an upper storey.
+   *
+   * Reported as: a two-storey building, and no way to get up it. Correct — there was none. The
+   * stairs occupy a cell of the ground floor and rise a full cell, which is exactly what the
+   * piece does, and the cell above them gets no floor so there is a hole to come up through.
+   * Placed in the last cell of the back row, out of the way of the door.
+   */
+  if (storeys > 1) {
+    const sx = w - 1;
+    const sz = 0;
+    push('stairs', sx, sz, 0, 1);
+    // The landing has to be open. Removing the upper floor over the stairwell is the only way
+    // up: a floor there is a lid on the staircase.
+    for (let i = out.length - 1; i >= 0; i--) {
+      const s = out[i]!;
+      if (s.kind === 'floor' && s.cx === sx && s.cz === sz && s.tier === 2) out.splice(i, 1);
+    }
+  }
+
   return out;
 }
 
@@ -401,7 +421,9 @@ function furnishBuilding(plan: Plan, rand: (n: number) => number, seed: number):
 
   switch (plan.role) {
     case 'home':
-      put('bed', -1, -1, 0);
+      // A bed per two metres of long wall, so a larger house sleeps more people rather than
+      // being a bigger room with one bed in it.
+      for (let i = 0; i < runs; i++) put('bed', spread(i, runs), -1, 0);
       put('table', 0.55, 0.6);
       put('stool', 0.05, 0.6);
       put('stool', 0.95, 0.1);
@@ -722,8 +744,13 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
      * Braziers rather than torches: a torch is a wall fixture, and stood in the open with
      * nothing behind it, it is a bracket floating over the paving — which is exactly what the
      * first villages looked like. A brazier is a standing fire bowl and reads correctly on its
-     * own. Railings run along the verge between the lamps, so a road is a road with edges
-     * rather than a strip of lighter ground.
+     * own.
+     *
+     * No fencing along the roads any more, and that is a retraction. Railings lining both
+     * verges with a gap only every third cell walled the houses off from the street: the report
+     * "I cannot get into the village" was literally true, because every route from a road to a
+     * front door crossed a solid fence. Fences belong round the farm plots, which is where they
+     * are now, and a street wants to be open.
      */
     for (let i = -reach; i <= reach; i++) {
       if (Math.abs(i) < 2) continue;
@@ -731,13 +758,6 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         // Lamps at the roadside, offset onto the verge so they are not underfoot.
         slots.push({ kind: 'brazier', cx: i, cz: 0, tier: 0, turn: 0, ox: 0, oz: 1.6 });
         slots.push({ kind: 'brazier', cx: 0, cz: i, tier: 0, turn: 0, ox: 1.6, oz: 0 });
-      } else {
-        // Fencing on both verges of both roads. `railing` is the fence piece; the side index
-        // puts it on the cell boundary facing the road.
-        slots.push({ kind: 'railing', cx: i, cz: 0, tier: 0, turn: 1 });
-        slots.push({ kind: 'railing', cx: i, cz: 0, tier: 0, turn: 3 });
-        slots.push({ kind: 'railing', cx: 0, cz: i, tier: 0, turn: 0 });
-        slots.push({ kind: 'railing', cx: 0, cz: i, tier: 0, turn: 2 });
       }
     }
     for (let i = 0; i < 5; i++) {
@@ -789,7 +809,9 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         return mesh;
       };
       const isFurnish = shared.furnished.has(kind);
-      const timber = addLayer(geo.timber, isFurnish ? mats.furnish : mats.timber, true);
+      const bodyMat =
+        kind === 'rug' ? shared.materials.cloth : isFurnish ? mats.furnish : mats.timber;
+      const timber = addLayer(geo.timber, bodyMat, true);
       const glass = addLayer(geo.glass, shared.materials.glass, false, 3);
       const glow = addLayer(geo.glow, shared.materials.glow, false, 4);
 

@@ -717,6 +717,8 @@ export interface PieceMaterials {
   furnish: MeshStandardMaterial;
   glass: MeshStandardMaterial;
   glow: MeshStandardMaterial;
+  /** Woven cloth, for the things that are not made of wood. */
+  cloth: MeshStandardMaterial;
 }
 
 export interface PieceAssets {
@@ -770,6 +772,21 @@ export function pieceAssets(assets: AssetManager): PieceAssets {
       metalness: 0,
       transparent: true,
       opacity: 0.92,
+    }),
+    /**
+     * A rug is not made of planks.
+     *
+     * It was taking the timber material like everything else, so a woven mat on a boarded floor
+     * was boards on boards — invisible as an object and pointless as decoration. Deep red wool
+     * with the plank normal map still applied, which at a rug's scale reads as weave rather than
+     * as grain, so it costs no new texture.
+     */
+    cloth: new MeshStandardMaterial({
+      map: null,
+      normalMap: tex.normalMap,
+      color: 0x8c3a34,
+      roughness: 0.95,
+      metalness: 0,
     }),
   };
   sharedPieces = {
@@ -1769,7 +1786,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     const geo = geometries[kind];
     const mesh = new InstancedMesh(
       geo.timber,
-      FURNISHED.has(kind) ? furnishMat : timberMat,
+      kind === 'rug' ? shared.materials.cloth : FURNISHED.has(kind) ? furnishMat : timberMat,
       MAX_PER_KIND,
     );
     mesh.count = 0;

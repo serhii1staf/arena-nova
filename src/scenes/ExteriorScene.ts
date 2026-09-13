@@ -482,9 +482,12 @@ export class ExteriorScene implements GameScene {
    */
   private sheltered(feet: Vector3): boolean {
     const site = this.buildSite;
-    if (!site) return false;
     for (let h = 2.1; h <= 6.5; h += 0.5) {
-      if (site.blocksCamera(feet.x, feet.y + h, feet.z)) return true;
+      if (site?.blocksCamera(feet.x, feet.y + h, feet.z)) return true;
+      // The village's own roofs and ceilings, which live in the world's prop registry rather
+      // than in the player's build site. Asking only the build site is why rain still fell
+      // inside a villager's house: the house is not something the player built.
+      if (this.world.blocksCamera(feet.x, feet.y + h, feet.z)) return true;
     }
     return false;
   }

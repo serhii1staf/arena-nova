@@ -72,7 +72,7 @@ export interface LivestockHerd {
     playerPos: Vector3,
     villages: VillageStreamer,
     collide: (p: Vector3) => void,
-    /** The world's ground, decks included — not the bare terrain under them. */
+    /** The world's ground, decks included ï¿½ not the bare terrain under them. */
     floorAt: (x: number, z: number) => number,
   ): void;
   count(): number;
@@ -107,9 +107,12 @@ export function createLivestock(): LivestockHerd {
   for (const an of animals) {
     void makeVillagerBody(an.head.model).then((body) => {
       if (torndown || !body) return;
-      body.object.visible = false;
       group.add(body.object);
       an.body = body;
+      // Visible if a settlement is already assigned. Created hidden and never shown again is
+      // why the animals could not be found at all â€” see the villagers for the same race.
+      body.object.visible = current !== null;
+      body.object.position.set(an.x, an.y, an.z);
     });
   }
 
