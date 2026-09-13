@@ -11,6 +11,9 @@ import {
 import type { AssetManager } from '../core/AssetManager.ts';
 import {
   BUILD_GRID,
+  createPieceField,
+  type FieldPiece,
+  type PieceField,
   latticeOf,
   pieceAssets,
   pieceFootprint,
@@ -72,6 +75,8 @@ const MOUNTED_KINDS: ReadonlySet<PieceKind> = new Set(['shelf', 'torch', 'lanter
 const MOUNT_OFF = 0.14;
 /** Inside face of a wall, from the cell boundary: half its thickness plus a little clearance. */
 const WALL_IN = 0.25;
+/** Radius around a village centre the player may not build inside. Built-up area plus five. */
+const VILLAGE_KEEP_OUT = 57;
 
 /**
  * How far above a slot's own level the floor of that slot is.
@@ -237,6 +242,20 @@ export interface VillageStreamer {
    * rather than holding their own copy of the layout.
    */
   nearest(position: Vector3): VillageInfo | null;
+  /**
+   * The settlements' own collision, to be composed into the world's.
+   *
+   * Analytic boxes, not the circle registry � see `createPieceField` for why that mattered.
+   */
+  field: PieceField;
+  /**
+   * True where the player may not build: inside a settlement, plus a margin.
+   *
+   * A village is somebody else's, and letting a player drop a wall through the middle of one
+   * is both rude and a way to make a house unenterable. Five metres of clearance outside the
+   * built-up area, so you can build up against a village but never in it.
+   */
+  buildBlocked(x: number, z: number): boolean;
   dispose(): void;
 }
 
@@ -251,6 +270,8 @@ interface Built {
   meshes: InstancedMesh[];
   /** Null for an empty cell. */
   info: VillageInfo | null;
+  /** This cell's own collision entries, kept so the shared field can be rebuilt on unload. */
+  pieces: FieldPiece[];
 }
 
 /**
@@ -485,6 +506,16 @@ function furnishBuilding(plan: Plan, rand: (n: number) => number, seed: number):
 export function createVillages(assets: AssetManager, registry: PropRegistry): VillageStreamer {
   const group = new Group();
   group.name = 'Villages';
+  void registry;
+
+  /**
+   * One field for every settlement loaded at once.
+   *
+   * Rebuilt from scratch whenever a cell loads or unloads. That is cheap � at most a few
+   * thousand entries, and it happens once per cell rather than per frame � and it avoids the
+   * bookkeeping a per-cell field would need to answer a query that straddles two of them.
+   */
+  const field = createPieceField();
 
   const shared = pieceAssets(assets);
   const G = BUILD_GRID;
@@ -541,7 +572,16 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     const site = villageSiteFor(cx, cz);
     if (!site) {
       // Recorded as loaded so an empty cell is not retried every frame.
-      loaded.set(k, { key: k, cx, cz, root: new Group(), lamps: [], meshes: [], info: null });
+      loaded.set(k, {
+        key: k,
+        cx,
+        cz,
+        root: new Group(),
+        lamps: [],
+        meshes: [],
+        info: null,
+        pieces: [],
+      });
       return;
     }
 
@@ -787,6 +827,8 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
 
     const root = new Group();
     root.name = `Village:${cx}|${cz}`;
+    /** This cell's collision entries, so the shared field can be rebuilt when it unloads. */
+    const pieces: FieldPiece[] = [];
     const meshes: InstancedMesh[] = [];
     const lampSpots: { x: number; y: number; z: number }[] = [];
     const mats = tintFor(style.tint);
@@ -900,48 +942,24 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
          * registry's own 0.85 factor still covers the whole square; `solid` is false because a
          * floor is something you stand on, not something you bump into.
          */
-        if (kind === 'foundation' || kind === 'floor' || kind === 'ceiling') {
-          const deck =
-            kind === 'foundation'
-              ? PIECE_METRICS.foundationTop
-              : kind === 'ceiling'
-                ? PIECE_METRICS.ceilTop
-                : PIECE_METRICS.floorTop;
-          registry.add(k, {
-            x: px,
-            z: pz,
-            r: G / 2 / 0.85,
-            top: y + deck,
-            blockTop: y + deck,
-            solid: false,
-          });
-        }
-
-        if (lattice === 'edge' && !MOUNTED_KINDS.has(kind)) {
-          // Along the piece, from the position it was actually placed at. The wall runs along
-          // its own local X, which after the quarter turn above is world Z for sides 0 and 2
-          // and world X for sides 1 and 3.
-          const runX = turn === 1 ? 0 : 1;
-          const runZ = turn === 1 ? 1 : 0;
-          // A doorway is a hole you walk through and a railing is knee-high, so neither
-          // blocks; a wall, a window and a shut door do.
-          const solid = kind !== 'doorway' && kind !== 'doorArch';
-          const height = kind === 'railing' ? 1.1 : G * 0.85;
-          // Three circles along the four metres, because the registry holds circles and one
-          // covering a wall's length would stop the player two metres out from it in every
-          // direction.
-          for (let step = -1; step <= 1; step++) {
-            registry.add(k, {
-              x: px + runX * step * 1.3,
-              z: pz + runZ * step * 1.3,
-              r: 0.85,
-              // Ground level, deliberately: raising it would teleport anyone walking past on
-              // top of the wall.
-              top: y,
-              blockTop: y + (solid ? height : 0.05),
-              solid,
-            });
-          }
+        /**
+         * Collision, through the analytic piece field rather than the circle registry.
+         *
+         * Every kind, one entry, with its real shape read from the same description the
+         * player's own building uses. This replaces a row of circles per wall, and it is the
+         * fix for three separate reports at once: walls that stopped you a metre out, doorways
+         * that felt shut, and — the worst — being teleported onto the roof on walking through a
+         * door, which happened because the registry's `floorHeightAt` takes the highest `top`
+         * over a point with no notion of how high the asker is, so a ceiling registered as a
+         * deck always won.
+         *
+         * Rugs are skipped: they have no solid part and no surface worth standing on, and a
+         * field entry for one is work for nothing.
+         */
+        if (kind !== 'rug') {
+          const entry: FieldPiece = { kind, x: px, z: pz, level: y, turn };
+          pieces.push(entry);
+          field.add(entry);
         }
       }
       timber?.instanceMatrix.setUsage(35044);
@@ -961,6 +979,7 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
       root,
       lamps: lampSpots,
       meshes,
+      pieces,
       info: {
         key: k,
         x: site.x,
@@ -1001,8 +1020,23 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     // Only the instance buffers: the geometry and the materials are the shared library's,
     // and disposing them here would strip every other village and the player's own site.
     for (const mesh of cell.meshes) mesh.dispose();
-    registry.removeOwner(cell.key);
     loaded.delete(cell.key);
+    rebuildField();
+  };
+
+  /**
+   * Rebuilds the shared collision field from every loaded cell.
+   *
+   * Wholesale rather than removing one cell's entries, because the field buckets by column and
+   * a settlement straddles many of them — tracking which entry went in which bucket to take it
+   * out again is bookkeeping for a rebuild that costs a few thousand array pushes and happens
+   * only when a cell loads or unloads, never per frame.
+   */
+  const rebuildField = (): void => {
+    field.clear();
+    for (const cell of loaded.values()) {
+      for (const piece of cell.pieces) field.add(piece);
+    }
   };
 
   const nearest: { d2: number; x: number; y: number; z: number }[] = [];
@@ -1086,7 +1120,25 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     lamps.length = 0;
   };
 
-  return { group, update, pump, prime, nearest: nearest_, dispose };
+  /**
+   * Asked of every placement preview, so it reads the deterministic site function rather than
+   * the loaded set: a village one cell away is still somewhere you may not build, even before
+   * its houses have streamed in.
+   */
+  const buildBlocked = (x: number, z: number): boolean => {
+    const vx = Math.floor(x / VILLAGE_CELL);
+    const vz = Math.floor(z / VILLAGE_CELL);
+    for (let dz = -1; dz <= 1; dz++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const site = villageSiteFor(vx + dx, vz + dz);
+        if (!site) continue;
+        if (Math.hypot(x - site.x, z - site.z) < VILLAGE_KEEP_OUT) return true;
+      }
+    }
+    return false;
+  };
+
+  return { group, update, pump, prime, nearest: nearest_, field, buildBlocked, dispose };
 }
 
 /** Metrics the diagnostics read. Exported so a probe can assert on layout, not pixels. */

@@ -74,7 +74,10 @@ const FAR_STARVE_FRAMES = 90;
 
 export interface ExteriorBuild {
   group: Group;
-  floorHeightAt(x: number, z: number): number;
+  /** romY bounds the answer to a step above the asker, so a ceiling is not a floor. */
+  floorHeightAt(x: number, z: number, fromY?: number): number;
+  /** True where the player may not build: inside a settlement, plus a margin. */
+  buildBlocked(x: number, z: number): boolean;
 
   collide(pos: Vector3): void;
   blocksCamera(x: number, y: number, z: number): boolean;
@@ -374,8 +377,11 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
    * player sink through hillsides: over one 8 m mesh cell the smooth curve can
    * sit a metre below its own secant, and the controller snaps to the curve.
    */
-  const floorHeightAt = (x: number, z: number): number => {
+  const floorHeightAt = (x: number, z: number, fromY?: number): number => {
     let h = surfaceGroundHeightAt(x, z);
+    // Settlements, through their own analytic field. Bounded by `fromY` where the caller knows
+    // it, which is what keeps a ceiling from being mistaken for the floor.
+    h = villages.field.heightAt(x, z, h, fromY);
     registry.forEachNear(x, z, (p) => {
       if (p.top <= h) return;
       const dx = x - p.x;
@@ -388,6 +394,8 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
 
   const collide = (p: Vector3): void => {
     p.x = Math.max(-limit, Math.min(limit, p.x));
+    // Village walls, doors and furniture: real boxes, so a wall is as thick as a wall.
+    villages.field.collide(p, 0.4);
     p.z = Math.max(-limit, Math.min(limit, p.z));
 
     const pr = 0.4;
@@ -422,6 +430,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
 
   const blocksCamera = (x: number, y: number, z: number): boolean => {
     if (y < surfaceGroundHeightAt(x, z) + 0.3) return true;
+    if (villages.field.blocksCamera(x, y, z)) return true;
     let hit = false;
     registry.forEachNear(x, z, (o) => {
       if (hit || y > o.blockTop) return;
@@ -634,6 +643,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
   return {
     group,
     floorHeightAt,
+    buildBlocked: villages.buildBlocked,
     collide,
     blocksCamera,
     skyMaterial,

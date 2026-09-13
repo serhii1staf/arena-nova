@@ -205,6 +205,8 @@ export class ExteriorScene implements GameScene {
     // colliders in the world's own registry, so what you build is as solid as what
     // grew there.
     this.buildSite = createBuildSite(ctx.assets);
+    // A village is somebody else's: the preview greys out and placement is refused inside one.
+    this.buildSite.setForbidden((x, z) => this.world.buildBlocked(x, z));
     this.scene.add(this.buildSite.group);
     setBuildSite(this.buildSite);
 
@@ -389,7 +391,7 @@ export class ExteriorScene implements GameScene {
         this.aimFrom,
         this.aimDir,
         this.player.feetPosition,
-        (x, z, fromY) => this.buildSite.heightAt(x, z, this.world.floorHeightAt(x, z), fromY),
+        (x, z, fromY) => this.buildSite.heightAt(x, z, this.world.floorHeightAt(x, z, fromY), fromY),
       );
     }
   }

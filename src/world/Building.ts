@@ -452,6 +452,14 @@ export interface BuildSite {
   rotate(): void;
   /** Places the previewed piece. False if the slot is taken or the kind is full. */
   place(): boolean;
+  /**
+   * Refuses placement where a predicate says so, and greys the preview there.
+   *
+   * Set once by the scene to the world's village keep-out. A village is somebody else's, and
+   * dropping a wall through the middle of one is both rude and a way to make a house
+   * unenterable.
+   */
+  setForbidden(test: ((x: number, z: number) => boolean) | null): void;
   /** A door within reach that you are facing, or null. */
   reachableKind(): PieceKind | null;
   /** Whether that door is currently open. */
@@ -823,6 +831,175 @@ export function latticeOf(kind: PieceKind): 'cell' | 'edge' | 'corner' | 'quarte
  * is over two metres long, and a layout that assumes every furnishing is a point puts half of
  * it through the wall behind it — which is exactly what the first villages did.
  */
+/** One placed piece in a read-only field. */
+export interface FieldPiece {
+  kind: PieceKind;
+  x: number;
+  z: number;
+  /** Slot floor, in world metres. */
+  level: number;
+  turn: number;
+}
+
+/**
+ * Analytic collision for a set of placed pieces.
+ *
+ * Exists because the circle registry cannot describe a building, and three rounds of trying
+ * proved it. `PropRegistry` holds circles only, so a four-metre wall a fifth of a metre thick
+ * became a row of circles whose union was a metre and a half wide — a metre of invisible
+ * standoff from every wall, doorways that felt shut, and rooms that felt smaller inside than
+ * out. Worse, `floorHeightAt` takes the maximum `top` of every prop over a point regardless of
+ * how high the asker is, so registering a ceiling as a walkable deck teleported anyone who
+ * stepped through a door onto the roof.
+ *
+ * This is the same box-in-its-own-frame test the player's own building uses, reading the same
+ * `solidsOf` description, bucketed by grid column so cost does not depend on how much exists.
+ * A wall is exactly as thick as a wall.
+ */
+export interface PieceField {
+  add(piece: FieldPiece): void;
+  clear(): void;
+  /** Highest surface at a point, bounded to a step above `fromY` when given. */
+  heightAt(x: number, z: number, ground: number, fromY?: number): number;
+  collide(p: Vector3, radius: number): void;
+  blocksCamera(x: number, y: number, z: number): boolean;
+  count(): number;
+}
+
+export function createPieceField(): PieceField {
+  const G = BUILD_GRID;
+  const columns = new Map<string, FieldPiece[]>();
+  const colKey = (gx: number, gz: number): string => `${gx}|${gz}`;
+
+  const local = (p: FieldPiece, x: number, z: number): [number, number] => {
+    const dx = x - p.x;
+    const dz = z - p.z;
+    const ang = (p.turn * Math.PI) / 2;
+    const c = Math.cos(ang);
+    const sn = Math.sin(ang);
+    return [c * dx - sn * dz, sn * dx + c * dz];
+  };
+
+  /** The walking surface of one piece at a point, or null when it has none there. */
+  const surfaceAt = (p: FieldPiece, x: number, z: number): number | null => {
+    const s = G / 2;
+    const [lx, lz] = local(p, x, z);
+    if (LATTICE[p.kind] !== 'quarter' && (Math.abs(lx) > s || Math.abs(lz) > s)) return null;
+    switch (p.kind) {
+      case 'floor':
+        return p.level + FLOOR_TOP;
+      case 'foundation':
+        return p.level + FOUNDATION_TOP;
+      case 'ceiling':
+        return p.level + CEIL_TOP;
+      case 'roofFlat':
+        return p.level + DECK_TOP;
+      case 'ramp':
+      case 'stairs':
+        return p.level + Math.max(0, Math.min(G, lz + s));
+      default:
+        break;
+    }
+    let top: number | null = null;
+    for (const b of solidsOf(p.kind)) {
+      if (Math.abs(lx - b.cx) > b.hx || Math.abs(lz - b.cz) > b.hz) continue;
+      const y = p.level + b.y1;
+      if (top === null || y > top) top = y;
+    }
+    return top;
+  };
+
+  const forEachNear = (x: number, z: number, fn: (p: FieldPiece) => void): void => {
+    const gx = Math.round(x / G);
+    const gz = Math.round(z / G);
+    for (let ix = -1; ix <= 1; ix++) {
+      for (let iz = -1; iz <= 1; iz++) {
+        const list = columns.get(colKey(gx + ix, gz + iz));
+        if (!list) continue;
+        for (const p of list) fn(p);
+      }
+    }
+  };
+
+  return {
+    add(piece) {
+      const key = colKey(Math.round(piece.x / G), Math.round(piece.z / G));
+      const list = columns.get(key);
+      if (list) list.push(piece);
+      else columns.set(key, [piece]);
+    },
+    clear() {
+      columns.clear();
+    },
+    heightAt(x, z, ground, fromY) {
+      if (columns.size === 0) return ground;
+      // A surface far above the asker is a ceiling, not a floor. Without this bound, walking
+      // into a building put you on its roof — which is precisely what the circle registry did,
+      // because it has no way to express the idea at all.
+      const ceiling = fromY === undefined ? Infinity : fromY + STEP_UP;
+      let h = ground;
+      forEachNear(x, z, (p) => {
+        const surface = surfaceAt(p, x, z);
+        if (surface !== null && surface > h && surface <= ceiling) h = surface;
+      });
+      return h;
+    },
+    collide(p, radius) {
+      if (columns.size === 0) return;
+      const footY = p.y;
+      const headY = p.y + 1.7;
+      forEachNear(p.x, p.z, (piece) => {
+        const slabs = solidsOf(piece.kind);
+        if (slabs.length === 0) return;
+        const ang = (piece.turn * Math.PI) / 2;
+        const c = Math.cos(ang);
+        const sn = Math.sin(ang);
+        for (const b of slabs) {
+          const y0 = piece.level + b.y0;
+          const y1 = piece.level + b.y1;
+          if (footY >= y1 - STEP_UP || headY <= y0) continue;
+          const dx = p.x - piece.x;
+          const dz = p.z - piece.z;
+          const lx = c * dx - sn * dz - b.cx;
+          const lz = sn * dx + c * dz - b.cz;
+          const ox = b.hx + radius - Math.abs(lx);
+          const oz = b.hz + radius - Math.abs(lz);
+          if (ox <= 0 || oz <= 0) continue;
+          let nx = lx;
+          let nz = lz;
+          if (oz <= ox) nz += (lz >= 0 ? 1 : -1) * oz;
+          else nx += (lx >= 0 ? 1 : -1) * ox;
+          nx += b.cx;
+          nz += b.cz;
+          p.x = piece.x + c * nx + sn * nz;
+          p.z = piece.z - sn * nx + c * nz;
+        }
+      });
+    },
+    blocksCamera(x, y, z) {
+      if (columns.size === 0) return false;
+      let hit = false;
+      forEachNear(x, z, (piece) => {
+        if (hit) return;
+        for (const b of solidsOf(piece.kind)) {
+          if (y < piece.level + b.y0 || y > piece.level + b.y1) continue;
+          const [lx, lz] = local(piece, x, z);
+          if (Math.abs(lx - b.cx) <= b.hx && Math.abs(lz - b.cz) <= b.hz + 0.15) {
+            hit = true;
+            return;
+          }
+        }
+      });
+      return hit;
+    },
+    count() {
+      let n = 0;
+      for (const list of columns.values()) n += list.length;
+      return n;
+    },
+  };
+}
+
 export function pieceFootprint(kind: PieceKind): { hx: number; hz: number; top: number } {
   let hx = 0;
   let hz = 0;
@@ -1836,6 +2013,8 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   let selected: PieceKind = 'wall';
   let quarter = 0;
   let active = false;
+  /** Where placement is refused outright. Null until the scene sets it. */
+  let forbidden: ((x: number, z: number) => boolean) | null = null;
 
   const ghost = new Mesh(geometries.wall.timber, ghostOk);
   ghost.visible = false;
@@ -2478,7 +2657,10 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     ghost.position.copy(at);
     ghost.rotation.set(0, (atTurn * Math.PI) / 2, 0);
     const bucket = kinds.get(selected);
-    free = !placed.has(slotKey(selected, at, atTurn)) && (bucket?.live.length ?? 0) < MAX_PER_KIND;
+    free =
+      !placed.has(slotKey(selected, at, atTurn)) &&
+      (bucket?.live.length ?? 0) < MAX_PER_KIND &&
+      !(forbidden?.(at.x, at.z) ?? false);
     ghost.material = free ? ghostOk : ghostBad;
     ghost.visible = true;
 
@@ -2959,6 +3141,9 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       quarter = (quarter + 1) % 4;
     },
     place,
+    setForbidden: (test) => {
+      forbidden = test;
+    },
     lightUp,
     reachableKind: () => reachable?.kind ?? null,
     reachableOpen: () => reachable?.open ?? false,
