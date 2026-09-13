@@ -7,6 +7,18 @@
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <meta name="theme-color" content="#0a0f0a" />
+    <!--
+      Icons. All generated from one source by scripts/make-icons.ps1, so the tab, the home
+      screen, the taskbar and the installer cannot drift apart.
+
+      `favicon.ico` is listed first and carries 16/32/48 for the browsers that ask for
+      exactly that name whatever the markup says; the PNGs are what modern browsers and
+      installed-app prompts actually pick.
+    -->
+    <link rel="icon" href="favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="icon-512.png" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
     <title>Arena Nova — Overgrown Sanctuary</title>
     <style>
       :root {
@@ -63,6 +75,18 @@
       #loader.hidden {
         opacity: 0;
         pointer-events: none;
+      }
+      /*
+       * The logo on the start screen. Sized in viewport units so it shrinks on a short
+       * window instead of pushing the name field and the Play button off the bottom, which
+       * a fixed 152 px did at 720p.
+       */
+      #startLogo {
+        width: clamp(84px, 16vh, 168px);
+        height: auto;
+        margin-bottom: 4px;
+        border-radius: 22%;
+        box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
       }
       .brand {
         font-size: clamp(28px, 6vw, 52px);
@@ -1717,6 +1741,20 @@
     <div id="start">
       <!-- With no OS title bar, this strip is how the window gets dragged. -->
       <div class="dragStrip" data-tauri-drag-region></div>
+      <!--
+        The logo above the wordmark. `onerror` hides it rather than leaving a broken-image
+        glyph on the first thing anybody sees, which is also how #fadeIcon handles a missing
+        file — a build without the art should look plain, not broken.
+      -->
+      <img
+        id="startLogo"
+        src="logo.png"
+        alt="Arena Nova"
+        width="152"
+        height="152"
+        draggable="false"
+        onerror="this.remove()"
+      />
       <div class="brand">Arena Nova</div>
       <div id="playRow">
         <div id="nameField">

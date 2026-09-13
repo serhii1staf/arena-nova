@@ -473,6 +473,58 @@ export function buildFlower(seed: number, petal: Color): BufferGeometry {
 }
 
 /** Clump of grass blades. */
+/**
+ * A dense rosette of blades, for the carpet layer right around the player.
+ *
+ * Separate from `buildGrassTuft` rather than a parameter on it, because the two are used at
+ * opposite ends of the same trade. The tuft is drawn out to the vegetation radius, where
+ * every extra triangle is multiplied by twenty thousand instances and lands on grass a pixel
+ * tall; this is drawn within about forty metres, where the ground is what you are actually
+ * looking at and a two-bladed tuft every few metres reads as scattered weeds rather than as
+ * a lawn.
+ *
+ * Five blades, splayed and of differing heights, on a small radius so a single instance
+ * covers a patch of ground instead of marking a point. Fifteen triangles.
+ */
+export function buildGrassCarpet(tipTint?: Color): BufferGeometry {
+  const parts: BufferGeometry[] = [];
+  const cB = new Color(0.13, 0.26, 0.07);
+  const cT = tipTint ?? new Color(0.44, 0.66, 0.24);
+  const blades = 5;
+  for (let b = 0; b < blades; b++) {
+    // Golden-angle spread, so no two blades in a tuft line up and neighbouring tufts do
+    // not visibly share an orientation.
+    const a = b * 2.39996;
+    const lean = 0.2 + (b % 2) * 0.1;
+    const w = 0.05;
+    // Shorter than the tall clumps: this layer is ground cover, and blades as tall as the
+    // clumps would hide them rather than sit beneath them.
+    const h = 0.34 + (b % 3) * 0.12;
+    const rootR = 0.07;
+    const rx = Math.cos(a) * rootR;
+    const rz = Math.sin(a) * rootR;
+    const dx = Math.cos(a) * lean;
+    const dz = Math.sin(a) * lean;
+    const positions = new Float32Array([
+      rx - w, 0, rz, rx + w, 0, rz,
+      rx - w * 0.6 + dx * 0.5, h * 0.55, rz + dz * 0.5,
+      rx + w * 0.6 + dx * 0.5, h * 0.55, rz + dz * 0.5,
+      rx + dx, h, rz + dz,
+    ]);
+    const colors = new Float32Array([
+      cB.r, cB.g, cB.b, cB.r, cB.g, cB.b, cT.r, cT.g, cT.b, cT.r, cT.g, cT.b, cT.r, cT.g, cT.b,
+    ]);
+    const g = new BufferGeometry();
+    g.setAttribute('position', new BufferAttribute(positions, 3));
+    g.setAttribute('color', new BufferAttribute(colors, 3));
+    g.setIndex([0, 1, 2, 2, 1, 3, 2, 3, 4]);
+    g.computeVertexNormals();
+    parts.push(g.toNonIndexed());
+    g.dispose();
+  }
+  return mergeParts(parts);
+}
+
 export function buildGrassTuft(tipTint?: Color): BufferGeometry {
   const parts: BufferGeometry[] = [];
   const cB = new Color(0.14, 0.27, 0.08);

@@ -26,7 +26,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet('build', 'craft', 'squadsight', 'admin', 'net', 'snow')]
+  [ValidateSet('build', 'craft', 'squadsight', 'grass', 'admin', 'net', 'snow')]
   [string]$Probe,
 
   # Fraction of cores the probe may use. Half by default.
