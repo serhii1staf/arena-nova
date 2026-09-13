@@ -89,6 +89,14 @@ function floorLift(s: { tier: number }): number {
  * error. `turn` is quarter turns; `tier` is storeys of half a cell, matching the tiers the
  * placement preview offers.
  */
+/** Where a plan put its door, so somebody can stand outside it. */
+interface DoorAt {
+  /** Cell within the plan, and which of its four sides the door is on. */
+  cx: number;
+  cz: number;
+  side: number;
+}
+
 interface Slot {
   kind: PieceKind;
   /** Cell coordinates, relative to the village centre. */
@@ -189,6 +197,16 @@ export interface VillagePlace {
   x: number;
   y: number;
   z: number;
+  /**
+   * Outside the door, on the ground.
+   *
+   * Recorded separately from the centre because they are not interchangeable and treating
+   * them as such is what made the first villagers walk into walls: a building's middle is
+   * behind a wall, so anybody sent there arrives at the wall and stops. There is no interior
+   * navigation here and there does not need to be — people stand at their doors.
+   */
+  doorX: number;
+  doorZ: number;
   role: Plan['role'];
 }
 
@@ -244,6 +262,7 @@ function planBuilding(
   style: BiomeStyle,
   rand: (n: number) => number,
   seed: number,
+  door: { at: DoorAt | null },
 ): Slot[] {
   const out: Slot[] = [];
   const { w, d, storeys } = plan;
@@ -276,7 +295,10 @@ function planBuilding(
           const along = side % 2 === 0 ? iz : ix;
           let kind: PieceKind = style.wall;
           if (storey === 0 && side === doorSide && along === doorAt) {
-            kind = rand(seed + 10 + side) < 0.4 ? 'doorArch' : 'doorLeaf';
+            // An arch, never a shut leaf: villagers stand at their doors and a shut door is
+            // solid, so a leaf here walls somebody out of their own house.
+            kind = 'doorArch';
+            door.at = { cx: ix, cz: iz, side };
           } else if (rand(seed + 20 + ix * 7 + iz * 13 + side) < 0.42) {
             kind = style.window;
           }
@@ -517,8 +539,9 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         // Turn the plan's own layout into village cells. The plan is written in its own
         // frame, so a quarter turn swaps the axes and mirrors one of them.
         const rotated = { ...plan, w, d };
+        const door: { at: DoorAt | null } = { at: null };
         const inner = [
-          ...planBuilding(rotated, style, rand, seed + 100),
+          ...planBuilding(rotated, style, rand, seed + 100, door),
           ...furnishBuilding(rotated, rand, seed + 200),
         ];
         for (const s of inner) {
@@ -529,7 +552,24 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         // anything knows the difference between a home and a forge.
         const midX = site.x + (baseX + (w - 1) / 2) * G;
         const midZ = site.z + (baseZ + (d - 1) / 2) * G;
-        const place: VillagePlace = { x: midX, y: baseY, z: midZ, role: plan.role };
+        // The doorstep: the door's own cell, half a cell out to its boundary, and another
+        // 1.4 m clear of it so somebody standing there is outside the wall rather than in it.
+        let doorX = midX;
+        let doorZ = midZ;
+        if (door.at) {
+          const nx = door.at.side === 0 ? 1 : door.at.side === 2 ? -1 : 0;
+          const nz = door.at.side === 1 ? 1 : door.at.side === 3 ? -1 : 0;
+          doorX = site.x + (baseX + door.at.cx) * G + nx * (G / 2 + 1.4);
+          doorZ = site.z + (baseZ + door.at.cz) * G + nz * (G / 2 + 1.4);
+        }
+        const place: VillagePlace = {
+          x: midX,
+          y: baseY,
+          z: midZ,
+          doorX,
+          doorZ,
+          role: plan.role,
+        };
         if (plan.role === 'home') homes.push(place);
         else works.push(place);
         return true;
@@ -786,7 +826,15 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         radius: reach * G,
         homes,
         works,
-        centre: { x: site.x, y: baseY, z: site.z, role: 'hall' },
+        centre: {
+          x: site.x,
+          y: baseY,
+          z: site.z,
+          // The square is open ground, so its "doorstep" is the square itself.
+          doorX: site.x,
+          doorZ: site.z,
+          role: 'hall',
+        },
       },
     });
   };
