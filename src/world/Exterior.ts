@@ -481,8 +481,8 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     scatter.update(playerPos);
     landmarks.update(playerPos, elapsed);
     villages.update(playerPos, elapsed);
-    villagers.update(dt, playerPos, air.nightFactor, villages, collide);
-    livestock.update(dt, playerPos, villages, collide);
+    villagers.update(dt, playerPos, air.nightFactor, villages, collide, floorHeightAt);
+    livestock.update(dt, playerPos, villages, collide, floorHeightAt);
     waterfalls.update(playerPos, elapsed, air.air);
 
     // Streaming shares one time budget per frame, spent in priority order:

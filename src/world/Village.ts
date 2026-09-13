@@ -13,6 +13,7 @@ import {
   BUILD_GRID,
   latticeOf,
   pieceAssets,
+  pieceFootprint,
   PIECE_METRICS,
   type PieceKind,
 } from './Building.ts';
@@ -69,6 +70,8 @@ const LAMP_RANGE = 46;
 const MOUNTED_KINDS: ReadonlySet<PieceKind> = new Set(['shelf', 'torch', 'lantern']);
 /** How far back off the wall line a fixture's origin sits. Matches `BuildSite`. */
 const MOUNT_OFF = 0.14;
+/** Inside face of a wall, from the cell boundary: half its thickness plus a little clearance. */
+const WALL_IN = 0.25;
 
 /**
  * How far above a slot's own level the floor of that slot is.
@@ -262,6 +265,8 @@ function planBuilding(
   style: BiomeStyle,
   rand: (n: number) => number,
   seed: number,
+  /** Which side of the building faces the road. The door goes here. */
+  facing: number,
   door: { at: DoorAt | null },
 ): Slot[] {
   const out: Slot[] = [];
@@ -269,9 +274,16 @@ function planBuilding(
   const push = (kind: PieceKind, cx: number, cz: number, tier: number, turn: number, ox = 0, oz = 0) =>
     out.push({ kind, cx, cz, tier, turn, ox, oz });
 
-  // Which side the door is on, so two neighbouring houses do not always face the same way.
-  const doorSide = Math.floor(rand(seed + 1) * 4) % 4;
-  const doorAt = Math.floor(rand(seed + 2) * (doorSide % 2 === 0 ? w : d));
+  /**
+   * The door faces the road, and that is given rather than rolled.
+   *
+   * It used to be a random one of the four sides, which is half the "doors are on the wrong
+   * side" report: a house fronting a street with its only door round the back is wrong however
+   * plausible the randomness was. The caller knows which way the road is, because it chose the
+   * plot by stepping off one.
+   */
+  const doorSide = facing;
+  const doorAt = Math.floor(rand(seed + 2) * (doorSide % 2 === 0 ? d : w));
 
   for (let storey = 0; storey < storeys; storey++) {
     // Tiers are half-cells; a wall is a full cell tall, so a storey is two tiers.
@@ -292,6 +304,9 @@ function planBuilding(
         ];
         for (const [side, onEdge] of edges) {
           if (!onEdge) continue;
+          // Position along the wall this side runs down: sides 0 and 2 face along X, so they
+          // run down Z and are indexed by iz. This was inverted, which put the door's index
+          // on the wrong axis and so sometimes on no cell at all — a house with no door.
           const along = side % 2 === 0 ? iz : ix;
           let kind: PieceKind = style.wall;
           if (storey === 0 && side === doorSide && along === doorAt) {
@@ -308,71 +323,140 @@ function planBuilding(
     }
   }
 
-  // Roof over the top storey, and a gable at each end of a pitched one so the triangle is
-  // filled rather than left open.
+  /**
+   * A ceiling under the roof, and a deck on top of it.
+   *
+   * Two separate things, and the first villages had neither. A `ceiling` closes the room from
+   * the inside — its joists hang below the slot, which is the face you see from a room — and a
+   * `roofFlat` above it is the weathered top with its own parapet.
+   *
+   * The pitched roofs are deliberately not used here, and that is worth being explicit about.
+   * `roofGable`, `roofHip` and `roofShed` each carry a *complete* roof within one four-metre
+   * cell: `roofGable` has both slopes and its own ridge. Tiled across a three-by-two building
+   * that produces six separate little roofs with six ridges — a row of tents, with the
+   * triangular `gable` piece then landing between them instead of at the ends. That is exactly
+   * the "roofs wrong, corners wrong" report, and it is not a placement mistake I can correct
+   * from here: tiling a pitched roof needs half-slope and ridge pieces that do not exist yet.
+   * A flat deck is correct at any footprint, so villages use one until those pieces do exist.
+   */
   const roofTier = storeys * 2;
   for (let ix = 0; ix < w; ix++) {
     for (let iz = 0; iz < d; iz++) {
-      push(style.roof, ix, iz, roofTier, 0);
-    }
-  }
-  if (style.roof === 'roofGable') {
-    for (let ix = 0; ix < w; ix++) {
-      push('gable', ix, 0, roofTier, 3);
-      push('gable', ix, d - 1, roofTier, 1);
+      push('ceiling', ix, iz, roofTier, 0);
+      push('roofFlat', ix, iz, roofTier, 0);
     }
   }
 
   return out;
 }
 
-/** Furniture for a building, by what it is for. */
+/**
+ * Furniture for a building, by what it is for.
+ *
+ * Positions are given as a fraction of the *interior*, from 0 to 1 on each axis, and turned
+ * into metres against the room's real bounds minus the piece's own half-size. That indirection
+ * is the whole fix for "elements stick out past the walls": the first version placed furniture
+ * at hand-picked sub-cell offsets like −1.9 m, which is ten centimetres from a cell boundary —
+ * and a bed is 2.1 m long, so half of it went through the wall behind it. Nothing here can do
+ * that, because a piece is inset by its own measured footprint before it is placed.
+ */
 function furnishBuilding(plan: Plan, rand: (n: number) => number, seed: number): Slot[] {
   const out: Slot[] = [];
   const { w, d } = plan;
-  const put = (kind: PieceKind, cx: number, cz: number, ox: number, oz: number, turn = 0) =>
-    out.push({ kind, cx, cz, tier: 0, turn, ox, oz });
+  const G = BUILD_GRID;
+  /** Interior half-extents, inside the wall faces. */
+  const roomHX = (w * G) / 2 - WALL_IN;
+  const roomHZ = (d * G) / 2 - WALL_IN;
+
+  /**
+   * `fx`/`fz` are −1..1 across the room. The piece is then pulled in by its own size, so a
+   * value of exactly −1 means "against that wall" for a bed as much as for a stool.
+   */
+  const put = (kind: PieceKind, fx: number, fz: number, turn = 0): void => {
+    const fp = pieceFootprint(kind);
+    // A turned piece presents its other axis to the wall.
+    const halfX = turn % 2 === 0 ? fp.hx : fp.hz;
+    const halfZ = turn % 2 === 0 ? fp.hz : fp.hx;
+    const x = Math.max(-1, Math.min(1, fx)) * Math.max(0, roomHX - halfX);
+    const z = Math.max(-1, Math.min(1, fz)) * Math.max(0, roomHZ - halfZ);
+    // Back to cell coordinates: the building's own origin is the corner of cell (0,0), whose
+    // centre is at (0,0) in the plan's frame, so the room's middle is offset by half of it.
+    const midX = ((w - 1) * G) / 2;
+    const midZ = ((d - 1) * G) / 2;
+    out.push({ kind, cx: 0, cz: 0, tier: 0, turn, ox: midX + x, oz: midZ + z });
+  };
 
   // Everything sits on the half-cell lattice, offset from its cell's centre, so a table and
   // the stools round it line up with each other the way the player's own do.
+  /**
+   * How much furniture, scaled to the room.
+   *
+   * A three-by-two building is twice the floor of a two-by-two, and the first version gave
+   * both the same four items — which is the "big buildings are empty inside" report. Sets
+   * repeat along the long axis instead of being stretched.
+   */
+  const runs = Math.max(1, Math.floor(w / 2));
+  /** Spreads `n` items evenly along the long axis, in −1..1. */
+  const spread = (i: number, n: number): number => (n === 1 ? 0 : (i / (n - 1)) * 1.7 - 0.85);
+
   switch (plan.role) {
     case 'home':
-      put('bed', 0, 0, -1, -1, 0);
-      put('table', w - 1, d - 1, 0.5, 0.5, 0);
-      put('stool', w - 1, d - 1, -1, 0.5, 0);
-      if (w > 2) put('cabinet', 1, 0, 0, -1.5, 3);
-      put('rug', 0, d - 1, 0, 0, 0);
+      put('bed', -1, -1, 0);
+      put('table', 0.55, 0.6);
+      put('stool', 0.05, 0.6);
+      put('stool', 0.95, 0.1);
+      put('cabinet', -0.2, -1, 0);
+      put('rug', 0.2, 0.1);
+      for (let i = 0; i < runs; i++) put('chest', spread(i, runs), 1, 0);
       break;
     case 'forge':
-      put('brazier', 0, 0, 0, 0, 0);
-      put('barrel', w - 1, 0, 0.5, -0.5, 0);
-      put('crate', w - 1, d - 1, 0, 0, 0);
-      put('bench', 0, d - 1, 0, 0.5, 1);
+      put('brazier', 0, -0.5);
+      put('bench', -1, 0.7, 0);
+      for (let i = 0; i < runs + 1; i++) put('barrel', spread(i, runs + 1), 1);
+      put('crate', 1, -1);
+      put('table', 0.7, 0.2);
       break;
     case 'store':
-      for (let i = 0; i < 3; i++) put('crate', i % w, Math.floor(i / w) % d, (i % 2) - 0.5, 0.5, 0);
-      put('barrel', w - 1, d - 1, 0.5, 0.5, 0);
-      put('chest', 0, 0, -0.5, -0.5, 0);
-      put('shelf', 0, 1, 0, 0, 2);
+      for (let i = 0; i < runs * 2; i++) {
+        put('crate', spread(i, runs * 2), -1);
+        put('barrel', spread(i, runs * 2), 1);
+      }
+      put('chest', -1, 0);
+      put('table', 0.4, 0);
       break;
     case 'workshop':
-      put('table', 0, 0, 0, 0, 0);
-      put('chest', w - 1, 0, 0.5, -0.5, 0);
-      put('crate', w - 1, d - 1, 0, 0.5, 0);
-      put('bench', 0, d - 1, -0.5, 0, 1);
+      put('table', -0.4, -0.6);
+      put('bench', -0.4, 0.4, 0);
+      for (let i = 0; i < runs; i++) put('crate', spread(i, runs), 1);
+      put('chest', 1, -1);
+      put('barrel', 1, 0.6);
       break;
     case 'hall':
-      put('table', Math.floor(w / 2), Math.floor(d / 2), 0, 0, 0);
-      for (let i = 0; i < 4; i++) {
-        put('chair', Math.floor(w / 2), Math.floor(d / 2), i < 2 ? -1.5 : 1.5, i % 2 ? -1 : 1, 0);
-      }
-      put('barrel', 0, 0, -0.5, -0.5, 0);
-      put('rug', Math.floor(w / 2), Math.floor(d / 2), 0, 0, 0);
+      // A long table down the middle with benches either side, which is what a hall is.
+      put('table', 0, 0);
+      put('bench', 0, -0.55, 0);
+      put('bench', 0, 0.55, 0);
+      put('chair', -1, 0);
+      put('chair', 1, 0);
+      put('rug', 0, 0);
+      for (let i = 0; i < runs; i++) put('barrel', spread(i, runs), -1);
       break;
   }
-  // A light inside, always: a room you cannot see into is not somewhere anybody lives.
-  put('lantern', Math.floor(w / 2), 0, 0, -1.9, 3);
-  if (rand(seed + 40) < 0.5) put('torch', 0, Math.floor(d / 2), -1.9, 0, 2);
+
+  /**
+   * Light inside, on a wall, always: a room you cannot see into is not somewhere anybody
+   * lives.
+   *
+   * Fixtures are edge pieces, so they are pushed separately from the furniture — a fraction of
+   * the room means nothing to something that hangs on a boundary. The lantern goes on the back
+   * wall, which is the side opposite the door, so it is not behind you as you walk in.
+   */
+  const back = (doorFacing: number): number => (doorFacing + 2) % 4;
+  out.push({ kind: 'lantern', cx: Math.floor(w / 2), cz: Math.floor(d / 2), tier: 0, turn: 1 });
+  if (rand(seed + 40) < 0.6) {
+    out.push({ kind: 'shelf', cx: 0, cz: Math.floor(d / 2), tier: 0, turn: 2 });
+  }
+  void back;
   return out;
 }
 
@@ -517,6 +601,9 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         // Buildings sit on the far side of the verge, never on the road itself.
         const baseX = originX - (onX ? Math.floor(w / 2) : side > 0 ? 0 : w - 1);
         const baseZ = originZ - (onX ? (side > 0 ? 0 : d - 1) : Math.floor(d / 2));
+        // Which of the building's four sides looks back at the road it was placed against.
+        // Sides are 0 = +X, 1 = +Z, 2 = -X, 3 = -Z.
+        const roadSide = onX ? (side > 0 ? 3 : 1) : side > 0 ? 2 : 0;
 
         let free = true;
         for (let ix = 0; ix < w && free; ix++) {
@@ -541,7 +628,9 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         const rotated = { ...plan, w, d };
         const door: { at: DoorAt | null } = { at: null };
         const inner = [
-          ...planBuilding(rotated, style, rand, seed + 100, door),
+          // The side facing the road: the plot was chosen by stepping off one, so `onX` and
+          // `side` between them say which way that is. The door goes there.
+          ...planBuilding(rotated, style, rand, seed + 100, roadSide, door),
           ...furnishBuilding(rotated, rand, seed + 200),
         ];
         for (const s of inner) {
@@ -774,6 +863,38 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         // circles along the piece, because the registry holds circles and a wall is four
         // metres long by a fifth thick — one circle covering its length would stop you two
         // metres out from it in every direction.
+        /**
+         * Decks are registered as standable ground, and this is the fix for the report that
+         * your own furniture falls through a village floor.
+         *
+         * The player's placement preview asks the world how high the ground is, and the world
+         * answers from the terrain plus the prop registry. A village's floors were in neither:
+         * they are instanced geometry with no collider at all. So standing on a paved square,
+         * the answer was the *terrain*, half a metre below the paving — and anything placed
+         * went there, under the deck. The same absence is why you could walk through a
+         * village floor.
+         *
+         * One circle per cell, `top` at the deck. `r` is a little over half a cell so that the
+         * registry's own 0.85 factor still covers the whole square; `solid` is false because a
+         * floor is something you stand on, not something you bump into.
+         */
+        if (kind === 'foundation' || kind === 'floor' || kind === 'ceiling') {
+          const deck =
+            kind === 'foundation'
+              ? PIECE_METRICS.foundationTop
+              : kind === 'ceiling'
+                ? PIECE_METRICS.ceilTop
+                : PIECE_METRICS.floorTop;
+          registry.add(k, {
+            x: px,
+            z: pz,
+            r: G / 2 / 0.85,
+            top: y + deck,
+            blockTop: y + deck,
+            solid: false,
+          });
+        }
+
         if (lattice === 'edge' && !MOUNTED_KINDS.has(kind)) {
           // Along the piece, from the position it was actually placed at. The wall runs along
           // its own local X, which after the quarter turn above is world Z for sides 0 and 2

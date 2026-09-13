@@ -1,5 +1,4 @@
 import { Group, Vector3 } from 'three';
-import { surfaceGroundHeightAt } from './WorldGen.ts';
 import { makeVillagerBody, type VillagerBody, type VillagerModel } from './VillagerModels.ts';
 import type { VillageInfo, VillageStreamer } from './Village.ts';
 
@@ -73,6 +72,8 @@ export interface LivestockHerd {
     playerPos: Vector3,
     villages: VillageStreamer,
     collide: (p: Vector3) => void,
+    /** The world's ground, decks included — not the bare terrain under them. */
+    floorAt: (x: number, z: number) => number,
   ): void;
   count(): number;
   dispose(): void;
@@ -114,6 +115,8 @@ export function createLivestock(): LivestockHerd {
 
   let current: VillageInfo | null = null;
   const scratch = new Vector3();
+  /** Rebound each frame from what `update` is handed; see the villagers for why. */
+  let ground: (x: number, z: number) => number = () => 0;
 
   /** Puts the animals in a settlement, each species in its own patch. */
   const assign = (info: VillageInfo | null): void => {
@@ -138,7 +141,7 @@ export function createLivestock(): LivestockHerd {
       an.hz = pz;
       an.x = px + Math.cos(spread) * an.head.range * 0.4;
       an.z = pz + Math.sin(spread) * an.head.range * 0.4;
-      an.y = surfaceGroundHeightAt(an.x, an.z);
+      an.y = ground(an.x, an.z);
       an.yaw = spread;
       an.tx = null;
       an.wait = 1 + inHead;
@@ -152,12 +155,14 @@ export function createLivestock(): LivestockHerd {
     playerPos: Vector3,
     villages: VillageStreamer,
     collide: (p: Vector3) => void,
+    floorAt: (x: number, z: number) => number,
   ): void => {
     const info = villages.nearest(playerPos);
     const inRange =
       info !== null &&
       (info.x - playerPos.x) ** 2 + (info.z - playerPos.z) ** 2 < ACTIVE_RANGE * ACTIVE_RANGE;
     const want = inRange ? info : null;
+    ground = floorAt;
     if ((want?.key ?? null) !== (current?.key ?? null)) assign(want);
     if (!current) return;
 
@@ -193,7 +198,7 @@ export function createLivestock(): LivestockHerd {
           collide(scratch);
           an.x = scratch.x;
           an.z = scratch.z;
-          an.y = surfaceGroundHeightAt(an.x, an.z);
+          an.y = ground(an.x, an.z);
           moved = Math.hypot(an.x - fromX, an.z - fromZ);
           if (moved > 1e-4) {
             const wantYaw = Math.atan2(-(an.x - fromX), -(an.z - fromZ));

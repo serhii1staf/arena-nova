@@ -1,5 +1,4 @@
 import { Group, Vector3 } from 'three';
-import { surfaceGroundHeightAt } from './WorldGen.ts';
 import { makeVillagerBody, type VillagerBody, type VillagerModel } from './VillagerModels.ts';
 import type { VillageInfo, VillagePlace, VillageStreamer } from './Village.ts';
 
@@ -83,6 +82,14 @@ export interface VillagerCrew {
     night: number,
     villages: VillageStreamer,
     collide: (p: Vector3) => void,
+    /**
+     * The world's own ground height, which includes what the village has paved.
+     *
+     * Not `surfaceGroundHeightAt`: that is the bare terrain, and a village's decks sit half a
+     * metre above it — so villagers walked at terrain level and were buried to the shins in
+     * their own square, which is the levitating-and-sinking report.
+     */
+    floorAt: (x: number, z: number) => number,
   ): void;
   active(): number;
   dispose(): void;
@@ -119,6 +126,14 @@ export function createVillagers(): VillagerCrew {
 
   let current: VillageInfo | null = null;
   const step = new Vector3();
+  /**
+   * The world's ground height, rebound each frame from what `update` is handed.
+   *
+   * Held rather than threaded through every helper: `assign` and `doorstep` both need it and
+   * neither is called from anywhere but `update`, so a binding is simpler than five extra
+   * parameters and cannot fall out of step with the frame.
+   */
+  let ground: (x: number, z: number) => number = () => 0;
 
   /** Hands the crew to a settlement, standing each one at their own front door. */
   const assign = (info: VillageInfo | null): void => {
@@ -134,7 +149,7 @@ export function createVillagers(): VillagerCrew {
       v.home = info.homes.length > 0 ? info.homes[i % info.homes.length]! : info.centre;
       v.work = info.works.length > 0 ? info.works[i % info.works.length]! : info.centre;
       v.at.set(v.home.doorX, v.home.y, v.home.doorZ);
-      v.at.y = surfaceGroundHeightAt(v.at.x, v.at.z);
+      v.at.y = ground(v.at.x, v.at.z);
       v.phase = 'atHome';
       v.dwell = 1 + i * 0.6;
       v.target = null;
@@ -152,7 +167,7 @@ export function createVillagers(): VillagerCrew {
   const doorstep = (place: VillagePlace, v: Villager, spread: number): Vector3 => {
     const a = v.jitter * Math.PI * 2;
     step.set(place.doorX + Math.cos(a) * spread, place.y, place.doorZ + Math.sin(a) * spread);
-    step.y = surfaceGroundHeightAt(step.x, step.z);
+    step.y = ground(step.x, step.z);
     return step;
   };
 
@@ -207,12 +222,14 @@ export function createVillagers(): VillagerCrew {
     night: number,
     villages: VillageStreamer,
     collide: (p: Vector3) => void,
+    floorAt: (x: number, z: number) => number,
   ): void => {
     const info = villages.nearest(playerPos);
     const inRange =
       info !== null &&
       (info.x - playerPos.x) ** 2 + (info.z - playerPos.z) ** 2 < ACTIVE_RANGE * ACTIVE_RANGE;
     const want = inRange ? info : null;
+    ground = floorAt;
     if ((want?.key ?? null) !== (current?.key ?? null)) assign(want);
     if (!current) return;
 
@@ -236,7 +253,7 @@ export function createVillagers(): VillagerCrew {
           // The world's own pushout, so a villager is stopped by exactly what stops the
           // player â€” walls, doors, fences and furniture, all through the shared registry.
           collide(v.at);
-          v.at.y = surfaceGroundHeightAt(v.at.x, v.at.z);
+          v.at.y = ground(v.at.x, v.at.z);
           // How far they *actually* got. A villager pressed against a wall makes no progress,
           // and the animation has to know that or it walks on the spot forever.
           const gotX = v.at.x - fromX;

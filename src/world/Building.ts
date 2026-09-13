@@ -798,6 +798,35 @@ export function latticeOf(kind: PieceKind): 'cell' | 'edge' | 'corner' | 'quarte
   return LATTICE[kind];
 }
 
+/**
+ * The space a piece actually occupies, in its own frame.
+ *
+ * Read straight off the same slab list collision uses, so it cannot disagree with what you
+ * bump into. Exported because anything arranging furniture *programmatically* needs it: a bed
+ * is over two metres long, and a layout that assumes every furnishing is a point puts half of
+ * it through the wall behind it — which is exactly what the first villages did.
+ */
+export function pieceFootprint(kind: PieceKind): { hx: number; hz: number; top: number } {
+  let hx = 0;
+  let hz = 0;
+  let top = 0;
+  for (const b of solidsOf(kind)) {
+    hx = Math.max(hx, Math.abs(b.cx) + b.hx);
+    hz = Math.max(hz, Math.abs(b.cz) + b.hz);
+    top = Math.max(top, b.y1);
+  }
+  // Pieces with no solid parts — a rug, a floor — still occupy their own geometry.
+  if (hx === 0 && hz === 0) {
+    const box = sharedPieces?.geometries[kind].timber.boundingBox;
+    if (box) {
+      hx = Math.max(Math.abs(box.min.x), Math.abs(box.max.x));
+      hz = Math.max(Math.abs(box.min.z), Math.abs(box.max.z));
+      top = box.max.y;
+    }
+  }
+  return { hx, hz, top };
+}
+
 /** Slot dimensions villages need in order to stack storeys and sit things on floors. */
 export const PIECE_METRICS = {
   grid: BUILD_GRID,
