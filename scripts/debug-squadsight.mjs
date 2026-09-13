@@ -78,7 +78,15 @@ try {
           return !!n && n.isOnline && n.remotePlayers.size >= 1;
         },
         null,
-        { timeout: 120000 },
+        // Polled on a timer, not on animation frames.
+        //
+        // The default is one check per animation frame, and a page that is not in front
+        // barely gets any — so this timed out on the page waiting its turn while the
+        // condition it was waiting for had *already* come true. The diagnostic printed
+        // right afterwards said so in as many words: online, one remote, everything the
+        // wait wanted. It was the asking that had stalled, not the thing being asked
+        // about. A timer keeps ticking in a background page; animation frames do not.
+        { timeout: 120000, polling: 200 },
       )
       .then(() => true)
       .catch(() => false);
@@ -170,11 +178,49 @@ try {
     for (let i = 0; i < 14; i++) await page.waitForTimeout(60);
   };
 
+  /**
+   * Waits until `page` has actually received `id` at a spot, then settles.
+   *
+   * The fixed settle above is not enough on its own and one run in several proved it: the
+   * observer reported no highlight and no tag at 260 m, because the teammate's position
+   * had not arrived over the relay yet. Nothing was wrong with the game — the probe had
+   * measured before the thing it was measuring existed. Waiting on the condition instead
+   * of a duration is the only version of this that cannot flake.
+   */
+  const awaitSeen = async (page, id, x, z) => {
+    await page.waitForFunction(
+      ([who, tx, tz]) => {
+        const p = window.arena.scene.net.remotePlayers.get(who);
+        return !!p && Math.hypot(p.x - tx, p.z - tz) < 4;
+      },
+      [id, x, z],
+      { timeout: 30000, polling: 100 },
+    );
+    // Then real frames, not milliseconds — and that distinction is the whole bug.
+    //
+    // The sight test is staggered every fourth *frame*, so the wait for it has to be
+    // counted in frames too. Counted in wall time it was a guess about the frame rate,
+    // and in a headless browser that guess is wrong: half a second is thirty frames on
+    // this machine and can be four in CI, so the highlight had sometimes not been asked
+    // about even once by the time the probe looked. Waiting on frames makes the settle
+    // correct at any frame rate.
+    await page.evaluate(
+      (n) =>
+        new Promise((done) => {
+          let left = n;
+          const tick = () => (--left <= 0 ? done(true) : requestAnimationFrame(tick));
+          requestAnimationFrame(tick);
+        }),
+      16,
+    );
+  };
+
   // ---- Case 1: standing together, in plain sight ---------------------------
   // Close enough that the sight line is short and clear. The highlight must be off.
   await a.bringToFront();
   await place(b, 300, 300, 306, 300);
   await place(a, 306, 300, 300, 300);
+  await awaitSeen(a, idB, 300, 300);
   const near = await state(a);
   console.log(`in sight: ${JSON.stringify({ meshes: near.meshes, through: near.through, tags: near.tags })}`);
 
@@ -193,19 +239,25 @@ try {
     // trees and boulders — so it picked pairs the game considered in plain sight, and
     // the run passed or failed depending on where the trees fell.
     const blocked = (x, y, z) => sc.sightBlocked(x, y, z);
+    // The game's own routine, sampling policy and chest height included. This used to be
+    // a hand-rolled copy of it, and the copy stepped along the line differently — so a
+    // ridge the search called cover was sometimes stepped straight over by the game, and
+    // the run's verdict came down to where the samples happened to fall.
     const occluded = (ax, az, bx, bz) => {
-      const ay = ground(ax, az) + 1.7;
-      const by = ground(bx, bz) + 1.15;
       const dist = Math.hypot(bx - ax, bz - az);
-      const steps = Math.min(48, Math.max(2, Math.round(dist / 2.4)));
-      for (let i = 1; i < steps; i++) {
-        const f = i / steps;
-        const x = ax + (bx - ax) * f;
-        const z = az + (bz - az) * f;
-        const y = ay + (by - ay) * f;
-        if (blocked(x, y, z)) return true;
+      if (dist < 1) return false;
+      // Asked from three eyes, not one. The real eye is the *camera*, which in third
+      // person sits several metres behind the player — so a pair only just occluded from
+      // the player's own position is a coin toss once the camera pulls back. Requiring
+      // cover from the whole span the camera can occupy makes the pair robust rather than
+      // marginal.
+      for (const back of [0, 2, 4]) {
+        const ex = ax - ((bx - ax) / dist) * back;
+        const ez = az - ((bz - az) / dist) * back;
+        const eye = { x: ex, y: ground(ex, ez) + 1.7, z: ez };
+        if (!sc.crowd.hiddenBetween(eye, bx, ground(bx, bz), bz, blocked)) return false;
       }
-      return false;
+      return true;
     };
     // Sweep a grid of origins and directions for a pair a few hundred metres apart
     // whose line is genuinely interrupted, and whose two ends are both on dry land.
@@ -236,6 +288,27 @@ try {
   if (pair) {
     await place(b, pair.bx, pair.bz, pair.ax, pair.az);
     await place(a, pair.ax, pair.az, pair.bx, pair.bz);
+    await awaitSeen(a, idB, pair.bx, pair.bz);
+    // What the game itself concluded, and the exact numbers it concluded it from. Printed
+    // because a disagreement between the search and the live verdict is otherwise a guess:
+    // the eye is the *camera*, not the player, and the target is the position that arrived
+    // over the relay, not the one the search asked about.
+    const verdict = await a.evaluate((who) => {
+      const sc = window.arena.scene;
+      const rp = sc.net.remotePlayers.get(who);
+      const eye = sc.camera.getWorldPosition(new (Object.getPrototypeOf(sc.camera.position).constructor)());
+      if (!rp) return { seen: false };
+      const t = sc.crowd.tracked?.get(who);
+      return {
+        seen: true,
+        eye: [+eye.x.toFixed(1), +eye.y.toFixed(1), +eye.z.toFixed(1)],
+        them: [+rp.x.toFixed(1), +rp.y.toFixed(1), +rp.z.toFixed(1)],
+        gameSays: sc.crowd.hiddenBetween(eye, rp.x, rp.y, rp.z, sc.sightBlocked),
+        hidden: t?.hidden ?? null,
+        showing: t?.showing ?? null,
+      };
+    }, idB);
+    console.log(`game's own verdict: ${JSON.stringify(verdict)}`);
     far = await state(a);
     console.log(
       `behind terrain: ${JSON.stringify({ meshes: far.meshes, through: far.through, tags: far.tags })}`,
@@ -268,8 +341,12 @@ try {
   const showsWhenHidden = !!far && far.through > 0;
   const keepsSkin = !!far && far.hasMap > 0;
   const taggedWhenHidden = !!far && far.tags.length === 1 && /^\d+ m$/.test(far.tags[0].far.trim());
+  // Guarded like every other check that reads a tag. Unguarded, this threw instead of
+  // failing, which is the worse outcome by a distance: an exception loses the whole
+  // report, including the checks that had already passed and the reason this one did not.
   const distanceGrew =
-    !!far &&
+    taggedWhenHidden &&
+    taggedWhenSeen &&
     Number(far.tags[0].far.replace(/\D/g, '')) > Number(near.tags[0].far.replace(/\D/g, '')) + 50;
   const clearedOnLeave = left.through === 0 && left.tags.length === 0;
 

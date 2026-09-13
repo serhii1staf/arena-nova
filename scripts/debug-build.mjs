@@ -1200,6 +1200,130 @@ try {
   });
   console.log(`aimed mount: ${JSON.stringify(aimedMount)}`);
 
+  // ---- Stairs are walked up, not jumped up ---------------------------------
+  // I filled the volume under the treads and broke climbing: the pushout runs before the
+  // floor snap, so a band taller than a step stopped you at the height you were rather
+  // than the height the next tread would put you at. Walked here as the controller does —
+  // step forward, resolve collision, then take the floor — so the check is the real
+  // sequence and not a single query.
+  const climb = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    s.select('stairs');
+    sc.player.spawn(1700, 1700, 0);
+    sc.player.pitch = 0;
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const st = window.probe.piece('stairs', 0);
+    if (!st) return { placed: true, found: false };
+    // Local +Z is up the flight; walk in from the low edge.
+    const ux = Math.sin(st.ry);
+    const uz = Math.cos(st.ry);
+    const ground = st.y;
+    const p = { x: st.x - ux * 3, y: ground, z: st.z - uz * 3 };
+    const heights = [];
+    // Far enough to cross the whole cell and no further: past the top edge the flight
+    // has ended and the floor is the ground again, which would read as a failed climb.
+    for (let i = 0; i < 54; i++) {
+      p.x += ux * 0.09;
+      p.z += uz * 0.09;
+      s.collide(p, 0.4);
+      // The floor, from where the body is — the same call the controller makes.
+      p.y = Math.max(p.y - 0.4, s.heightAt(p.x, p.z, ground, p.y));
+      if (i % 12 === 0) heights.push(+(p.y - ground).toFixed(2));
+    }
+    // Under the high end there must be room, so a flight can be built beneath.
+    const under = { x: st.x + ux * 1.4, y: ground, z: st.z + uz * 1.4 };
+    const from = { x: under.x, z: under.z };
+    s.collide(under, 0.4);
+    // And walking into the low treads from the side at ground level must be stopped —
+    // 0.7 m up the flight, where the shell is above the feet and below the head.
+    const side = { x: st.x - ux * 0.7 + uz * 0.6, y: ground, z: st.z - uz * 0.7 - ux * 0.6 };
+    const sideFrom = { x: side.x, z: side.z };
+    s.collide(side, 0.4);
+    return {
+      placed: true,
+      found: true,
+      heights,
+      climbed: +(p.y - ground).toFixed(2),
+      underClear: +Math.hypot(under.x - from.x, under.z - from.z).toFixed(2),
+      sideBlocked: +Math.hypot(side.x - sideFrom.x, side.z - sideFrom.z).toFixed(2),
+    };
+  });
+  console.log(`climb: ${JSON.stringify(climb)}`);
+
+  // ---- A cabinet stands against a wall, not in it ---------------------------
+  const cupboard = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    sc.player.spawn(1900, 1900, 0);
+    sc.player.pitch = 0;
+    s.select('wall');
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const w = window.probe.piece('wall', 0);
+    s.select('cabinet');
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: true, found: false };
+    const c = window.probe.piece('cabinet', 0);
+    if (!w || !c) return { placed: true, found: false };
+    const nx = Math.sin(w.ry);
+    const nz = Math.cos(w.ry);
+    return {
+      placed: true,
+      found: true,
+      // Clear of the wall by its own depth plus the wall's half-thickness, so its back is
+      // against the wall rather than through it.
+      offset: +Math.abs((c.x - w.x) * nx + (c.z - w.z) * nz).toFixed(2),
+      // Standing on the ground under *itself*, not hanging at fixture height. Measured
+      // against its own column: the wall's base is a third of a metre away across
+      // sloping terrain, so comparing the two origins reads a slope as a fault.
+      lift: +(c.y - sc.world.floorHeightAt(c.x, c.z)).toFixed(2),
+      // And squarely along the wall rather than skewed to it.
+      alongWall: +Math.abs(Math.sin(c.ry - w.ry)).toFixed(2),
+    };
+  });
+  console.log(`cabinet: ${JSON.stringify(cupboard)}`);
+
+  // ---- Fires light the place up --------------------------------------------
+  const firelight = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    const lights = s.group.children.filter((c) => c.isPointLight);
+    const before = lights.filter((l) => l.visible).length;
+    s.select('campfire');
+    sc.player.spawn(2100, 2100, 0);
+    sc.player.pitch = 0;
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false, pool: lights.length };
+    const f = window.probe.piece('campfire', 0);
+    s.lightUp(sc.player.feetPosition);
+    const lit = lights.filter((l) => l.visible);
+    // Walk far away: the pool must let go, so it never costs anything for fires nobody is
+    // standing near.
+    s.lightUp({ x: 2100 + 400, y: 0, z: 2100 + 400 });
+    const farLit = lights.filter((l) => l.visible).length;
+    return {
+      placed: true,
+      pool: lights.length,
+      before,
+      lit: lit.length,
+      atFire: f
+        ? +Math.hypot(lit[0].position.x - f.x, lit[0].position.z - f.z).toFixed(2)
+        : null,
+      intensity: lit[0]?.intensity ?? 0,
+      shadowless: lights.every((l) => l.castShadow === false),
+      farLit,
+    };
+  });
+  console.log(`firelight: ${JSON.stringify(firelight)}`);
+
   // ---- Furniture holds you up along its whole length -----------------------
   // A bed is over two metres long and a table nearly two wide, so either can be
   // bucketed in one grid column and reach well into the next. The floor query used to
@@ -1380,18 +1504,18 @@ try {
   const doorwayOpen = door.found === true && door.throughMiddle < -1 && door.intoSolid > 0.3;
   const edgeLattice =
     edges.allOnEdges === true && edges.encloseFloor === true && edges.distinct === true;
-  // Ten instanced meshes plus the preview and the removal marker, and that count
-  // does not move when ninety pieces are placed.
-  // Twenty timber meshes plus two for glazing, and the preview and marker on top.
-  // That count does not move when ninety pieces are placed.
   // Thirty kinds, plus a companion layer wherever a piece needs a second material:
-  // three glazed, one door leaf, four fires. Forty children in all, and that count
-  // does not move when ninety pieces go in.
+  // three glazed, one door leaf, four fires — thirty-eight instanced meshes. Then the
+  // preview, the removal marker, and the pool of four firelights: forty-four children.
+  //
+  // The clause that carries the weight is `childrenFull === childrenEmpty`: whatever the
+  // composition, it must not move when ninety pieces go in. The absolute number is the
+  // second guard, and it is what catches a per-piece object being introduced by accident.
   const costFlat =
     scaling.placed >= 80 &&
     scaling.instanced === 38 &&
     scaling.childrenFull === scaling.childrenEmpty &&
-    scaling.childrenFull === 40;
+    scaling.childrenFull === 44;
   // One turn changes the piece and leaves the camera exactly where it was, and the
   // reverse turn comes back to where it started.
   const wheelIsolated =
@@ -1486,6 +1610,34 @@ try {
     const heights = [f.top, ...f.cross];
     return heights.every((h) => h > 0.2) && Math.abs(f.away) < 0.01;
   });
+  // Walked up on foot: every sample higher than the last, ending most of a cell up, with
+  // room left underneath and no way through the low treads from the side.
+  const stairsClimb =
+    climb.found === true &&
+    climb.heights.length > 3 &&
+    climb.heights.every((h, i) => i === 0 || h > climb.heights[i - 1]) &&
+    climb.climbed > 3 &&
+    climb.underClear < 0.01 &&
+    climb.sideBlocked > 0.1;
+  // Back against the wall, standing on the floor: clear of the wall by its own depth and
+  // not lifted off the ground.
+  const cabinetFits =
+    cupboard.found === true &&
+    cupboard.offset > 0.24 &&
+    cupboard.offset < 0.5 &&
+    Math.abs(cupboard.lift) < 0.1 &&
+    cupboard.alongWall < 0.01;
+  // A pool of four, dark until something burns, aimed at the fire, and let go when you
+  // walk away — so a hundred torches cost what four do.
+  const firesLight =
+    firelight.placed === true &&
+    firelight.pool === 4 &&
+    firelight.before === 0 &&
+    firelight.lit >= 1 &&
+    firelight.atFire < 0.5 &&
+    firelight.intensity > 0 &&
+    firelight.shadowless === true &&
+    firelight.farLit === 0;
   const labelCentred =
     centred !== null && Math.abs(centred.boxOffset) < 1.5 && Math.abs(centred.textOffset) < 1.5;
   const removesOne =
@@ -1571,7 +1723,7 @@ try {
   line(
     'cost flat as it grows:',
     costFlat,
-    `${scaling.placed} pieces, ${scaling.instanced} instanced meshes, ${scaling.childrenFull} children`,
+    `${scaling.placed} pieces, ${scaling.instanced} instanced meshes, ${scaling.childrenEmpty}->${scaling.childrenFull} children`,
   );
   line(
     'wheel switches, does not zoom:',
@@ -1599,6 +1751,21 @@ try {
     'fixtures sit on the wall:',
     fixturesMount,
     `off=${mounted.offset} facing=${mounted.facesIn}`,
+  );
+  line(
+    'stairs are walked up, not jumped:',
+    stairsClimb,
+    `rise=${JSON.stringify(climb.heights)} top=${climb.climbed} under=${climb.underClear} side=${climb.sideBlocked}`,
+  );
+  line(
+    'a cabinet backs onto a wall:',
+    cabinetFits,
+    `off=${cupboard.offset} lift=${cupboard.lift} skew=${cupboard.alongWall}`,
+  );
+  line(
+    'fires light the place up:',
+    firesLight,
+    `pool=${firelight.pool} lit=${firelight.lit} at=${firelight.atFire}m power=${firelight.intensity} away=${firelight.farLit}`,
   );
   line('a bed on a floor sits on it:', sitsOnFloor, `lift=${onTopOf.lift}`);
   line(
@@ -1658,6 +1825,9 @@ try {
     topsStandable &&
     roofSheltersYou &&
     furnitureHolds &&
+    stairsClimb &&
+    cabinetFits &&
+    firesLight &&
     fixturesMount &&
     sitsOnFloor &&
     mountsWhereAimed &&

@@ -467,7 +467,27 @@ export class Input {
 
   /** Call once per frame before reading state. */
   update(): void {
+    this.dropCaptureIfUnfocused();
     this.readKeyboardMove();
+  }
+
+  /**
+   * Lets the OS pointer go if the game no longer has focus.
+   *
+   * A backstop for the one bug in this area with no second chance. Native capture
+   * *confines* the real cursor to the window, and confinement is only lifted by an
+   * explicit release — so if the release is ever missed, the pointer stays trapped inside
+   * a window nobody is using and no further event will arrive to fix it. That is the
+   * "my mouse is stuck in the middle of the screen" report, and the `blur` handler alone
+   * is not enough of an answer, because it depends on one event being delivered once.
+   *
+   * Checked every frame instead. One property read, and it converges no matter which
+   * event went missing or which flag drifted.
+   */
+  private dropCaptureIfUnfocused(): void {
+    if (!this.nativeCapture && !this.locked) return;
+    if (document.hasFocus()) return;
+    this.releasePointerLock();
   }
 
   dispose(): void {

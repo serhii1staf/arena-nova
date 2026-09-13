@@ -137,8 +137,14 @@ async function boot(): Promise<void> {
   // `blur` is the normal path, `visibilitychange` catches being minimised or
   // hidden without a focus change, and `pagehide` catches teardown. Releasing is
   // idempotent, so firing two of them costs nothing.
+  // Unconditionally, not `if (locked)`. That guard was the bug: in the native shell
+  // `locked` is a flag this code keeps itself rather than something the OS reports, and if
+  // it ever disagreed with the real state the release was skipped and the pointer stayed
+  // confined to a window the player had already left. Releasing is idempotent — it
+  // early-returns when there is nothing to release — so asking unconditionally is free and
+  // cannot be wrong.
   const handBackCursor = (): void => {
-    if (engine.input.locked) engine.input.releasePointerLock();
+    engine.input.releasePointerLock();
   };
   window.addEventListener('blur', handBackCursor);
   window.addEventListener('pagehide', handBackCursor);

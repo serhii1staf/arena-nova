@@ -163,6 +163,26 @@ export class RemoteCrowd {
   }
 
   /**
+   * Whether a player standing at a spot would be hidden from an eye.
+   *
+   * The exact question `highlight` asks, chest offset and sampling policy included, so
+   * that anything else needing the answer asks *this* instead of rebuilding it. The
+   * automated sight test used to carry its own copy of the step size, the sample cap and
+   * the chest height; the copy disagreed with the original about where the samples land,
+   * so whether a given ridge counted as cover came out differently in the test and in the
+   * game, and the run passed or failed by luck.
+   */
+  hiddenBetween(
+    eye: { x: number; y: number; z: number },
+    x: number,
+    feetY: number,
+    z: number,
+    blocked: (x: number, y: number, z: number) => boolean,
+  ): boolean {
+    return this.occluded(eye, x, feetY + CHEST, z, blocked);
+  }
+
+  /**
    * True when something stands between the eye and a point.
    *
    * Both ends are excluded from the walk. The near end because the camera itself sits
@@ -171,7 +191,7 @@ export class RemoteCrowd {
    * them would report every teammate on a hillside as hidden.
    */
   private occluded(
-    eye: Vector3,
+    eye: { x: number; y: number; z: number },
     x: number,
     y: number,
     z: number,

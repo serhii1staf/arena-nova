@@ -6,6 +6,7 @@ import {
   Matrix4,
   Mesh,
   MeshStandardMaterial,
+  PointLight,
   RepeatWrapping,
   Vector3,
 } from 'three';
@@ -114,6 +115,28 @@ const STEP_UP = 0.65;
  * whichever band covers the ground it is over, whatever its thickness.
  */
 const SHELL = 0.24;
+/** Height above a piece's floor that its flame sits at, how far it reaches, how bright. */
+interface FireGlow {
+  y: number;
+  reach: number;
+  power: number;
+}
+
+/**
+ * What actually casts light, and how much.
+ *
+ * A campfire throws further and warmer than a torch; a lantern is contained and throws
+ * least. Only these four kinds are lit — a bed does not glow, and checking every piece for
+ * a light it cannot have is work for nothing.
+ */
+const FIRELIGHT: Partial<Record<PieceKind, FireGlow>> = {
+  campfire: { y: 0.5, reach: 13, power: 26 },
+  brazier: { y: 1.05, reach: 11, power: 20 },
+  torch: { y: 2.0, reach: 9, power: 14 },
+  lantern: { y: 1.5, reach: 8, power: 11 },
+};
+/** Beyond this a fire is not worth a light from the pool. */
+const LIGHT_RANGE = 16;
 /** How far a door swings open, in radians. */
 const DOOR_SWING = Math.PI * 0.52;
 /** How close you have to be for a door to offer itself. */
@@ -292,9 +315,19 @@ const OPENABLE = new Set<PieceKind>(['doorLeaf']);
  * are pushed off the line by a wall's own half-thickness and turned to face the cell
  * you were aiming at, which is the room side.
  */
-const MOUNTED = new Set<PieceKind>(['shelf', 'torch', 'lantern']);
-/** How far off the edge line a fixture sits: a wall's half-thickness and a little air. */
-const MOUNT_OFF = POST / 2 + 0.04;
+const MOUNTED = new Set<PieceKind>(['shelf', 'torch', 'lantern', 'cabinet']);
+
+/**
+ * How far off the wall line a fixture's origin sits.
+ *
+ * A wall's half-thickness plus the piece's own reach behind its origin. A shelf hangs
+ * flat, so it needs almost nothing; a cabinet is a box standing on the floor and needs
+ * its own depth or its back half disappears into the wall.
+ */
+function mountOffset(kind: PieceKind): number {
+  const wall = POST / 2 + 0.04;
+  return kind === 'cabinet' ? wall + 0.22 : wall;
+}
 
 /** A box in a piece's own frame: centre and half-extents across, and a Y range. */
 interface Slab {
@@ -371,6 +404,11 @@ export interface BuildSite {
   heightAt(x: number, z: number, ground: number, fromY?: number): number;
   collide(p: Vector3, radius: number): void;
   blocksCamera(x: number, y: number, z: number): boolean;
+  /**
+   * Points the small pool of firelights at whatever is burning nearest the player.
+   * Call once a frame with the player's position.
+   */
+  lightUp(near: Vector3): void;
   /** The timber geometry of a kind, so the hotbar can draw an icon of it. */
   geometryFor(kind: PieceKind): BufferGeometry;
   dispose(): void;
@@ -1060,6 +1098,38 @@ function solidsOf(kind: PieceKind, open = false): Slab[] {
    * at that distance from the ridge — so the solid part is the roof rather than
    * everything beneath it.
    */
+  /**
+   * A slope rising along +Z, as a shell that follows the plane you actually walk on.
+   *
+   * Each band's top is the walking surface at the band's *near* edge, and that detail is
+   * the whole point. A body is a square of its radius, so it touches a band about
+   * 0.4 m before reaching it; if the band's top were the height the slope reaches at its
+   * far edge — a tread height, say — then at the moment of contact the ground under the
+   * body would be a full band lower than the thing in front of it, the step-up allowance
+   * would not cover the difference, and the climb would stop dead. Which is exactly what
+   * happened when this was four bands at tread height, and what filling it solid did
+   * worse. Anchoring each band to the surface at its near edge means the body is always
+   * standing level with, or above, the band it is about to enter.
+   */
+  const slope = (rise: number): Slab[] => {
+    // Fine enough that the drop from one band to the next is less than the shell is
+    // thick, so there is no seam between them for a body to slip through.
+    const n = 20;
+    const d = G / n;
+    return Array.from({ length: n }, (_, i) => {
+      const near = i * d;
+      const top = Math.max(0.06, (rise * near) / G);
+      return {
+        cx: 0,
+        cz: -s + near + d / 2,
+        hx: s,
+        hz: d / 2,
+        y0: Math.max(0, top - SHELL),
+        y1: top,
+      };
+    });
+  };
+
   const shell = (height: (f: number) => number, along: 'z' | 'x' = 'z'): Slab[] => {
     const out: Slab[] = [];
     // Six bands a side: fine enough that the steps between them are smaller than the
@@ -1175,28 +1245,25 @@ function solidsOf(kind: PieceKind, open = false): Slab[] {
       return shell((f) => RIDGE * (1 - f));
     case 'roofHip':
       return [...shell((f) => RIDGE * (1 - f)), ...shell((f) => RIDGE * (1 - f), 'x')];
-    // A flight of stairs is solid underneath, unlike a roof: you cannot walk beneath a
-    // staircase that sits on the ground, and leaving it hollow is what let a body walk in
-    // through the side and the high end as if the whole thing were scenery. Filled from
-    // the floor to each band's tread, so the step-up allowance still carries you up it.
+    // A flight of stairs is a shell along its own slope, and this is the third answer
+    // after two wrong ones — both of them mine, and the second one worse than the first.
+    //
+    // Hollow let a body walk in through the side and the high end as if the flight were
+    // scenery. Filling the volume under the treads stopped that and broke climbing: the
+    // ask had been for the camera to stop shaking on the way up, and the result was a
+    // staircase you had to jump. Four bands of shell at tread height still blocked, for a
+    // subtler reason — see `slope`, which is where the fix lives.
+    //
+    // What the shell gives, that neither of the others did: you walk up it, you are
+    // stopped walking into its low treads from the side, and the space under the high end
+    // is free, so a flight of stairs is somewhere you can build rather than a solid block.
     case 'stairs':
-      return [0.125, 0.375, 0.625, 0.875].map((f) => ({
-        cx: 0,
-        cz: -s + f * G,
-        hx: s,
-        hz: s / 4,
-        y0: 0,
-        y1: Math.max(0.1, G * f),
-      }));
+      return slope(G);
     case 'roofShed':
-      return [0.125, 0.375, 0.625, 0.875].map((f) => ({
-        cx: 0,
-        cz: -s + f * G,
-        hx: s,
-        hz: s / 4,
-        y0: Math.max(0, RIDGE * f - SHELL),
-        y1: RIDGE * f,
-      }));
+      // The same construction, and it fixes a fault here that had not been noticed: at
+      // four bands the second one's top was 0.025 m too high for the step-up allowance to
+      // clear, so a shed roof was climbable only by luck.
+      return slope(RIDGE);
     // Furnishings are solid at their own size, so a table is furniture rather than
     // a hologram. Small enough that walking round them is never a nuisance.
     case 'bed':
@@ -1425,6 +1492,23 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   mark.receiveShadow = false;
   group.add(mark);
 
+  /**
+   * The firelight pool. Four lights, shadowless, moved to whatever is burning nearest.
+   *
+   * Added to the group so they travel and are disposed with the site.
+   */
+  const firelights: PointLight[] = [];
+  for (let i = 0; i < 4; i++) {
+    const light = new PointLight(0xffb060, 0, 1, 1.7);
+    light.visible = false;
+    light.castShadow = false;
+    light.name = `Firelight:${i}`;
+    group.add(light);
+    firelights.push(light);
+  }
+  /** Reused each frame, so choosing which fires are lit allocates nothing. */
+  const candidates: { p: Placed; d2: number; glow: FireGlow }[] = [];
+
   const at = new Vector3();
   let atTurn = 0;
   let free = true;
@@ -1445,7 +1529,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     // Fixtures slide along a wall in half-metre steps, so their slots have to be counted
     // in half metres too — on the half-cell grid, two torches a metre apart on the same
     // wall would be the same slot and the second would be refused.
-    const h = MOUNTED.has(kind) ? 0.5 : G / 2;
+    const h = MOUNTED.has(kind) || LATTICE[kind] === 'quarter' ? 0.5 : G / 2;
     const gx = Math.round(p.x / h);
     const gy = Math.round(p.y / (G / 2));
     const gz = Math.round(p.z / h);
@@ -1549,12 +1633,12 @@ export function createBuildSite(assets: AssetManager): BuildSite {
           // The wall runs along Z. Slide along it in Z; stand off it in X, on the side
           // the ray came from, which is the side the player is on.
           const side = forward.x >= 0 ? -1 : 1;
-          out.x = Math.round((hx - h) / G) * G + h + side * MOUNT_OFF;
+          out.x = Math.round((hx - h) / G) * G + h + side * mountOffset(selected);
           out.z = Math.round(hz / STEP_ALONG) * STEP_ALONG;
           return side > 0 ? 1 : 3;
         }
         const side = forward.z >= 0 ? -1 : 1;
-        out.z = Math.round((hz - h) / G) * G + h + side * MOUNT_OFF;
+        out.z = Math.round((hz - h) / G) * G + h + side * mountOffset(selected);
         out.x = Math.round(hx / STEP_ALONG) * STEP_ALONG;
         return side > 0 ? 0 : 2;
       }
@@ -1565,12 +1649,12 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       const lineZ = Math.round((raw.z - h) / G) * G + h;
       if (Math.abs(raw.x - lineX) <= Math.abs(raw.z - lineZ)) {
         const side = eye.x >= lineX ? 1 : -1;
-        out.x = lineX + side * MOUNT_OFF;
+        out.x = lineX + side * mountOffset(selected);
         out.z = Math.round(raw.z / STEP_ALONG) * STEP_ALONG;
         return side > 0 ? 1 : 3;
       }
       const side = eye.z >= lineZ ? 1 : -1;
-      out.z = lineZ + side * MOUNT_OFF;
+      out.z = lineZ + side * mountOffset(selected);
       out.x = Math.round(raw.x / STEP_ALONG) * STEP_ALONG;
       return side > 0 ? 0 : 2;
     }
@@ -1586,9 +1670,14 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       return quarter;
     }
     if (lattice === 'quarter') {
-      const h = G / 2;
-      out.x = Math.round(raw.x / h) * h;
-      out.z = Math.round(raw.z / h) * h;
+      // Half-metre steps, not half-cell. Two metres is a coarse grid to arrange a room
+      // on: a table and two stools around it, or a bed against one side of a platform,
+      // simply are not expressible when everything lands on a two-metre lattice. Fine
+      // enough to place furniture where you mean it, coarse enough that two pieces still
+      // line up with each other.
+      const step = 0.5;
+      out.x = Math.round(raw.x / step) * step;
+      out.z = Math.round(raw.z / step) * step;
       return quarter;
     }
     const cx = Math.round(raw.x / G) * G;
@@ -2097,6 +2186,52 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     return false;
   };
 
+  /**
+   * Points the firelight pool at the nearest burning things.
+   *
+   * A fixed pool of four lights, no shadows, reassigned each frame — not one light per
+   * fire. A light per torch is the obvious implementation and the wrong one: somebody
+   * lining a corridor with twenty of them would be asking the renderer for twenty more
+   * lights in every material's shader, which is a recompile and then a permanent cost in
+   * every lit pixel. Four is enough that the fires you are standing among are lit, and it
+   * costs the same whether there are four fires in the world or four hundred.
+   *
+   * Reassignment is a partial sort over the pieces in the columns around the player, so it
+   * does not care how much has been built either.
+   */
+  const lightUp = (near: Vector3): void => {
+    const gx = Math.round(near.x / G);
+    const gz = Math.round(near.z / G);
+    candidates.length = 0;
+    for (let ix = -2; ix <= 2; ix++) {
+      for (let iz = -2; iz <= 2; iz++) {
+        const list = columns.get(colKey(gx + ix, gz + iz));
+        if (!list) continue;
+        for (const p of list) {
+          const glow = FIRELIGHT[p.kind];
+          if (!glow) continue;
+          const d2 = (p.x - near.x) ** 2 + (p.z - near.z) ** 2;
+          if (d2 > LIGHT_RANGE * LIGHT_RANGE) continue;
+          candidates.push({ p, d2, glow });
+        }
+      }
+    }
+    candidates.sort((a, b) => a.d2 - b.d2);
+
+    for (let i = 0; i < firelights.length; i++) {
+      const light = firelights[i]!;
+      const pick = candidates[i];
+      if (!pick) {
+        light.visible = false;
+        continue;
+      }
+      light.visible = true;
+      light.position.set(pick.p.x, pick.p.level + pick.glow.y, pick.p.z);
+      light.distance = pick.glow.reach;
+      light.intensity = pick.glow.power;
+    }
+  };
+
   const categoryOf = (kind: PieceKind): number =>
     CATEGORIES.findIndex((c) => c.pieces.includes(kind));
 
@@ -2137,6 +2272,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       quarter = (quarter + 1) % 4;
     },
     place,
+    lightUp,
     reachableKind: () => reachable?.kind ?? null,
     reachableOpen: () => reachable?.open ?? false,
     interact: () => {

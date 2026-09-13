@@ -57,7 +57,12 @@ export class ExteriorScene implements GameScene {
   private dayNight!: DayNight;
   private fog!: FogExp2;
   private background!: Color;
-  private crowd!: RemoteCrowd;
+  /**
+   * Readable rather than private so a test can ask the crowd the same sight question the
+   * highlight asks. It had been reimplementing the sampling policy, and a copy of a
+   * policy is a copy that drifts — see `RemoteCrowd.hiddenBetween`.
+   */
+  crowd!: RemoteCrowd;
   private buildSite!: BuildSite;
   private gather!: GatherSite;
   /** Reused each frame for the build aim ray; allocating two vectors per frame here
@@ -341,6 +346,9 @@ export class ExteriorScene implements GameScene {
     this.world.update(this.time, frameDelta, p, this.air);
     this.dragon.update(this.time, frameDelta);
     this.stepSurvival(frameDelta);
+    // Firelight follows the player rather than existing per fire, so a room full of
+    // torches costs the same as one torch.
+    this.buildSite.lightUp(p);
 
     // Build preview. Driven from the camera rather than from the body, so the piece
     // lands where the crosshair points in third person too. Returns immediately
