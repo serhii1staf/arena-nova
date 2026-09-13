@@ -176,6 +176,18 @@ try {
       { timeout: 60000 },
     )
     .catch(() => {});
+  // The figure is a separate, larger render on the same idle queue, so it lands after
+  // the icons rather than with them. Waited for, because it is asynchronous by design.
+  await page
+    .waitForFunction(
+      () => {
+        const f = document.getElementById('invFace');
+        return !!f && !f.hidden && f.complete && f.naturalWidth > 0;
+      },
+      null,
+      { timeout: 90000 },
+    )
+    .catch(() => {});
   const panel = await page.evaluate(() => {
     const grid = document.getElementById('invGrid');
     const cells = [...(grid?.querySelectorAll('.invCell') ?? [])];
@@ -213,7 +225,14 @@ try {
       recipes,
       face: (() => {
         const f = document.getElementById('invFace');
-        return !!f && !f.hidden && f.complete && f.naturalWidth > 0;
+        if (!f || f.hidden || !f.complete || f.naturalWidth === 0) return false;
+        // Portrait aspect, which is what distinguishes the full figure from the square
+        // head crop this replaced. A square here would mean the old picture came back.
+        return f.naturalHeight > f.naturalWidth * 1.2;
+      })(),
+      faceSize: (() => {
+        const f = document.getElementById('invFace');
+        return f ? `${f.naturalWidth}x${f.naturalHeight}` : '';
       })(),
       bars: ['barHealth', 'barWater', 'barFood'].map(
         (id) => document.getElementById(id)?.style.width ?? '',
@@ -323,8 +342,22 @@ try {
     const hint = document.getElementById('invHint')?.textContent ?? '';
 
     // Now walk away with the same materials and watch the same recipe close again.
+    //
+    // Waited for rather than slept through. The panel reconciles its rows on the HUD
+    // pass, so how long that takes is a property of the frame rate, not of the feature —
+    // a fixed pause passed on a fast run and failed on a slow one, which is a flaky
+    // probe rather than a flaky game. It still fails if the row never closes.
     window.probe.go(near.x + 300, near.z + 300);
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((resolve) => {
+      const started = performance.now();
+      const spin = () => {
+        const row = document.querySelector('.invRecipe[data-recipe="pickaxe"]');
+        if (row?.classList.contains('blocked')) return resolve();
+        if (performance.now() - started > 5000) return resolve();
+        requestAnimationFrame(spin);
+      };
+      spin();
+    });
     const awayNow = g.atBench(sc.player.feetPosition);
     const pickAway = document
       .querySelector('.invRecipe[data-recipe="pickaxe"]')
@@ -529,7 +562,7 @@ try {
   line('materials can be gathered:', gotMaterials, JSON.stringify(gathered.bag));
   line('I opens the bag:', panelOpens, `${panel.cells} cells`);
   line('icons drawn and distinct:', iconsDrawn, JSON.stringify(panel.drawn.map((d) => d?.coverage)));
-  line('portrait and three meters:', faceAndBars, JSON.stringify(panel.bars));
+  line('full figure and three meters:', faceAndBars, `${panel.faceSize} ${JSON.stringify(panel.bars)}`);
   line('bench recipes gated:', benchGated);
   line('spear crafted, inputs spent:', craftedSpear, JSON.stringify(crafted.after));
   line(

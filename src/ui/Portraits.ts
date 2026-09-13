@@ -71,12 +71,30 @@ const HEADROOM = 0.04;
 /** Long-ish lens: a wide one this close distorts the face badly. */
 const FOV_DEG = 26;
 
-/** skin id -> finished PNG data URL. */
+/**
+ * Two pictures of each character, and they are different pictures.
+ *
+ * The head is for a 30 px row in a list, where the only thing that can read is a
+ * face. The full figure is for the inventory panel, where there is room to show the
+ * character the player actually chose — and where a cropped head enlarged to fill the
+ * space is the thing that looked bad. Different framing, different resolution, so
+ * they are rendered and cached separately rather than one being a scaled crop of the
+ * other.
+ */
+type Variant = 'head' | 'body';
+
+/** `variant:skin` -> finished PNG data URL. */
 const ready = new Map<string, string>();
-/** Skins with no model, or a render that failed. Never retried. */
+/** Entries with no model, or a render that failed. Never retried. */
 const unavailable = new Set<string>();
 const queue: string[] = [];
 let draining = false;
+
+/** Pixels for the full figure: portrait aspect, tall enough to be legible. */
+const BODY_W = 256;
+const BODY_H = 384;
+/** Vertical padding above and below the figure, as a fraction of its height. */
+const BODY_MARGIN = 0.06;
 
 /**
  * The portrait for a skin, or `null` if it is not ready yet — in which case the
@@ -84,11 +102,25 @@ let draining = false;
  * call every frame: the hit path is one map lookup.
  */
 export function portraitFor(skinId: string | undefined): string | null {
-  const id = resolveSkin(skinId).id;
-  const hit = ready.get(id);
+  return pictureFor('head', skinId);
+}
+
+/**
+ * The whole character, head to feet, or `null` until it is ready.
+ *
+ * Same queue and the same throwaway context as the head shots, so asking for both
+ * costs one context rather than two.
+ */
+export function bodyFor(skinId: string | undefined): string | null {
+  return pictureFor('body', skinId);
+}
+
+function pictureFor(variant: Variant, skinId: string | undefined): string | null {
+  const key = `${variant}:${resolveSkin(skinId).id}`;
+  const hit = ready.get(key);
   if (hit !== undefined) return hit;
-  if (unavailable.has(id) || queue.includes(id)) return null;
-  queue.push(id);
+  if (unavailable.has(key) || queue.includes(key)) return null;
+  queue.push(key);
   drain();
   return null;
 }
@@ -117,19 +149,22 @@ function drain(): void {
  * hitch on a weak machine.
  */
 async function step(): Promise<void> {
-  const id = queue.shift();
-  if (id === undefined) {
+  const key = queue.shift();
+  if (key === undefined) {
     draining = false;
     releaseRig();
     return;
   }
+  const split = key.indexOf(':');
+  const variant = key.slice(0, split) as Variant;
+  const id = key.slice(split + 1);
   try {
-    const url = await render(id);
-    if (url) ready.set(id, url);
-    else unavailable.add(id);
+    const url = await render(id, variant);
+    if (url) ready.set(key, url);
+    else unavailable.add(key);
   } catch (err) {
-    unavailable.add(id);
-    console.warn(`[portraits] ${id} could not be drawn: ${String((err as Error)?.message ?? err)}`);
+    unavailable.add(key);
+    console.warn(`[portraits] ${key} could not be drawn: ${String((err as Error)?.message ?? err)}`);
   }
   whenIdle(() => void step());
 }
@@ -201,7 +236,7 @@ function releaseRig(): void {
   rig = null;
 }
 
-async function render(skinId: string): Promise<string | null> {
+async function render(skinId: string, variant: Variant = 'head'): Promise<string | null> {
   const manifest = await loadCharacterManifest();
   if (!manifest) return null; // no authored characters installed
   // Dynamic, exactly as `Avatar` does it: the loader, the meshopt decoder and the
@@ -242,15 +277,31 @@ async function render(skinId: string): Promise<string | null> {
   const centre = new Vector3();
   box.getCenter(centre);
 
-  // Head and shoulders: hold the crown just under the top edge, and let the head's
-  // own height decide how much of the body comes with it.
   const top = box.max.y;
-  const headY = headBoneHeight(figure, top);
-  const frame =
-    headY !== null ? (top - headY) * HEAD_AND_SHOULDERS : (top - box.min.y) * FALLBACK_FRACTION;
-  const eyeY = top + frame * HEADROOM - frame / 2;
+  let frame: number;
+  let eyeY: number;
+  let aspect = 1;
+  if (variant === 'body') {
+    // The whole figure, with a little air above and below. Framed on the actual
+    // bounds rather than on a nominal character height, because these rigs are not
+    // all the same size and a fixed frame either crops the tall one or leaves the
+    // short one adrift in the middle.
+    const height = (top - box.min.y) * (1 + BODY_MARGIN * 2);
+    frame = height;
+    eyeY = (top + box.min.y) / 2;
+    aspect = BODY_W / BODY_H;
+    renderer.setSize(BODY_W, BODY_H, false);
+  } else {
+    // Head and shoulders: hold the crown just under the top edge, and let the head's
+    // own height decide how much of the body comes with it.
+    const headY = headBoneHeight(figure, top);
+    frame =
+      headY !== null ? (top - headY) * HEAD_AND_SHOULDERS : (top - box.min.y) * FALLBACK_FRACTION;
+    eyeY = top + frame * HEADROOM - frame / 2;
+    renderer.setSize(PORTRAIT_SIZE, PORTRAIT_SIZE, false);
+  }
   const distance = frame / 2 / Math.tan((FOV_DEG / 2) * (Math.PI / 180));
-  const camera = new PerspectiveCamera(FOV_DEG, 1, 0.05, 40);
+  const camera = new PerspectiveCamera(FOV_DEG, aspect, 0.05, 40);
   // The rigs are normalised to face -Z (the manifest's yaw offset is baked into
   // the prototype), which is also the way a player faces at yaw 0 — so -Z is the
   // front, and this is the view you get walking towards them.

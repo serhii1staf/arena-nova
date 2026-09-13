@@ -227,11 +227,18 @@ const LATTICE: Record<PieceKind, Lattice> = {
   stool: 'quarter',
   cabinet: 'quarter',
   barrel: 'quarter',
-  shelf: 'quarter',
-  torch: 'quarter',
   campfire: 'quarter',
   brazier: 'quarter',
-  lantern: 'quarter',
+  // Things that hang on a wall go on the wall's own lattice.
+  //
+  // On the half-cell lattice a shelf or a torch landed wherever you were pointing,
+  // which for anything meant to be fixed to a wall meant half inside it. The edge
+  // lattice is where walls are, so a shelf put on the side of a cell sits flat against
+  // the wall on that side and faces into the room — and if there is no wall there yet,
+  // it is still on the line one will take.
+  shelf: 'edge',
+  torch: 'edge',
+  lantern: 'edge',
 };
 
 /**
@@ -955,7 +962,13 @@ function buildGeometries(): Record<PieceKind, PieceGeo> {
   }
   lantern.box(0, 1.75, 0.02, 0.05, 0.06, 0.06);
   const lanternGlass = new Carpentry().box(0, 1.51, 0.1, 0.1, 0.2, 0.1).finish();
-  const lanternGlow = new Carpentry().box(0, 1.45, 0.1, 0.045, 0.07, 0.045).finish();
+  // A flame inside the glass, not a spark. Small enough to sit within the panes and
+  // large enough to be a light you can see across a room, which the first one was not.
+  const lanternGlow = new Carpentry()
+    .box(0, 1.44, 0.1, 0.055, 0.055, 0.055)
+    .box(0, 1.52, 0.1, 0.035, 0.045, 0.035)
+    .box(0, 1.58, 0.1, 0.02, 0.03, 0.02)
+    .finish();
 
   return {
     wall: { timber: wall.finish() },
@@ -1005,34 +1018,6 @@ function solidsOf(kind: PieceKind, open = false): Slab[] {
   const s = G / 2;
   const t = POST / 2;
   const full = (hx: number, cx = 0, y0 = 0, y1 = G): Slab => ({ cx, cz: 0, hx, hz: t, y0, y1 });
-  /**
-   * A sloped roof, described as bands rising towards the ridge.
-   *
-   * Without this a roof was solid from above and empty from the side, so its low
-   * edge could simply be walked into. Each band is only as tall as the roof is at
-   * that distance from the ridge, and the step-up allowance in `collide` is larger
-   * than the difference between neighbouring bands — which is what makes the same
-   * description block you at the eaves and let you walk up the slope.
-   */
-  const bands = (height: (f: number) => number, along: 'z' | 'x' = 'z', both = true): Slab[] => {
-    const out: Slab[] = [];
-    const n = 4;
-    for (const side of both ? [1, -1] : [1]) {
-      for (let i = 0; i < n; i++) {
-        const inner = 1 - (i + 1) / n;
-        const mid = 1 - (i + 0.5) / n;
-        void inner;
-        const c = side * s * mid;
-        const h = s / n;
-        out.push(
-          along === 'z'
-            ? { cx: 0, cz: c, hx: s, hz: h, y0: 0, y1: Math.max(0.05, height(mid)) }
-            : { cx: c, cz: 0, hx: h, hz: s, y0: 0, y1: Math.max(0.05, height(mid)) },
-        );
-      }
-    }
-    return out;
-  };
 
   switch (kind) {
     case 'wall':
@@ -1104,18 +1089,21 @@ function solidsOf(kind: PieceKind, open = false): Slab[] {
         { cx: -(s - 0.07), cz: 0, hx: 0.07, hz: s, y0, y1 },
       ];
     }
+    // Sloped roofs have no sides at all, and that is the considered answer rather than
+    // an omission.
+    //
+    // They were briefly filled in, as bands rising to the ridge, so that walking into
+    // one from the eaves was stopped. It stopped rather more than that: a roof stood on
+    // the ground as a canopy became a solid wedge you could not get under, because a
+    // band tall enough to be a roof over your head is also tall enough to block your
+    // chest. There is no ceiling collision anywhere in this game, so the choice is
+    // between "cannot walk under a roof" and "can put your head through one", and a
+    // shelter you cannot shelter in is the worse of the two. You can stand on them —
+    // `heightAt` gives them a real surface — and you can walk under them.
     case 'roofGable':
-      return bands((f) => RIDGE * (1 - f));
     case 'roofHip':
-      return [...bands((f) => RIDGE * (1 - f)), ...bands((f) => RIDGE * (1 - f), 'x')];
     case 'roofShed':
-      // One slope: low at -Z, full height at +Z, so the bands are not mirrored.
-      return [
-        { cx: 0, cz: -s * 0.75, hx: s, hz: s / 4, y0: 0, y1: RIDGE * 0.15 },
-        { cx: 0, cz: -s * 0.25, hx: s, hz: s / 4, y0: 0, y1: RIDGE * 0.4 },
-        { cx: 0, cz: s * 0.25, hx: s, hz: s / 4, y0: 0, y1: RIDGE * 0.65 },
-        { cx: 0, cz: s * 0.75, hx: s, hz: s / 4, y0: 0, y1: RIDGE * 0.9 },
-      ];
+      return [];
     // Furnishings are solid at their own size, so a table is furniture rather than
     // a hologram. Small enough that walking round them is never a nuisance.
     case 'bed':
@@ -1724,7 +1712,10 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   const surfaceAt = (p: Placed, x: number, z: number): number | null => {
     const s = G / 2;
     const [lx, lz] = toLocal(p, x, z);
-    if (Math.abs(lx) > s || Math.abs(lz) > s) return null;
+    // Bounded by the cell for the pieces that fill one, and by the piece's own solid
+    // parts for everything else — which is what the fall-through below does. A cell
+    // test here would claim a stool holds up the whole four-metre square around it.
+    if (LATTICE[p.kind] !== 'quarter' && (Math.abs(lx) > s || Math.abs(lz) > s)) return null;
     switch (p.kind) {
       case 'floor':
         return p.level + FLOOR_TOP;
@@ -1768,17 +1759,28 @@ export function createBuildSite(assets: AssetManager): BuildSite {
 
   const heightAt = (x: number, z: number, ground: number, fromY?: number): number => {
     if (placed.size === 0) return ground;
-    const list = columns.get(columnOf(x, z));
-    if (!list) return ground;
     // A surface far above the body asking is a ceiling, not a floor. Without this
     // limit, walking under a roof or a raised floor snapped the player onto it,
     // because the only question the query could answer was "what is the highest
     // thing in this column".
     const ceiling = fromY === undefined ? Infinity : fromY + STEP_UP;
     let h = ground;
-    for (const p of list) {
-      const surface = surfaceAt(p, x, z);
-      if (surface !== null && surface > h && surface <= ceiling) h = surface;
+    // The neighbouring columns as well as the point's own, which the collision pass
+    // already did and this did not. A bed is over two metres long and a table nearly
+    // two wide, so either can be bucketed in one column and reach well into the next —
+    // and standing on the part that reached across found nothing underfoot. That is why
+    // a bed could be walked through near its ends while being solid in the middle.
+    const gx = Math.round(x / G);
+    const gz = Math.round(z / G);
+    for (let ix = -1; ix <= 1; ix++) {
+      for (let iz = -1; iz <= 1; iz++) {
+        const list = columns.get(colKey(gx + ix, gz + iz));
+        if (!list) continue;
+        for (const p of list) {
+          const surface = surfaceAt(p, x, z);
+          if (surface !== null && surface > h && surface <= ceiling) h = surface;
+        }
+      }
     }
     return h;
   };

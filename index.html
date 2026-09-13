@@ -438,15 +438,49 @@
         max-width: 520px;
       }
       .invYou {
-        flex: 0 0 210px;
-        align-items: center;
-        max-width: 210px;
+        flex: 0 0 264px;
+        max-width: 264px;
+      }
+      .invHead {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        justify-content: space-between;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(150, 190, 230, 0.14);
       }
       .invTitle {
         color: rgba(190, 215, 240, 0.72);
         font-size: 11px;
         letter-spacing: 0.09em;
         text-transform: uppercase;
+      }
+      .invSlots {
+        overflow: hidden;
+        color: rgba(170, 200, 225, 0.55);
+        font-size: 10px;
+        text-align: right;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* The figure gets the room that is left, and is centred in it. A fixed height
+         would either crop a tall character or float a short one. */
+      .invBody {
+        display: flex;
+        overflow: hidden;
+        flex: 1;
+        align-items: center;
+        justify-content: center;
+        min-height: 0;
+        border-radius: 10px;
+        background:
+          radial-gradient(ellipse at 50% 82%, rgba(120, 190, 240, 0.14), transparent 62%),
+          rgba(8, 13, 21, 0.7);
+      }
+      .invBody img {
+        max-width: 100%;
+        max-height: 100%;
+        object-fit: contain;
       }
       #invGrid {
         display: grid;
@@ -583,24 +617,26 @@
         border-radius: 2px;
         background: #7ee0a8;
       }
-      #invHint {
-        color: rgba(170, 200, 225, 0.6);
-        font-size: 11px;
-      }
-      #invFace {
-        width: 104px;
-        height: 104px;
-        border-radius: 12px;
-        object-fit: cover;
-      }
       .invBars {
         display: flex;
         width: 100%;
         flex-direction: column;
-        gap: 6px;
+        gap: 5px;
+      }
+      .invMeterRow {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .invMeterLabel {
+        flex: 0 0 52px;
+        color: rgba(170, 200, 225, 0.62);
+        font-size: 10px;
       }
       .invMeter {
+        display: block;
         overflow: hidden;
+        flex: 1;
         height: 9px;
         border-radius: 5px;
         background: rgba(255, 255, 255, 0.08);
@@ -1411,21 +1447,44 @@
       questions; opened with I or by using a workbench.
     -->
     <div id="inventory">
+      <!--
+        Left: what you are carrying, in one block that fills the column. Middle: what
+        you could make. Right: the character, whole, with the meters under them.
+      -->
       <div class="invPane">
-        <div class="invTitle" data-i18n="inv.bag">Bag</div>
+        <div class="invHead">
+          <span class="invTitle" data-i18n="inv.bag">Bag</span>
+          <span id="invSlots" class="invSlots"></span>
+        </div>
         <div id="invGrid"></div>
       </div>
       <div class="invPane invWide">
-        <div class="invTitle" data-i18n="inv.craft">Crafting</div>
+        <div class="invHead">
+          <span class="invTitle" data-i18n="inv.craft">Crafting</span>
+          <span id="invHint" class="invSlots"></span>
+        </div>
         <div id="invRecipes"></div>
-        <div id="invHint"></div>
       </div>
       <div class="invPane invYou">
-        <img id="invFace" alt="" hidden />
+        <div class="invHead">
+          <span class="invTitle" id="invWho"></span>
+        </div>
+        <div class="invBody">
+          <img id="invFace" alt="" hidden />
+        </div>
         <div class="invBars">
-          <div class="invMeter"><span class="invMeterFill health" id="barHealth"></span></div>
-          <div class="invMeter"><span class="invMeterFill water" id="barWater"></span></div>
-          <div class="invMeter"><span class="invMeterFill food" id="barFood"></span></div>
+          <div class="invMeterRow">
+            <span class="invMeterLabel" data-i18n="inv.health">Health</span>
+            <span class="invMeter"><span class="invMeterFill health" id="barHealth"></span></span>
+          </div>
+          <div class="invMeterRow">
+            <span class="invMeterLabel" data-i18n="inv.water">Water</span>
+            <span class="invMeter"><span class="invMeterFill water" id="barWater"></span></span>
+          </div>
+          <div class="invMeterRow">
+            <span class="invMeterLabel" data-i18n="inv.food">Food</span>
+            <span class="invMeter"><span class="invMeterFill food" id="barFood"></span></span>
+          </div>
         </div>
         <div class="invClose" data-i18n="inv.close">I to close</div>
       </div>

@@ -948,7 +948,12 @@ try {
   });
   console.log(`on top: ${JSON.stringify(onTop)}`);
 
-  // ---- A roof is solid from the side too -----------------------------------
+  // ---- A roof can be walked under, and stood on ----------------------------
+  // The opposite of what this checked before, deliberately. Filling a roof in from the
+  // ground up did stop you walking into its eaves, and it also turned a roof stood on
+  // the ground into a solid wedge you could not shelter under. There is no ceiling
+  // collision in this game, so a shelter you cannot get inside is the worse of the two
+  // failures. It keeps its surface, so it is still something you climb and stand on.
   const roofSide = await page.evaluate(() => {
     const sc = window.arena.scene;
     const s = sc.buildSite;
@@ -962,18 +967,20 @@ try {
     const r = window.probe.piece('roofGable', 0);
     if (!r) return { placed: true, found: false };
     const ground = sc.world.floorHeightAt(r.x, r.z);
-    // At ground level under the ridge, where the roof is tall: solid.
+    // Standing underneath, at ground level: nothing pushes.
     const mid = { x: r.x, y: ground, z: r.z };
     s.collide(mid, 0.4);
-    // Up on the slope, a step below the surface: free to walk.
-    const up = { x: r.x, y: ground + s.heightAt(r.x, r.z, ground) - ground - 0.2, z: r.z };
-    const upFrom = { x: up.x, z: up.z };
-    s.collide(up, 0.4);
+    // And at the eaves, walking in.
+    const eave = { x: r.x, y: ground, z: r.z + 1.9 };
+    const eaveFrom = { x: eave.x, z: eave.z };
+    s.collide(eave, 0.4);
     return {
       placed: true,
       found: true,
-      blockedAtGround: +Math.hypot(mid.x - r.x, mid.z - r.z).toFixed(2),
-      freeOnSlope: +Math.hypot(up.x - upFrom.x, up.z - upFrom.z).toFixed(2),
+      pushedUnder: +Math.hypot(mid.x - r.x, mid.z - r.z).toFixed(2),
+      pushedAtEave: +Math.hypot(eave.x - eaveFrom.x, eave.z - eaveFrom.z).toFixed(2),
+      // The ridge is still a surface, so the roof has not simply become a ghost.
+      ridgeSurface: +(s.heightAt(r.x, r.z, ground, ground + 2.4) - ground).toFixed(2),
     };
   });
   console.log(`roof from the side: ${JSON.stringify(roofSide)}`);
@@ -1047,6 +1054,62 @@ try {
   await page.waitForTimeout(250);
   const regrabbed = await page.evaluate(() => window.arena.engine.input.isCursorFreed);
   console.log(`cursor: ${JSON.stringify(cursor)} -> ${JSON.stringify(freed)} -> ${regrabbed}`);
+
+  // ---- Furniture holds you up along its whole length -----------------------
+  // A bed is over two metres long and a table nearly two wide, so either can be
+  // bucketed in one grid column and reach well into the next. The floor query used to
+  // look in one column only, so the part that reached across had nothing underfoot —
+  // which is how a bed could be solid in the middle and walked through at the ends.
+  const furniture = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    const out = {};
+    for (const kind of ['bed', 'table', 'stool']) {
+      s.clear();
+      s.select(kind);
+      sc.player.spawn(820 + Math.random() * 4, 820, 0);
+      sc.player.pitch = 0;
+      sc.player.update(0.016);
+      sc.render(1, 0.016);
+      if (!s.place()) {
+        out[kind] = { placed: false };
+        continue;
+      }
+      const p = window.probe.piece(kind, 0);
+      if (!p) {
+        out[kind] = { placed: true, found: false };
+        continue;
+      }
+      const ground = sc.world.floorHeightAt(p.x, p.z);
+      // Asked from mid-jump, not from the ground.
+      //
+      // A table top is 0.77 m up and a step is 0.65: from standing, a table is
+      // correctly *not* the floor — you jump onto it, you do not stride onto it. Asking
+      // from the ground therefore says nothing about whether it holds you, only that it
+      // is taller than a step, which is by design.
+      const from = ground + 0.6;
+      // A cross well inside every one of these pieces whichever way it was turned, so
+      // the samples test the surface rather than the rotation.
+      // Twenty centimetres: inside a stool, which is only half a metre across, as well
+      // as inside the larger pieces. A wider cross tests the ground beside a stool and
+      // calls it a hole in the stool.
+      const cross = [0.2, -0.2].flatMap((d) => [
+        +(s.heightAt(p.x + d, p.z, ground, from) - ground).toFixed(2),
+        +(s.heightAt(p.x, p.z + d, ground, from) - ground).toFixed(2),
+      ]);
+      out[kind] = {
+        placed: true,
+        found: true,
+        top: +(s.heightAt(p.x, p.z, ground, from) - ground).toFixed(2),
+        cross,
+        // Well clear of it, the ground is the ground.
+        away: +(s.heightAt(p.x + 30, p.z + 30, ground, from) - ground).toFixed(2),
+      };
+    }
+    s.clear();
+    return out;
+  });
+  console.log(`furniture: ${JSON.stringify(furniture)}`);
 
   // ---- Removing exactly one, the one under the crosshair -------------------
   const removed = await page.evaluate(() => {
@@ -1228,8 +1291,11 @@ try {
     Math.abs(onTop.fromLevel - 1.1) < 0.02 &&
     onTop.pushedAtTop < 0.01 &&
     onTop.pushedLow > 0.1;
-  const roofSolidSideways =
-    roofSide.found === true && roofSide.blockedAtGround > 0.1 && roofSide.freeOnSlope < 0.01;
+  const roofSheltersYou =
+    roofSide.found === true &&
+    roofSide.pushedUnder < 0.01 &&
+    roofSide.pushedAtEave < 0.01 &&
+    roofSide.ridgeSurface > 1.8;
   // Shut it stops you; open you come out the far side; shut again it stops you once
   // more, so the state really is a state and not a one-way door.
   const doorsOpen =
@@ -1245,6 +1311,13 @@ try {
   // Freed means the game is not holding the mouse, and pressing again gives it back.
   const cursorToggles =
     cursor.freed === false && freed.freed === true && freed.locked === false && regrabbed === false;
+  // Every sample over a piece is held up, and the ground away from it is untouched.
+  const furnitureHolds = ['bed', 'table', 'stool'].every((k) => {
+    const f = furniture[k];
+    if (!f || f.found !== true) return false;
+    const heights = [f.top, ...f.cross];
+    return heights.every((h) => h > 0.2) && Math.abs(f.away) < 0.01;
+  });
   const labelCentred =
     centred !== null && Math.abs(centred.boxOffset) < 1.5 && Math.abs(centred.textOffset) < 1.5;
   const removesOne =
@@ -1350,9 +1423,9 @@ try {
     `ground=${onTop.fromGround} up=${onTop.fromLevel} pushTop=${onTop.pushedAtTop} pushLow=${onTop.pushedLow}`,
   );
   line(
-    'roof is solid from the side:',
-    roofSolidSideways,
-    `ground=${roofSide.blockedAtGround} slope=${roofSide.freeOnSlope}`,
+    'roof shelters, still standable:',
+    roofSheltersYou,
+    `under=${roofSide.pushedUnder} eave=${roofSide.pushedAtEave} ridge=${roofSide.ridgeSurface}`,
   );
   line(
     'doors open and shut:',
@@ -1360,6 +1433,11 @@ try {
     `shut=${door2.shut} open=${door2.opened} shutAgain=${door2.shutAgain}`,
   );
   line('Alt frees the cursor:', cursorToggles, `freed=${freed.freed} locked=${freed.locked}`);
+  line(
+    'furniture holds you up:',
+    furnitureHolds,
+    ['bed', 'table', 'stool'].map((k) => `${k}=${furniture[k]?.top}`).join(' '),
+  );
   line('label centred on the bar:', labelCentred, `off by ${centred?.textOffset}px`);
   line(
     'X removes exactly the aimed one:',
@@ -1399,7 +1477,8 @@ try {
     gableFits &&
     groupsWork &&
     topsStandable &&
-    roofSolidSideways &&
+    roofSheltersYou &&
+    furnitureHolds &&
     doorsOpen &&
     cursorToggles &&
     labelCentred &&

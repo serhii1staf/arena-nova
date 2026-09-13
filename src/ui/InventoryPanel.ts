@@ -1,9 +1,10 @@
-import { inventory } from '../game/Inventory.ts';
+import { SLOTS, inventory } from '../game/Inventory.ts';
+import { savedName } from '../net/identity.ts';
 import { ITEMS, ITEM_ORDER, itemGeometry, type ItemId } from '../game/Items.ts';
 import { RECIPES, blockedBy, craft, recommended, type Recipe } from '../game/Recipes.ts';
 import { savedSkin } from '../player/skins.ts';
 import { renderIcons } from './IconRenderer.ts';
-import { portraitFor } from './Portraits.ts';
+import { bodyFor } from './Portraits.ts';
 import { t } from './i18n.ts';
 
 /**
@@ -171,7 +172,9 @@ export class InventoryPanel {
    */
   private drawFace(): void {
     if (!this.face || this.face.getAttribute('src')) return;
-    const url = portraitFor(savedSkin());
+    // The whole character, not a head crop blown up to fill the column — which is
+    // what made this corner of the panel look wrong.
+    const url = bodyFor(savedSkin());
     if (!url) return;
     this.face.src = url;
     this.face.hidden = false;
@@ -333,6 +336,11 @@ export class InventoryPanel {
     // --- The player ---
     this.drawFace();
     if (this.hint) this.hint.textContent = this.atBench ? t('inv.atBench') : t('inv.noBench');
+    // How full the bag is, which is the one number the grid cannot show by itself.
+    const slots = document.getElementById('invSlots');
+    if (slots) slots.textContent = `${inv.used()} / ${SLOTS}`;
+    const who = document.getElementById('invWho');
+    if (who) who.textContent = savedName();
     this.drawBars();
   }
 
