@@ -329,6 +329,9 @@ function mountOffset(kind: PieceKind): number {
   return kind === 'cabinet' ? wall + 0.22 : wall;
 }
 
+/** How far a cupboard's front face stands off the wall line it backs onto. */
+const CABINET_FACE = POST / 2 + 0.04 + 0.22 + 0.22;
+
 /**
  * Fixtures that hang at whatever height you aim at, rather than standing on a floor.
  *
@@ -417,7 +420,11 @@ export interface BuildSite {
     eye: Vector3,
     forward: Vector3,
     body: Vector3,
-    floorAt: (x: number, z: number) => number,
+    /**
+     * The composed surface at a point, optionally ignoring anything more than a step above
+     * `fromY`. The bound is what keeps a roof from being treated as the floor.
+     */
+    floorAt: (x: number, z: number, fromY?: number) => number,
   ): void;
   /**
    * Floor height at a point, taking placed pieces into account.
@@ -1782,17 +1789,55 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         const t = chosen.t;
         const hx = eye.x + forward.x * t;
         const hz = eye.z + forward.z * t;
+        /**
+         * Extra clearance when a cupboard already occupies the spot on this wall.
+         *
+         * A fixture measures its stand-off from the wall line, and a cupboard is a box a
+         * quarter of a metre deep sitting in front of that same line — so a lantern hung
+         * where a cupboard already stands ended up inside it. The wall is still what the
+         * fixture is mounted to; it is just mounted proud of what is in the way.
+         *
+         * Only the cupboard, and only when it is really there: the check is against the
+         * pieces, so an empty wall gives an ordinary flush mount.
+         */
+        const clearCabinet = (fx: number, fz: number, fy: number): number => {
+          if (!HUNG.has(selected)) return 0;
+          const gx = Math.round(fx / G);
+          const gz = Math.round(fz / G);
+          for (let ix = -1; ix <= 1; ix++) {
+            for (let iz = -1; iz <= 1; iz++) {
+              const list = columns.get(colKey(gx + ix, gz + iz));
+              if (!list) continue;
+              for (const p of list) {
+                if (p.kind !== 'cabinet') continue;
+                // A cupboard is 1.12 m wide and 1.8 m tall; anything inside that footprint
+                // and within its height is in the way.
+                if (Math.hypot(p.x - fx, p.z - fz) > 0.9) continue;
+                if (fy < p.level - 0.3 || fy > p.level + 1.9) continue;
+                return CABINET_FACE - mountOffset(selected);
+              }
+            }
+          }
+          return 0;
+        };
+        const hy = eye.y + forward.y * t;
         if (chosen.axis === 'x') {
           // The wall runs along Z. Slide along it in Z; stand off it in X, on the side
           // the ray came from, which is the side the player is on.
           const side = forward.x >= 0 ? -1 : 1;
-          out.x = Math.round((hx - h) / G) * G + h + side * mountOffset(selected);
-          out.z = Math.round(hz / STEP_ALONG) * STEP_ALONG;
+          const line = Math.round((hx - h) / G) * G + h;
+          const along = Math.round(hz / STEP_ALONG) * STEP_ALONG;
+          out.x = line + side * mountOffset(selected);
+          out.z = along;
+          out.x += side * clearCabinet(line + side * CABINET_FACE, along, hy);
           return side > 0 ? 1 : 3;
         }
         const side = forward.z >= 0 ? -1 : 1;
-        out.z = Math.round((hz - h) / G) * G + h + side * mountOffset(selected);
-        out.x = Math.round(hx / STEP_ALONG) * STEP_ALONG;
+        const line = Math.round((hz - h) / G) * G + h;
+        const along = Math.round(hx / STEP_ALONG) * STEP_ALONG;
+        out.z = line + side * mountOffset(selected);
+        out.x = along;
+        out.z += side * clearCabinet(along, line + side * CABINET_FACE, hy);
         return side > 0 ? 0 : 2;
       }
 
@@ -1835,8 +1880,21 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     }
     const cx = Math.round(raw.x / G) * G;
     const cz = Math.round(raw.z / G) * G;
-    const ox = raw.x - cx;
-    const oz = raw.z - cz;
+    let ox = raw.x - cx;
+    let oz = raw.z - cz;
+    // Near the middle of a cell, where you are inside it, the offset carries no information
+    // about which side was meant — so the direction you are facing is used instead.
+    //
+    // This is why a gable could not be placed. A gable belongs two tiers up, which means
+    // looking up steeply, and looking up steeply puts the aim point less than a metre in
+    // front of the character: both offsets come out near zero, the side falls to a tie-break
+    // plus whatever rotation the tool had accumulated, and the piece appears on an arbitrary
+    // edge of the square you are standing in rather than on the wall you are looking at. It
+    // was being placed every time; just never where it was aimed.
+    if (Math.hypot(ox, oz) < 0.7) {
+      ox = forward.x;
+      oz = forward.z;
+    }
     let side: number;
     if (Math.abs(ox) >= Math.abs(oz)) side = ox >= 0 ? 0 : 2;
     else side = oz >= 0 ? 1 : 3;
@@ -1996,7 +2054,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     eye: Vector3,
     forward: Vector3,
     body: Vector3,
-    floorAt: (x: number, z: number) => number,
+    floorAt: (x: number, z: number, fromY?: number) => number,
   ): void => {
     reachable = findReachable(body, forward);
     if (!active) {
@@ -2035,11 +2093,17 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     // ceiling was built over next door. Crossing the tier's own plane puts it directly
     // overhead, which is where anyone looking up is pointing.
     if (tier > 0 && forward.y > 0.05) {
-      const tierY = floorAt(body.x, body.z) + tier * step;
+      // The level the player is standing on, not the highest thing in their column: under a
+      // roof the latter is the roof, and the tier would then be measured from it.
+      const tierY = floorAt(body.x, body.z, body.y) + tier * step;
       const tPlane = (tierY - eye.y) / forward.y;
       if (tPlane > aimNear * 0.2 && tPlane < hit) hit = Math.max(aimNear * 0.2, tPlane);
     }
     aimHit = hit;
+    // The height the crosshair landed at, kept before `at.y` is overwritten with the slot's
+    // own height. This is what bounds the floor query: surfaces above where you are pointing
+    // are not the floor you meant, and a roof is the case that proved it.
+    const hitY = eye.y + forward.y * hit;
     at.copy(eye).addScaledVector(forward, hit);
     atTurn = snap(at, at, eye, forward);
 
@@ -2047,7 +2111,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     // the target. Measuring the aim height against the ground instead mixed the two
     // together: eye height is about 1.7 m, so looking straight ahead already read as
     // most of a tier, and whether it tipped over depended on the slope in front.
-    const ground = floorAt(at.x, at.z);
+    const ground = floorAt(at.x, at.z, hitY);
     // A hung fixture takes its height from the crosshair on the wall; everything else
     // takes a tier off the ground. Two different questions, and they were being answered
     // by one formula — see `hungHeight`.
@@ -2412,6 +2476,8 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       const x = eye.x + forward.x * t;
       const y = eye.y + forward.y * t;
       const z = eye.z + forward.z * t;
+      // Unbounded here, and correctly so: this asks "is this point inside the ground",
+      // which is a question about the surface at that point whatever height it is at.
       return y <= floorAt(x, z) || blocksCamera(x, y, z);
     };
 

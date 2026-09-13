@@ -362,10 +362,20 @@ export class ExteriorScene implements GameScene {
       // The height a piece lands on includes what has already been built, not just the
       // terrain. Asking the world alone is why a bed put down on a floor sank into it and
       // a lantern could not be stood on a table: the preview was measuring the ground
-      // under the floor rather than the floor. Unbounded on purpose — for placing, the
-      // top of whatever is there is exactly what you want.
-      this.buildSite.update(this.aimFrom, this.aimDir, this.player.feetPosition, (x, z) =>
-        this.buildSite.heightAt(x, z, this.world.floorHeightAt(x, z)),
+      // under the floor rather than the floor.
+      //
+      // Bounded from above by whatever the caller is asking about, and that bound is not
+      // optional. Unbounded, this query answers "the highest thing in this column" — which
+      // under a roof is *the roof*. So a room with a roof on it had every piece placed onto
+      // the roof instead of the floor, and taking the roof off made furniture work again.
+      // That was the whole of the "I put a roof on and now nothing can be placed inside"
+      // report. `fromY` comes from where the crosshair actually landed, so a table you are
+      // aiming at still counts and a roof four metres overhead does not.
+      this.buildSite.update(
+        this.aimFrom,
+        this.aimDir,
+        this.player.feetPosition,
+        (x, z, fromY) => this.buildSite.heightAt(x, z, this.world.floorHeightAt(x, z), fromY),
       );
     }
   }

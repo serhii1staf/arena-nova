@@ -92,8 +92,15 @@ const CLUMP_BUDGET = 3;
  */
 const CARPET_CELL = 32;
 const CARPET_RADIUS = 1;
-/** A carpet cell is a tenth of a clump cell's area, so several fit in one frame. */
-const CARPET_BUDGET = 4;
+/**
+ * One cell a frame, not four.
+ *
+ * A saturated carpet cell is a thousand instances, and four of them in a frame is four
+ * thousand matrix compositions plus four `InstancedMesh` allocations — which is a visible
+ * hitch, and the reason the world felt worse after this layer was added than before it. The
+ * cells are small enough that one a frame still fills the ring in well under a second.
+ */
+const CARPET_BUDGET = 1;
 
 type Layer =
   | 'tree'
@@ -174,10 +181,13 @@ const SPACING: Record<Layer, number> = {
   /**
    * Ground cover, near field only. See `CARPET_CELL` for why this can be sub-metre.
    *
-   * One metre, measured down from 1.4: at 1.4 with saturated density the gaps were still
-   * over a metre, and a gap over a stride is what reads as a bare patch.
+   * Measured down from 1.4, where the gaps were still over a metre — a gap over a stride is
+   * what reads as a bare patch. Then back up from 1.0, which measured 0.42 m median: well
+   * past the point of diminishing returns, and a quarter more instances than needed for it.
+   * At 1.15 the arithmetic puts the median around half a metre, which is a lawn, for 760
+   * instances a cell instead of a thousand.
    */
-  carpet: 1,
+  carpet: 1.15,
   rock: 24,
   log: 52,
 };
@@ -809,14 +819,15 @@ export function createScatter(
     // counted in 256 m chunks and would reach kilometres out here.
     const gcx = Math.floor(position.x / CLUMP_CELL);
     const gcz = Math.floor(position.z / CLUMP_CELL);
+    // Only the cell underfoot is primed. The other eight stream in over the following
+    // frames, which is the difference between arriving in the world and arriving in the
+    // world after a stall: priming all nine is nine thousand instances built before the
+    // first frame is drawn, on top of everything else a scene change already does. The one
+    // cell you are standing in is the only one that would be noticed missing.
     const rcx = Math.floor(position.x / CARPET_CELL);
     const rcz = Math.floor(position.z / CARPET_CELL);
-    for (let dz = -CARPET_RADIUS; dz <= CARPET_RADIUS; dz++) {
-      for (let dx = -CARPET_RADIUS; dx <= CARPET_RADIUS; dx++) {
-        buildCarpetCell(rcx + dx, rcz + dz);
-        carpetPending.delete(carpetKey(rcx + dx, rcz + dz));
-      }
-    }
+    buildCarpetCell(rcx, rcz);
+    carpetPending.delete(carpetKey(rcx, rcz));
     for (let dz = -CLUMP_RADIUS; dz <= CLUMP_RADIUS; dz++) {
       for (let dx = -CLUMP_RADIUS; dx <= CLUMP_RADIUS; dx++) {
         buildClumpCell(gcx + dx, gcz + dz);
