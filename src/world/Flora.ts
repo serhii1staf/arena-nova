@@ -104,13 +104,39 @@ function buildTrunk(
   return { geo, top: spine[spine.length - 1]! };
 }
 
-/** Irregular, squashed canopy lobe. */
+/**
+ * Irregular, squashed canopy lobe.
+ *
+ * Subdivided once, which is the whole difference between foliage and a crystal. At detail 0
+ * an icosahedron is twenty flat faces, and twenty flat faces the size of a canopy lobe read
+ * as a cut gem — which is what "the trees look like furniture" was describing. Eighty faces
+ * is enough that the silhouette is round while the flat shading still gives the faceted,
+ * stylised look the rest of the world has.
+ *
+ * The extra triangles are paid for by using fewer, larger lobes per crown, and the far LOD
+ * does not use this at all — it has its own cheap stand-in, which is where the savings that
+ * matter live.
+ *
+ * Displacement is per-vertex and radial rather than a whole-lobe scale. Scaling the lobe
+ * kept it a smooth ellipsoid however much it was squashed; pushing each vertex in and out
+ * along its own normal is what makes an outline look like leaves rather than like a ball.
+ */
 function canopyLobe(radius: number, rng: () => number, flatten: number): BufferGeometry {
-  const lobe = new IcosahedronGeometry(radius, 0);
+  const lobe = new IcosahedronGeometry(radius, 1);
   const p = lobe.attributes.position;
+  const tmp = new Vector3();
+  // One offset per *direction*, not per vertex: subdivision leaves coincident vertices on
+  // shared edges, and displacing those independently tears visible cracks in the surface.
+  const seen = new Map<string, number>();
   for (let v = 0; v < p.count; v++) {
-    const k = 0.82 + rng() * 0.36;
-    p.setXYZ(v, p.getX(v) * k, p.getY(v) * k * flatten, p.getZ(v) * k);
+    tmp.set(p.getX(v), p.getY(v), p.getZ(v));
+    const k = `${tmp.x.toFixed(3)}|${tmp.y.toFixed(3)}|${tmp.z.toFixed(3)}`;
+    let f = seen.get(k);
+    if (f === undefined) {
+      f = 0.76 + rng() * 0.42;
+      seen.set(k, f);
+    }
+    p.setXYZ(v, tmp.x * f, tmp.y * f * flatten, tmp.z * f);
   }
   lobe.computeVertexNormals();
   return lobe;
@@ -157,18 +183,21 @@ export function buildJungleTree(seed: number): BufferGeometry {
 
   // Overlapping lobes clustered around the crown, reaching down toward the
   // branches so the canopy and trunk read as one tree.
-  const blobs = 7 + Math.floor(rng() * 3);
-  for (let i = 0; i < blobs; i++) {
-    const lobe = canopyLobe(2.1 + rng() * 1.6, rng, 0.78);
-    const a = (i / blobs) * Math.PI * 2 + rng() * 0.8;
-    const rad = 0.5 + rng() * 2.6;
-    lobe.translate(
-      top.x + Math.cos(a) * rad,
-      h * 0.82 + rng() * 2.8,
-      top.z + Math.sin(a) * rad,
-    );
+  // Five larger lobes rather than eight small ones, now that each is subdivided: the same
+  // triangle budget spent on roundness instead of on count. Arranged as a dome — a wide
+  // ring low down and a smaller cap above it — because a crown is not a cluster of equal
+  // balls, it is broad at the shoulders and tapers.
+  const ring = 3;
+  for (let i = 0; i < ring; i++) {
+    const lobe = canopyLobe(2.9 + rng() * 1.1, rng, 0.72);
+    const a = (i / ring) * Math.PI * 2 + rng() * 0.5;
+    const rad = 1.7 + rng() * 0.9;
+    lobe.translate(top.x + Math.cos(a) * rad, h * 0.8 + rng() * 0.9, top.z + Math.sin(a) * rad);
     parts.push(paint(lobe, leaves[i % leaves.length]!));
   }
+  const cap = canopyLobe(2.7 + rng() * 0.8, rng, 0.66);
+  cap.translate(top.x, h * 0.96 + rng() * 0.7, top.z);
+  parts.push(paint(cap, leaves[2]!));
   return mergeParts(parts);
 }
 
@@ -245,18 +274,24 @@ export function buildSakura(seed: number): BufferGeometry {
   // A full, rounded blossom cloud that sits down *onto* the branches — a thin
   // disc floating above a bare trunk reads as a lollipop, not a cherry tree.
   // The lowest blobs start below the branch roots so nothing brown shows through.
-  const blobs = 10 + Math.floor(rng() * 4);
-  for (let i = 0; i < blobs; i++) {
-    const lobe = canopyLobe(1.8 + rng() * 1.3, rng, 0.8);
-    const a = (i / blobs) * Math.PI * 2 + rng() * 0.7;
-    const rad = 0.5 + rng() * 2.1;
+  // A wide skirt of blossom with a cap over it, rather than a dozen equal puffs. Sakura are
+  // broader than they are tall and the flowers hang at the ends of the branches, so the ring
+  // sits out at the branch tips and only the cap is central.
+  const ring = 3;
+  for (let i = 0; i < ring; i++) {
+    const lobe = canopyLobe(2.5 + rng() * 0.9, rng, 0.7);
+    const a = (i / ring) * Math.PI * 2 + rng() * 0.45;
+    const rad = 1.6 + rng() * 0.8;
     lobe.translate(
       top.x + Math.cos(a) * rad,
-      branchBase + 0.35 + rng() * 2.2,
+      branchBase + 0.5 + rng() * 0.7,
       top.z + Math.sin(a) * rad,
     );
     parts.push(paint(lobe, blossom[i % blossom.length]!));
   }
+  const cap = canopyLobe(2.3 + rng() * 0.7, rng, 0.6);
+  cap.translate(top.x, branchBase + 1.5 + rng() * 0.6, top.z);
+  parts.push(paint(cap, blossom[2]!));
   return mergeParts(parts);
 }
 
@@ -306,12 +341,13 @@ export function buildAcacia(seed: number): BufferGeometry {
     parts.push(paint(br, bark, WOOD_SWAY));
   }
 
-  // Very flat canopy discs, layered into an umbrella.
-  for (let i = 0; i < 4; i++) {
-    const lobe = canopyLobe(2.4 + rng() * 1.5, rng, 0.24);
+  // Very flat canopy discs, layered into an umbrella. Three rather than four now that each
+  // is subdivided, so the crown got rounder without the tree getting dearer than it was.
+  for (let i = 0; i < 3; i++) {
+    const lobe = canopyLobe(2.7 + rng() * 1.4, rng, 0.24);
     const a = rng() * Math.PI * 2;
     const rad = rng() * 2.2;
-    lobe.translate(top.x + Math.cos(a) * rad, h + 0.5 + i * 0.35, top.z + Math.sin(a) * rad);
+    lobe.translate(top.x + Math.cos(a) * rad, h + 0.5 + i * 0.4, top.z + Math.sin(a) * rad);
     parts.push(paint(lobe, leaves[i % 2]!));
   }
   return mergeParts(parts);
