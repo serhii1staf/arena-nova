@@ -338,8 +338,22 @@ export class ExteriorScene implements GameScene {
     // take the colour of the air rather than carrying a palette of their own.
     this.air.nightFactor = this.dayNight.nightFactor;
     this.air.mist = this.dayNight.mistAmount;
-    this.air.rain = this.dayNight.rainAmount;
-    this.air.snow = this.dayNight.snowAmount;
+    // Under a roof it stops raining on you.
+    //
+    // The particle fields are a box of drops that follows the camera, so standing indoors
+    // put the weather inside the room with you — rain fell through the ceiling and landed on
+    // the floor. There is no per-drop collision to add here and there should not be: what is
+    // wanted is not drops stopping at the ceiling, it is no drops in the room at all.
+    //
+    // Shelter is sampled straight up from the head against the same predicate the camera and
+    // the squad highlight use, so anything built counts and terrain does not — standing at the
+    // foot of a cliff is not being indoors. Eased rather than switched, or walking through a
+    // doorway would snap the storm on and off.
+    const want = this.sheltered(p) ? 1 : 0;
+    this.shelter += (want - this.shelter) * Math.min(1, frameDelta * 4);
+    const dry = 1 - this.shelter;
+    this.air.rain = this.dayNight.rainAmount * dry;
+    this.air.snow = this.dayNight.snowAmount * dry;
     this.air.snowCover = this.dayNight.snowCover;
     this.air.wetness = this.dayNight.wetness;
     this.air.air.copy(this.fog.color);
@@ -456,6 +470,25 @@ export class ExteriorScene implements GameScene {
    * anything asking the question, including the probe, asks this rather than
    * reassembling the same expression and drifting from it.
    */
+  /** How covered the player is, 0 to 1. Eased, so a doorway is a fade rather than a switch. */
+  private shelter = 0;
+
+  /**
+   * Whether something built stands over the player's head.
+   *
+   * Sampled upward in half-metre steps to a storey and a half. Only what has been built
+   * counts: `buildSite.blocksCamera` rather than the terrain-inclusive test, because a cliff
+   * overhead is not a roof and a player at the foot of one should still get rained on.
+   */
+  private sheltered(feet: Vector3): boolean {
+    const site = this.buildSite;
+    if (!site) return false;
+    for (let h = 2.1; h <= 6.5; h += 0.5) {
+      if (site.blocksCamera(feet.x, feet.y + h, feet.z)) return true;
+    }
+    return false;
+  }
+
   readonly sightBlocked = (x: number, y: number, z: number): boolean =>
     y < surfaceGroundHeightAt(x, z) || (this.buildSite?.blocksCamera(x, y, z) ?? false);
 

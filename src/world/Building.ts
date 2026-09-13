@@ -79,6 +79,18 @@ const RIDGE = BUILD_GRID * 0.75;
 const FLOOR_TOP = 0.3;
 const FOUNDATION_TOP = 0.42;
 const DECK_TOP = 0.26;
+/**
+ * A ceiling's walking surface, and how far its boards hang below that.
+ *
+ * A ceiling is not a floor with a different name. A floor is a deck you stand on and its
+ * boards sit *above* its origin; a ceiling is the same deck seen from underneath, so its
+ * exposed joists hang *below* the level it is placed at — which is what makes a room read as
+ * closed rather than as having another floor floating over it. It is still walkable on top,
+ * because a ceiling is the next storey's floor and pretending otherwise would mean a
+ * two-storey house needed two pieces in the same slot.
+ */
+const CEIL_TOP = 0.2;
+const CEIL_DROP = 0.24;
 /** Height of a half wall, and of a railing or parapet. */
 const HALF_WALL = 1.6;
 const RAIL_TOP = 1.1;
@@ -130,13 +142,21 @@ interface FireGlow {
  * a light it cannot have is work for nothing.
  */
 const FIRELIGHT: Partial<Record<PieceKind, FireGlow>> = {
-  campfire: { y: 0.5, reach: 13, power: 26 },
-  brazier: { y: 1.05, reach: 11, power: 20 },
-  torch: { y: 2.0, reach: 9, power: 14 },
-  lantern: { y: 1.5, reach: 8, power: 11 },
+  campfire: { y: 0.5, reach: 22, power: 34 },
+  brazier: { y: 1.05, reach: 19, power: 27 },
+  torch: { y: 2.0, reach: 16, power: 20 },
+  lantern: { y: 1.5, reach: 15, power: 17 },
 };
-/** Beyond this a fire is not worth a light from the pool. */
-const LIGHT_RANGE = 16;
+/**
+ * Beyond this a fire is not worth a light from the pool.
+ *
+ * Raised from 16 m along with every fire's own reach. Sixteen metres sounds generous and is
+ * not: a building four cells across is sixteen metres on its own, so a lamp in one corner
+ * had already faded to nothing by the opposite corner — which is the report. Twenty-eight
+ * covers a seven-cell room, and the cost of raising it is nil, because the pool is still four
+ * lights however many fires come into range.
+ */
+const LIGHT_RANGE = 28;
 /** How far a door swings open, in radians. */
 const DOOR_SWING = Math.PI * 0.52;
 /** How close you have to be for a door to offer itself. */
@@ -169,6 +189,13 @@ export type PieceKind =
   | 'foundation'
   | 'ramp'
   | 'stairs'
+  | 'ceiling'
+  | 'chair'
+  | 'chest'
+  | 'bench'
+  | 'rug'
+  | 'crate'
+  | 'planter'
   | 'roofGable'
   | 'roofHip'
   | 'roofShed'
@@ -189,7 +216,7 @@ export type PieceKind =
   | 'lantern';
 
 export interface Category {
-  id: 'walls' | 'frame' | 'roof' | 'props';
+  id: 'walls' | 'frame' | 'roof' | 'props' | 'interior';
   pieces: readonly PieceKind[];
 }
 
@@ -216,8 +243,22 @@ export const CATEGORIES: readonly Category[] = [
       'railing',
     ],
   },
-  { id: 'frame', pieces: ['floor', 'foundation', 'ramp', 'stairs', 'pillar', 'beam'] },
+  {
+    id: 'frame',
+    pieces: ['floor', 'ceiling', 'foundation', 'ramp', 'stairs', 'pillar', 'beam'],
+  },
   { id: 'roof', pieces: ['roofGable', 'roofHip', 'roofShed', 'roofFlat'] },
+  /**
+   * A second furnishings group, because the first one is full.
+   *
+   * The hotbar is ten slots and the original props group uses all ten, so more furniture
+   * could not simply be appended — it would have been unreachable. Splitting rather than
+   * widening the bar: ten is already as many as can be reached by number key.
+   */
+  {
+    id: 'interior',
+    pieces: ['chair', 'bench', 'chest', 'crate', 'rug', 'planter'],
+  },
   {
     id: 'props',
     pieces: [
@@ -265,6 +306,13 @@ const LATTICE: Record<PieceKind, Lattice> = {
   roofGable: 'cell',
   roofHip: 'cell',
   roofShed: 'cell',
+  ceiling: 'cell',
+  chair: 'quarter',
+  chest: 'quarter',
+  bench: 'quarter',
+  rug: 'quarter',
+  crate: 'quarter',
+  planter: 'quarter',
   roofFlat: 'cell',
   pillar: 'corner',
   bed: 'quarter',
@@ -302,6 +350,12 @@ const ROTATABLE = new Set<PieceKind>([
   'shelf',
   'stool',
   'barrel',
+  'chair',
+  'chest',
+  'bench',
+  'rug',
+  'crate',
+  'planter',
 ]);
 
 /** Kinds that can be opened and shut. */
@@ -928,6 +982,103 @@ function buildGeometries(): Record<PieceKind, PieceGeo> {
     roofFlat.box(side * (s - 0.07), DECK_TOP + PARAPET / 2, 0, 0.07, PARAPET / 2, s);
   }
 
+  // --- Second furnishings group -------------------------------------------------------
+  // All built from the same box primitive as the rest, so they share the timber material and
+  // cost one instanced mesh each however many are placed.
+
+  // Chair: a stool with a back, which is what makes a table worth sitting at.
+  const chair = new Carpentry();
+  chair.box(0, 0.44, 0, 0.24, 0.035, 0.24);
+  for (const [sx, sz] of [
+    [-0.19, -0.19],
+    [0.19, -0.19],
+    [-0.19, 0.19],
+    [0.19, 0.19],
+  ]) {
+    chair.box(sx, 0.22, sz, 0.035, 0.22, 0.035);
+  }
+  // Back posts carry on up past the seat, with two slats between them.
+  for (const sx of [-0.19, 0.19]) chair.box(sx, 0.7, 0.19, 0.035, 0.26, 0.035);
+  for (const y of [0.62, 0.84]) chair.box(0, y, 0.19, 0.19, 0.05, 0.028);
+
+  // Bench: seating for a long table, or a porch.
+  const bench = new Carpentry();
+  for (let i = 0; i < 3; i++) bench.box(0, 0.42, -0.16 + i * 0.16, 0.78, 0.035, 0.075);
+  for (const sx of [-0.62, 0.62]) {
+    bench.box(sx, 0.21, 0, 0.05, 0.21, 0.2);
+    bench.box(sx, 0.03, 0, 0.09, 0.03, 0.24);
+  }
+  bench.box(0, 0.3, 0, 0.6, 0.04, 0.05);
+
+  // Chest: a lidded box with iron banding. Storage is not implemented yet and this does not
+  // pretend otherwise — it is furniture that looks like storage, and the lid is modelled shut.
+  const chest = new Carpentry();
+  chest.box(0, 0.24, 0, 0.42, 0.24, 0.28);
+  chest.box(0, 0.52, 0, 0.43, 0.06, 0.29);
+  for (const sx of [-0.28, 0.28]) chest.box(sx, 0.26, 0, 0.035, 0.28, 0.3);
+  chest.box(0, 0.46, -0.29, 0.07, 0.06, 0.02);
+
+  // Crate: a slatted box, for stacking in a corner.
+  const crate = new Carpentry();
+  for (const [sx, sz] of [
+    [0, -0.3],
+    [0, 0.3],
+  ]) {
+    for (let i = 0; i < 3; i++) crate.box(sx, 0.1 + i * 0.22, sz, 0.3, 0.075, 0.025);
+  }
+  for (const sx of [-0.3, 0.3]) {
+    for (let i = 0; i < 3; i++) crate.box(sx, 0.1 + i * 0.22, 0, 0.025, 0.075, 0.3);
+  }
+  for (const [cx, cz] of [
+    [-0.29, -0.29],
+    [0.29, -0.29],
+    [-0.29, 0.29],
+    [0.29, 0.29],
+  ]) {
+    crate.box(cx, 0.3, cz, 0.04, 0.3, 0.04);
+  }
+  crate.box(0, 0.58, 0, 0.3, 0.025, 0.3);
+
+  // Rug: a woven mat, so a floor of bare boards has something on it. Deliberately almost
+  // flat — it is decoration and you walk over it, not onto it.
+  const rug = new Carpentry();
+  rug.box(0, 0.012, 0, 1.05, 0.012, 0.72);
+  for (const sz of [-0.68, 0.68]) rug.box(0, 0.02, sz, 1.05, 0.018, 0.05);
+  for (const sx of [-1.01, 1.01]) rug.box(sx, 0.02, 0, 0.05, 0.018, 0.72);
+
+  // Planter: a trough of earth. The crops themselves are not implemented, and this is the
+  // box they will go in when they are — put in now because a room wants one either way.
+  const planter = new Carpentry();
+  for (const sz of [-0.34, 0.34]) planter.box(0, 0.2, sz, 0.6, 0.2, 0.035);
+  for (const sx of [-0.6, 0.6]) planter.box(sx, 0.2, 0, 0.035, 0.2, 0.34);
+  planter.box(0, 0.05, 0, 0.6, 0.05, 0.34);
+  // Soil, sitting just below the rim.
+  planter.box(0, 0.32, 0, 0.55, 0.06, 0.3);
+  for (const sx of [-0.62, 0.62]) planter.box(sx, 0.42, 0, 0.05, 0.03, 0.36);
+
+  // Ceiling: boarding with its joists exposed underneath, because that is the face you see.
+  //
+  // Modelled downward from the slot level rather than upward like a floor. Placed overhead it
+  // closes a room: the boards are the flat surface above your head and the beams cross below
+  // them, which is what a ceiling looks like from a room. Walkable on top, so the same piece
+  // is the next storey's floor.
+  const ceiling = new Carpentry();
+  {
+    // The boarding itself, laid across the whole cell.
+    ceiling.box(0, CEIL_TOP - b, 0, s, b, s);
+    // Joists hanging below it, spaced so a lantern hook has something to sit between.
+    const bays = 5;
+    for (let i = 0; i < bays; i++) {
+      const pitch = G / bays;
+      ceiling.box(-s + (i + 0.5) * pitch, -CEIL_DROP / 2, 0, 0.055, CEIL_DROP / 2, s);
+    }
+    // A trimmer round the edge, so the underside has an outline instead of ending in air.
+    for (const side of [1, -1]) {
+      ceiling.box(0, -CEIL_DROP / 2, side * (s - 0.05), s, CEIL_DROP / 2, 0.05);
+      ceiling.box(side * (s - 0.05), -CEIL_DROP / 2, 0, 0.05, CEIL_DROP / 2, s);
+    }
+  }
+
   const pillar = new Carpentry()
     .box(0, G / 2, 0, 0.15, G / 2, 0.15)
     .box(0, 0.09, 0, 0.22, 0.09, 0.22)
@@ -1100,6 +1251,13 @@ function buildGeometries(): Record<PieceKind, PieceGeo> {
     roofGable: { timber: roofGable.finish() },
     roofHip: { timber: roofHip.finish() },
     roofShed: { timber: roofShed.finish() },
+    ceiling: { timber: ceiling.finish() },
+    chair: { timber: chair.finish() },
+    bench: { timber: bench.finish() },
+    chest: { timber: chest.finish() },
+    crate: { timber: crate.finish() },
+    rug: { timber: rug.finish() },
+    planter: { timber: planter.finish() },
     roofFlat: { timber: roofFlat.finish() },
     pillar: { timber: pillar.finish() },
     bed: { timber: bed.finish() },
@@ -1315,6 +1473,20 @@ function solidsOf(kind: PieceKind, open = false): Slab[] {
       return [{ cx: 0, cz: 0, hx: 0.56, hz: 0.22, y0: 0, y1: 1.8 }];
     case 'barrel':
       return [{ cx: 0, cz: 0, hx: 0.42, hz: 0.42, y0: 0, y1: 0.88 }];
+    case 'chair':
+      return [{ cx: 0, cz: 0, hx: 0.24, hz: 0.24, y0: 0, y1: 0.48 }];
+    case 'bench':
+      return [{ cx: 0, cz: 0, hx: 0.68, hz: 0.24, y0: 0, y1: 0.46 }];
+    case 'chest':
+      return [{ cx: 0, cz: 0, hx: 0.44, hz: 0.3, y0: 0, y1: 0.58 }];
+    case 'crate':
+      return [{ cx: 0, cz: 0, hx: 0.32, hz: 0.32, y0: 0, y1: 0.61 }];
+    case 'planter':
+      return [{ cx: 0, cz: 0, hx: 0.62, hz: 0.37, y0: 0, y1: 0.4 }];
+    // A rug has no solid part at all. It is a centimetre thick and you walk across it, so
+    // giving it a hitbox would mean tripping over a mat.
+    case 'rug':
+      return [];
     case 'campfire':
       return [{ cx: 0, cz: 0, hx: 0.68, hz: 0.68, y0: 0, y1: 0.2 }];
     case 'brazier':
@@ -1594,6 +1766,8 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   /** The wall the crosshair found this frame, and the height it met it at. */
   let hungPanel: Placed | null = null;
   let hungAimY = 0;
+  /** The ceiling the crosshair found overhead this frame, and where on it. */
+  let hungSoffit: { piece: Placed; x: number; z: number; under: number } | null = null;
   /** The usable stretch of the aim ray, as distances from the camera. See `aimWindow`. */
   let aimNear = 0.35;
   let aimFar = 0.35 + REACH;
@@ -1684,6 +1858,44 @@ export function createBuildSite(assets: AssetManager): BuildSite {
    * which is precisely why a shelf would go above a cupboard and never below it or beside
    * it. Measured from the wall's own foot, neither happens.
    */
+  /**
+   * The underside of a ceiling or floor slab the aim ray passes into, or null.
+   *
+   * Marched like the hit search rather than tested against a slot key, because what counts as
+   * something to hang from is "a slab whose underside is above me and in my way" — and a
+   * floor slab one storey up is exactly as good a thing to hang a lamp from as a ceiling is.
+   */
+  const soffitAbove = (
+    eye: Vector3,
+    forward: Vector3,
+  ): { piece: Placed; x: number; z: number; under: number } | null => {
+    const STEP = 0.25;
+    for (let t = aimNear; t <= aimFar; t += STEP) {
+      const x = eye.x + forward.x * t;
+      const y = eye.y + forward.y * t;
+      const z = eye.z + forward.z * t;
+      const gx = Math.round(x / G);
+      const gz = Math.round(z / G);
+      for (let ix = -1; ix <= 1; ix++) {
+        for (let iz = -1; iz <= 1; iz++) {
+          const list = columns.get(colKey(gx + ix, gz + iz));
+          if (!list) continue;
+          for (const p of list) {
+            if (p.kind !== 'ceiling' && p.kind !== 'floor' && p.kind !== 'roofFlat') continue;
+            const [lx, lz] = toLocal(p, x, z);
+            if (Math.abs(lx) > G / 2 || Math.abs(lz) > G / 2) continue;
+            const under = p.kind === 'ceiling' ? p.level - CEIL_DROP : p.level;
+            const top = p.level + (p.kind === 'ceiling' ? CEIL_TOP : FLOOR_TOP);
+            // Inside the slab's own thickness: the ray has reached it rather than passed it.
+            if (y < under - 0.05 || y > top) continue;
+            return { piece: p, x, z, under };
+          }
+        }
+      }
+    }
+    return null;
+  };
+
   const hungHeight = (
     kind: PieceKind,
     wall: Placed | null,
@@ -1691,6 +1903,11 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     surface: number,
   ): number | null => {
     if (!HUNG.has(kind)) return null;
+    // Hanging from a ceiling: the fixture's top goes at the soffit, so it drops below it.
+    if (hungSoffit) {
+      const box = geometries[kind].timber.boundingBox;
+      return hungSoffit.under - (box ? box.max.y : 1.8);
+    }
     if (!wall) {
       // No wall under the crosshair, so it stands on whatever is there — a floor, a
       // foundation, a table, the top of a shelf, the bare ground.
@@ -1771,6 +1988,23 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       }
       hungAimY = eye.y + forward.y * (chosen ? chosen.t : aimFar);
 
+      // Aimed upward at a ceiling: hang from it.
+      //
+      // Checked before the wall lines, because looking up at the ceiling of a room also
+      // crosses the walls of it, and a lantern aimed at the ceiling should not end up on the
+      // wall behind it. Only when the aim is genuinely upward, so nothing changes for the
+      // ordinary case of pointing at a wall.
+      hungSoffit = null;
+      if (HUNG.has(selected) && forward.y > 0.25) {
+        const lid = soffitAbove(eye, forward);
+        if (lid) {
+          hungSoffit = lid;
+          out.x = Math.round(lid.x / STEP_ALONG) * STEP_ALONG;
+          out.z = Math.round(lid.z / STEP_ALONG) * STEP_ALONG;
+          return quarter;
+        }
+      }
+
       // Nothing to hang on under the crosshair: set it down where you are pointing
       // instead of snapping to an empty wall line metres away.
       //
@@ -1810,10 +2044,17 @@ export function createBuildSite(assets: AssetManager): BuildSite {
               if (!list) continue;
               for (const p of list) {
                 if (p.kind !== 'cabinet') continue;
-                // A cupboard is 1.12 m wide and 1.8 m tall; anything inside that footprint
-                // and within its height is in the way.
-                if (Math.hypot(p.x - fx, p.z - fz) > 0.9) continue;
                 if (fy < p.level - 0.3 || fy > p.level + 1.9) continue;
+                // Measured in the cupboard's own frame, along and across it separately.
+                //
+                // A circle of radius 0.9 was the first version and it was wrong at exactly
+                // the place the report named: a cupboard is 1.12 m wide and a quarter deep,
+                // so a circle big enough to cover its width also reaches half a metre past
+                // each end, and a fixture aimed at the bare wall beside it was pushed out as
+                // though the cupboard were there. Which is why fixtures only worked in front
+                // of the doors — anywhere along the sides they were shoved off the wall.
+                const [lx, lz] = toLocal(p, fx, fz);
+                if (Math.abs(lx) > 0.58 || Math.abs(lz) > 0.4) continue;
                 return CABINET_FACE - mountOffset(selected);
               }
             }
@@ -2278,6 +2519,8 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         return p.level + FLOOR_TOP;
       case 'foundation':
         return p.level + FOUNDATION_TOP;
+      case 'ceiling':
+        return p.level + CEIL_TOP;
       case 'roofFlat':
         return p.level + DECK_TOP;
       case 'ramp':

@@ -9,7 +9,7 @@ import {
 } from 'three';
 import { itemGeometry, workbenchGeo, type ItemId } from '../game/Items.ts';
 import { Carpentry } from './Building.ts';
-import { surfaceGroundHeightAt } from './WorldGen.ts';
+import { surfaceGroundHeightAt, WORLD } from './WorldGen.ts';
 
 /**
  * Gatherables
@@ -281,6 +281,15 @@ export function createGatherSite(): GatherSite {
 
   const place = (list: Gatherable[], kind: GatherKind, key: string, x: number, z: number, turn: number): void => {
     const y = surfaceGroundHeightAt(x, z);
+    // Nothing lies on the bottom of a lake.
+    //
+    // The cell lottery deliberately ignores biome, so that a player who has just arrived can
+    // find something wherever they are standing — but it was ignoring the waterline too, and
+    // the ground under a river or a bay is ground as far as the height field is concerned.
+    // The result was sticks and stones standing in open water everywhere there was water,
+    // which is the report. Half a metre of clearance, so a shingle beach still has its
+    // pebbles while a channel does not.
+    if (y < WORLD.waterLevel + 0.5) return;
     list.push({ key, kind, x, y, z, turn, slot: 0 });
   };
 
