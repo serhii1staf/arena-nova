@@ -1295,7 +1295,12 @@ try {
     const s = sc.buildSite;
     s.clear();
     const lights = s.group.children.filter((c) => c.isPointLight);
-    const before = lights.filter((l) => l.visible).length;
+    // Counted by intensity, not by visibility, and that is not a detail. The pool is
+    // permanently visible on purpose: hiding a light changes how many the renderer sees,
+    // and that number is baked into every material's compiled program — which is what made
+    // the first torch freeze the game for five seconds. Brightness is the switch now.
+    const burning = () => lights.filter((l) => l.intensity > 0);
+    const before = burning().length;
     s.select('campfire');
     sc.player.spawn(2100, 2100, 0);
     sc.player.pitch = 0;
@@ -1304,25 +1309,156 @@ try {
     if (!s.place()) return { placed: false, pool: lights.length };
     const f = window.probe.piece('campfire', 0);
     s.lightUp(sc.player.feetPosition);
-    const lit = lights.filter((l) => l.visible);
+    // Read now, not later. These are live light objects, and the next call dims them — an
+    // earlier version of this probe kept the references and reported the brightness it
+    // measured *after* walking the player away, which is zero by design.
+    const lit = burning();
+    const litCount = lit.length;
+    const litPower = lit[0]?.intensity ?? 0;
+    const litAt = f ? +Math.hypot(lit[0].position.x - f.x, lit[0].position.z - f.z).toFixed(2) : null;
     // Walk far away: the pool must let go, so it never costs anything for fires nobody is
     // standing near.
     s.lightUp({ x: 2100 + 400, y: 0, z: 2100 + 400 });
-    const farLit = lights.filter((l) => l.visible).length;
+    const farLit = burning().length;
     return {
       placed: true,
       pool: lights.length,
       before,
-      lit: lit.length,
-      atFire: f
-        ? +Math.hypot(lit[0].position.x - f.x, lit[0].position.z - f.z).toFixed(2)
-        : null,
-      intensity: lit[0]?.intensity ?? 0,
+      lit: litCount,
+      atFire: litAt,
+      intensity: litPower,
       shadowless: lights.every((l) => l.castShadow === false),
+      // Never hidden, at any point: that is the invariant that keeps placing a fire free.
+      counted: lights.every((l) => l.visible === true),
       farLit,
     };
   });
   console.log(`firelight: ${JSON.stringify(firelight)}`);
+
+  // ---- Lighting a fire must not rebuild every shader in the scene ----------
+  // Reported as the game freezing for five seconds when a torch or a campfire goes down,
+  // and it was mine: the pool was dimmed with `visible`, the renderer counts only visible
+  // lights, and that count is part of every material's program key — so the first fire
+  // took the scene from zero point lights to one and recompiled the lot, mid-frame.
+  // `renderer.info.programs` is the compiled-program cache, so its length is a direct
+  // measurement of whether that happened.
+  const noRecompile = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    const gl = window.arena.engine.renderer;
+    s.clear();
+    sc.player.spawn(2300, 2300, 0);
+    sc.player.pitch = 0;
+    sc.player.update(0.016);
+    // Settle first: a fresh position streams terrain, and terrain has shaders of its own.
+    for (let i = 0; i < 8; i++) sc.render(1, 0.016);
+    const before = gl.info.programs.length;
+    const lights = s.group.children.filter((c) => c.isPointLight);
+    s.select('campfire');
+    sc.render(1, 0.016);
+    const ok = s.place();
+    s.lightUp(sc.player.feetPosition);
+    for (let i = 0; i < 4; i++) sc.render(1, 0.016);
+    const after = gl.info.programs.length;
+    // Then a torch as well, which is a different kind on a different mesh.
+    s.select('torch');
+    sc.render(1, 0.016);
+    s.place();
+    s.lightUp(sc.player.feetPosition);
+    for (let i = 0; i < 4; i++) sc.render(1, 0.016);
+    return {
+      ok,
+      before,
+      after,
+      afterTorch: gl.info.programs.length,
+      // The count the renderer sees must never change, which is what holds the above true.
+      alwaysCounted: lights.every((l) => l.visible === true),
+      // And the pool must still actually light things.
+      lit: lights.filter((l) => l.intensity > 0).length,
+    };
+  });
+  console.log(`shader churn: ${JSON.stringify(noRecompile)}`);
+
+  // ---- A shelf goes above a cupboard, below it, and beside it --------------
+  // Reported as: mount a cabinet on a wall and there is nowhere left to put a shelf.
+  // Height used to be quantised to two-metre tiers and measured from the floor query,
+  // which the cabinet itself became — so above worked and below and beside did not.
+  const stacking = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    sc.player.spawn(2500, 2500, 0);
+    sc.player.pitch = 0;
+    s.select('wall');
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    if (!s.place()) return { placed: false };
+    const w = window.probe.piece('wall', 0);
+    s.select('cabinet');
+    sc.render(1, 0.016);
+    s.place();
+    const cab = window.probe.piece('cabinet', 0);
+
+    // Now aim the crosshair at three heights on that same wall and hang a shelf at each.
+    // Pitch is what a player changes to do this, so pitch is what the probe changes.
+    const shelves = [];
+    for (const pitch of [-0.16, 0.24, 0.52]) {
+      sc.player.pitch = pitch;
+      sc.player.update(0.016);
+      s.select('shelf');
+      sc.render(1, 0.016);
+      const ok = s.place();
+      shelves.push({ pitch, ok });
+    }
+    const ys = [];
+    for (let i = 0; i < 3; i++) {
+      const sh = window.probe.piece('shelf', i);
+      if (sh) ys.push(+(sh.y - w.y).toFixed(2));
+    }
+    ys.sort((a, b) => a - b);
+    return {
+      placed: true,
+      cabinetTop: cab ? +(cab.y - w.y + 1.8).toFixed(2) : null,
+      accepted: shelves.filter((x) => x.ok).length,
+      ys,
+      // Distinct heights, and at least one of them below the top of the cupboard.
+      distinct: new Set(ys).size,
+      below: ys.filter((y) => y + 1.22 < (cab ? cab.y - w.y + 1.8 : 0)).length,
+    };
+  });
+  console.log(`shelf stacking: ${JSON.stringify(stacking)}`);
+
+  // ---- Furnishings read darker than the structure --------------------------
+  const stain = await page.evaluate(() => {
+    const s = window.arena.scene.buildSite;
+    const pick = (kind) => {
+      const m = s.group.children.find((c) => c.isInstancedMesh && c.name === `Build:${kind}`);
+      return m ? m.material.color.getHex() : null;
+    };
+    const lum = (hex) =>
+      hex === null
+        ? null
+        : +(
+            (0.2126 * ((hex >> 16) & 255) + 0.7152 * ((hex >> 8) & 255) + 0.0722 * (hex & 255)) /
+            255
+          ).toFixed(3);
+    return {
+      wall: lum(pick('wall')),
+      floor: lum(pick('floor')),
+      table: lum(pick('table')),
+      cabinet: lum(pick('cabinet')),
+      shelf: lum(pick('shelf')),
+      // Two timber materials across all thirty kinds — structure and furnishings — rather
+      // than one per kind. Counted over the timber layers only; glazing and flames have
+      // materials of their own and always did.
+      materials: new Set(
+        s.group.children
+          .filter((c) => c.isInstancedMesh && c.name.startsWith('Build:'))
+          .map((c) => c.material.uuid),
+      ).size,
+    };
+  });
+  console.log(`stain: ${JSON.stringify(stain)}`);
 
   // ---- Furniture holds you up along its whole length -----------------------
   // A bed is over two metres long and a table nearly two wide, so either can be
@@ -1637,7 +1773,31 @@ try {
     firelight.atFire < 0.5 &&
     firelight.intensity > 0 &&
     firelight.shadowless === true &&
+    firelight.counted === true &&
     firelight.farLit === 0;
+  // Not one program compiled by lighting a fire, and the pool still lights.
+  const lightsAreFree =
+    noRecompile.ok === true &&
+    noRecompile.alwaysCounted === true &&
+    noRecompile.after === noRecompile.before &&
+    noRecompile.afterTorch === noRecompile.before &&
+    noRecompile.lit >= 1;
+  // Three shelves accepted on one wall at three distinct heights, at least one of them
+  // finishing below the top of the cupboard already mounted there.
+  const shelvesStack =
+    stacking.placed === true &&
+    stacking.accepted === 3 &&
+    stacking.distinct === 3 &&
+    stacking.below >= 1;
+  // Furnishings darker than the structure, and still only two timber materials in all.
+  const furnishDarker =
+    stain.wall !== null &&
+    stain.table !== null &&
+    stain.table < stain.wall - 0.08 &&
+    stain.cabinet === stain.table &&
+    stain.shelf === stain.table &&
+    stain.floor === stain.wall &&
+    stain.materials === 2;
   const labelCentred =
     centred !== null && Math.abs(centred.boxOffset) < 1.5 && Math.abs(centred.textOffset) < 1.5;
   const removesOne =
@@ -1767,6 +1927,21 @@ try {
     firesLight,
     `pool=${firelight.pool} lit=${firelight.lit} at=${firelight.atFire}m power=${firelight.intensity} away=${firelight.farLit}`,
   );
+  line(
+    'a fire compiles no shaders:',
+    lightsAreFree,
+    `programs ${noRecompile.before}->${noRecompile.after}->${noRecompile.afterTorch} counted=${noRecompile.alwaysCounted}`,
+  );
+  line(
+    'shelves stack round a cupboard:',
+    shelvesStack,
+    `${stacking.accepted}/3 at ${JSON.stringify(stacking.ys)} below=${stacking.below} cupTop=${stacking.cabinetTop}`,
+  );
+  line(
+    'furnishings darker than walls:',
+    furnishDarker,
+    `wall=${stain.wall} furniture=${stain.table} materials=${stain.materials}`,
+  );
   line('a bed on a floor sits on it:', sitsOnFloor, `lift=${onTopOf.lift}`);
   line(
     'fixtures go where you aim:',
@@ -1828,6 +2003,9 @@ try {
     stairsClimb &&
     cabinetFits &&
     firesLight &&
+    lightsAreFree &&
+    shelvesStack &&
+    furnishDarker &&
     fixturesMount &&
     sitsOnFloor &&
     mountsWhereAimed &&

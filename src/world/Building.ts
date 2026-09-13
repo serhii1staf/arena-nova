@@ -329,6 +329,32 @@ function mountOffset(kind: PieceKind): number {
   return kind === 'cabinet' ? wall + 0.22 : wall;
 }
 
+/**
+ * Fixtures that hang at whatever height you aim at, rather than standing on a floor.
+ *
+ * A cabinet is mounted against a wall but it is still a box resting on the ground, so it
+ * is deliberately not in here.
+ */
+const HUNG = new Set<PieceKind>(['shelf', 'torch', 'lantern']);
+
+/**
+ * The height each hung fixture's working part sits at within its own geometry.
+ *
+ * Needed because the models are drawn with their business end well above their origin — a
+ * shelf's boards at 1.02 m and 1.42 m, a torch's flame at about 1.4 m, a lantern's box at
+ * 1.72 m. Placing the origin where the crosshair lands would put the object a metre and a
+ * half higher than the spot aimed at. Subtracting the nominal height instead means the
+ * part you can see goes where you pointed.
+ */
+const HUNG_NOMINAL: Partial<Record<PieceKind, number>> = {
+  shelf: 1.22,
+  torch: 1.4,
+  lantern: 1.78,
+};
+
+/** Vertical step a hung fixture snaps to. Fine enough to fit a shelf under a cupboard. */
+const MOUNT_RISE = 0.25;
+
 /** A box in a piece's own frame: centre and half-extents across, and a Y range. */
 interface Slab {
   cx: number;
@@ -1344,6 +1370,33 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     metalness: 0,
   });
 
+  /**
+   * Furnishings, in a darker stain than the structure they stand in.
+   *
+   * Same boards, same grain, same normals — only the tint differs. Structural timber and a
+   * table made of the identical texture read as one continuous surface: pushed up against
+   * a wall, a cupboard disappeared into it and there was no edge to tell you where the
+   * furniture ended. Darkening the furniture rather than lightening the walls is the right
+   * way round because a room is mostly wall, and it matches how these things actually
+   * look: framing is bare sawn pine, furniture is planed and oiled.
+   *
+   * Free, as far as the renderer is concerned. Colour is a uniform, not a shader feature,
+   * so this shares its compiled program with the structural material — and every kind was
+   * already its own instanced mesh, so no draw call has been added either.
+   */
+  const furnishMat = new MeshStandardMaterial({
+    map: tex.map,
+    normalMap: tex.normalMap,
+    roughnessMap: tex.roughnessMap,
+    color: 0xbe9a7c,
+    roughness: 0.92,
+    metalness: 0,
+  });
+  /** Which kinds take the darker stain: the furnishings group, as offered in the hotbar. */
+  const FURNISHED: ReadonlySet<PieceKind> = new Set(
+    CATEGORIES.find((c) => c.id === 'props')?.pieces ?? [],
+  );
+
   // Glass, kept deliberately cheap: a smooth translucent standard material picks up
   // the scene's environment and the sun, which at a window's scale is the whole
   // effect. A physical material with real transmission would mean an extra render of
@@ -1431,7 +1484,11 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   const kinds = new Map<PieceKind, Bucket>();
   for (const kind of PIECES) {
     const geo = geometries[kind];
-    const mesh = new InstancedMesh(geo.timber, timberMat, MAX_PER_KIND);
+    const mesh = new InstancedMesh(
+      geo.timber,
+      FURNISHED.has(kind) ? furnishMat : timberMat,
+      MAX_PER_KIND,
+    );
     mesh.count = 0;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -1500,7 +1557,17 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   const firelights: PointLight[] = [];
   for (let i = 0; i < 4; i++) {
     const light = new PointLight(0xffb060, 0, 1, 1.7);
-    light.visible = false;
+    // Always `visible`, dimmed with `intensity` — and never toggled with `visible`.
+    //
+    // This is the difference between a light pool that costs nothing and one that freezes
+    // the game for five seconds the first time you light a fire, which is exactly what the
+    // first version of this did. The renderer counts only visible lights when it builds
+    // the lighting state, and that count is part of every material's program key — so
+    // switching a light from hidden to shown takes the scene from zero point lights to
+    // one and every single material has to be compiled again, on the spot, mid-frame.
+    // Holding the count fixed from the moment the site is built means the shaders are
+    // compiled once during loading and placing a torch is just a matrix write.
+    light.visible = true;
     light.castShadow = false;
     light.name = `Firelight:${i}`;
     group.add(light);
@@ -1511,6 +1578,9 @@ export function createBuildSite(assets: AssetManager): BuildSite {
 
   const at = new Vector3();
   let atTurn = 0;
+  /** The wall the crosshair found this frame, and the height it met it at. */
+  let hungPanel: Placed | null = null;
+  let hungAimY = 0;
   let free = true;
   let aimed: Placed | null = null;
   /** The door within reach, if any, so the HUD can offer to open it. */
@@ -1530,8 +1600,12 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     // in half metres too — on the half-cell grid, two torches a metre apart on the same
     // wall would be the same slot and the second would be refused.
     const h = MOUNTED.has(kind) || LATTICE[kind] === 'quarter' ? 0.5 : G / 2;
+    // Hung fixtures move in quarter metres vertically, so their slots have to be counted
+    // in quarter metres too. On two-metre buckets a shelf just under a cupboard was the
+    // same slot as one just over it, and the second was refused.
+    const vh = HUNG.has(kind) ? MOUNT_RISE : G / 2;
     const gx = Math.round(p.x / h);
-    const gy = Math.round(p.y / (G / 2));
+    const gy = Math.round(p.y / vh);
     const gz = Math.round(p.z / h);
     // Which side of the wall a fixture is on is part of what it is, or the far side of a
     // wall could never hold one opposite the near side.
@@ -1555,7 +1629,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
    * themselves rather than from a slot key, because a doorway and a window sit on the same
    * line as a wall and are just as good to hang a torch beside.
    */
-  const wallAt = (x: number, z: number, y: number): boolean => {
+  const wallAt = (x: number, z: number, y: number): Placed | null => {
     const gx = Math.round(x / G);
     const gz = Math.round(z / G);
     for (let ix = -1; ix <= 1; ix++) {
@@ -1570,11 +1644,41 @@ export function createBuildSite(assets: AssetManager): BuildSite {
           // dead middle — a torch a metre to one side of it reported bare ground.
           const [lx, lz] = toLocal(p, x, z);
           if (Math.abs(lz) > 0.45 || Math.abs(lx) > G / 2 + 0.05) continue;
-          return true;
+          // The panel itself, not merely the fact of one: a fixture's height is measured
+          // from the foot of the wall it hangs on, which is the only base that does not
+          // move when something else is already mounted nearby.
+          return p;
         }
       }
     }
-    return false;
+    return null;
+  };
+
+  /**
+   * Height a hung fixture should sit at, or null when it should stand on a floor instead.
+   *
+   * Read off the crosshair: where the aim ray meets the wall, snapped to a quarter metre,
+   * with the fixture's own nominal height taken off so the visible part lands on the spot
+   * aimed at. This replaced a height quantised to two-metre tiers and measured from
+   * whatever the floor query returned underneath the fixture, which failed in two ways at
+   * once. Two-metre tiers meant there were only ever three heights on a wall, so a shelf
+   * could not go just above or just below anything. And measuring from the floor query
+   * meant an existing cupboard *became* the floor for everything within its footprint —
+   * which is precisely why a shelf would go above a cupboard and never below it or beside
+   * it. Measured from the wall's own foot, neither happens.
+   */
+  const hungHeight = (
+    kind: PieceKind,
+    wall: Placed | null,
+    aimY: number,
+    fallbackBase: number,
+  ): number | null => {
+    if (!HUNG.has(kind)) return null;
+    const base = wall ? wall.level : fallbackBase;
+    const nominal = HUNG_NOMINAL[kind] ?? 1.2;
+    // Kept on the panel: no fixture below its foot, none above its head.
+    const lift = Math.min(G - 0.25, Math.max(0.45, aimY - base));
+    return base + Math.round(lift / MOUNT_RISE) * MOUNT_RISE - nominal;
   };
 
   const snap = (raw: Vector3, out: Vector3, eye: Vector3, forward: Vector3): number => {
@@ -1616,14 +1720,21 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       // The first crossing with a wall on it; failing that, the first crossing at all, so
       // a fixture can still be lined up before its wall exists.
       let chosen = crossings[0] ?? null;
+      hungPanel = null;
       for (const c of crossings) {
         const px = eye.x + forward.x * c.t;
         const pz = eye.z + forward.z * c.t;
-        if (wallAt(px, pz, eye.y)) {
+        // Tested at the height the ray has actually reached by then, not at eye height.
+        // Aiming at the foot of a wall has to find that wall, and with a fixed eye height
+        // it did not.
+        const found = wallAt(px, pz, eye.y + forward.y * c.t);
+        if (found) {
           chosen = c;
+          hungPanel = found;
           break;
         }
       }
+      hungAimY = eye.y + forward.y * (chosen ? chosen.t : REACH);
 
       if (chosen) {
         const t = chosen.t;
@@ -1866,8 +1977,16 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     // most of a tier, and whether it tipped over depended on the slope in front.
     const ground = floorAt(at.x, at.z);
     const step = G / 2;
-    const tier = Math.max(0, Math.floor((at.y - eye.y) / step));
-    at.y = ground + tier * step;
+    // A hung fixture takes its height from the crosshair on the wall; everything else
+    // takes a tier off the ground. Two different questions, and they were being answered
+    // by one formula — see `hungHeight`.
+    const hung = hungHeight(selected, hungPanel, hungAimY, ground);
+    if (hung !== null) {
+      at.y = hung;
+    } else {
+      const tier = Math.max(0, Math.floor((at.y - eye.y) / step));
+      at.y = ground + tier * step;
+    }
 
     ghost.geometry = geometries[selected].timber;
     ghost.position.copy(at);
@@ -2222,10 +2341,11 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       const light = firelights[i]!;
       const pick = candidates[i];
       if (!pick) {
-        light.visible = false;
+        // Dimmed, not hidden. See the constructor: hiding it would change the number of
+        // lights the renderer sees and cost a full shader rebuild.
+        light.intensity = 0;
         continue;
       }
-      light.visible = true;
       light.position.set(pick.p.x, pick.p.level + pick.glow.y, pick.p.z);
       light.distance = pick.glow.reach;
       light.intensity = pick.glow.power;
@@ -2309,6 +2429,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         g.glow?.dispose();
       }
       timberMat.dispose();
+      furnishMat.dispose();
       glassMat.dispose();
       glowMat.dispose();
       ghostOk.dispose();
