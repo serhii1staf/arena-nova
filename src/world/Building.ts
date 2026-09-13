@@ -434,7 +434,13 @@ export interface BuildSite {
    * Points the small pool of firelights at whatever is burning nearest the player.
    * Call once a frame with the player's position.
    */
-  lightUp(near: Vector3): void;
+  lightUp(near: Vector3, dt?: number): void;
+  /**
+   * What the crosshair resolved to this frame: the usable stretch of the ray, how far
+   * along it the hit was, and the wall a fixture found to hang on. Diagnostic only —
+   * placement reads none of it — but without it a mounting fault is guesswork.
+   */
+  aimInfo(): { near: number; far: number; hit: number; panel: PieceKind | null; aimY: number };
   /** The timber geometry of a kind, so the hotbar can draw an icon of it. */
   geometryFor(kind: PieceKind): BufferGeometry;
   dispose(): void;
@@ -1581,6 +1587,10 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   /** The wall the crosshair found this frame, and the height it met it at. */
   let hungPanel: Placed | null = null;
   let hungAimY = 0;
+  /** The usable stretch of the aim ray, as distances from the camera. See `aimWindow`. */
+  let aimNear = 0.35;
+  let aimFar = 0.35 + REACH;
+  let aimHit = 0;
   let free = true;
   let aimed: Placed | null = null;
   /** The door within reach, if any, so the HUD can offer to open it. */
@@ -1671,10 +1681,24 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     kind: PieceKind,
     wall: Placed | null,
     aimY: number,
-    fallbackBase: number,
+    surface: number,
   ): number | null => {
     if (!HUNG.has(kind)) return null;
-    const base = wall ? wall.level : fallbackBase;
+    if (!wall) {
+      // No wall under the crosshair, so it stands on whatever is there — a floor, a
+      // foundation, a table, the top of a shelf, the bare ground.
+      //
+      // Without this a lantern could only ever be hung, because a fixture always snapped
+      // to a wall line whether or not a wall existed on it. Setting it down on a surface
+      // was impossible, which is why "I want to put a lamp on the shelf" did not work.
+      //
+      // The drop is taken from the model's own bounding box rather than a per-kind table,
+      // so the piece rests on the surface whatever its shape, and a new fixture needs no
+      // entry anywhere for this to be right.
+      const box = geometries[kind].timber.boundingBox;
+      return surface - (box ? box.min.y : 0);
+    }
+    const base = wall.level;
     const nominal = HUNG_NOMINAL[kind] ?? 1.2;
     // Kept on the panel: no fixture below its foot, none above its head.
     const lift = Math.min(G - 0.25, Math.max(0.45, aimY - base));
@@ -1711,7 +1735,11 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         let k = d > 0 ? Math.ceil((o - h) / G) : Math.floor((o - h) / G);
         for (let n = 0; n < 4; n++) {
           const tt = (k * G + h - o) / d;
-          if (tt > 0.05 && tt <= REACH + 3) crossings.push({ t: tt, axis });
+          // The same window the hit search uses. Hard-coding `REACH + 3` here was wrong the
+          // moment reach started being measured from the character rather than the lens:
+          // the wall being aimed at sat past the end of this list, so a fixture found
+          // nothing to hang on and fell back to standing on the floor.
+          if (tt > aimNear && tt <= aimFar + 1) crossings.push({ t: tt, axis });
           k += d > 0 ? 1 : -1;
         }
       }
@@ -1734,7 +1762,21 @@ export function createBuildSite(assets: AssetManager): BuildSite {
           break;
         }
       }
-      hungAimY = eye.y + forward.y * (chosen ? chosen.t : REACH);
+      hungAimY = eye.y + forward.y * (chosen ? chosen.t : aimFar);
+
+      // Nothing to hang on under the crosshair: set it down where you are pointing
+      // instead of snapping to an empty wall line metres away.
+      //
+      // This is what makes "put the lamp on the shelf" and "stand the torch on the floor"
+      // possible at all. Before, a fixture snapped to the nearest cell edge whether or not
+      // a wall stood on it, so a lantern could only ever be hung — and if there was no
+      // wall it went to a line in mid-air. Standing pieces use the same half-metre lattice
+      // the furniture uses, so a lamp still lines up with the table it is on.
+      if (HUNG.has(selected) && !hungPanel) {
+        out.x = Math.round(raw.x / STEP_ALONG) * STEP_ALONG;
+        out.z = Math.round(raw.z / STEP_ALONG) * STEP_ALONG;
+        return quarter;
+      }
 
       if (chosen) {
         const t = chosen.t;
@@ -1964,11 +2006,41 @@ export function createBuildSite(assets: AssetManager): BuildSite {
       return;
     }
 
-    // The target is a fixed distance ahead, then snapped. Deliberately not a raycast
-    // against the world: a ray gives a surface, and what a grid system needs is a
-    // *slot* — snapping is cheaper and steadier, because the preview stops jittering
-    // between two cells as the crosshair crosses a distant hillside edge.
-    at.copy(eye).addScaledVector(forward, REACH);
+    // Where the crosshair actually lands, not a fixed distance ahead.
+    //
+    // A fixed seven metres was the single worst thing about building in here, and it
+    // explains a whole family of complaints at once. Stand inside a four-metre room and
+    // the point seven metres ahead is on the far side of the wall — so once you had walls
+    // and a ceiling, *nothing could be placed indoors at all*, because the slot being
+    // aimed at was outside the building. It is also why furniture had to be positioned by
+    // backing away from where you wanted it rather than by pointing at it.
+    //
+    // Still not a `Raycaster`: pieces are instanced, so there are no per-piece objects to
+    // intersect. This marches the ray and asks the same two analytic questions the camera
+    // clamp asks — is this point under the surface, is it inside something built — then
+    // bisects the last step so the point returned sits just in front of what was hit
+    // rather than a fifth of a metre inside it.
+    aimWindow(eye, forward, body);
+    const step = G / 2;
+    // The tier depends only on the look angle, so it can be settled before the slot is —
+    // and it has to be, because on an upper tier the slot depends on the tier.
+    const tier = Math.max(0, Math.floor(((forward.y * REACH) / step) * 1)) | 0;
+    let hit = aimDistance(eye, forward, floorAt);
+    // Looking up to build above yourself: take the point where the ray crosses the level
+    // the piece will stand on, not where the ray eventually runs out.
+    //
+    // This is the other half of why a house could not be finished. Looking up inside a room
+    // there is nothing for the ray to strike — it leaves over the top of the walls — so the
+    // aim ran to full reach, which at that angle is two cells away horizontally, and the
+    // ceiling was built over next door. Crossing the tier's own plane puts it directly
+    // overhead, which is where anyone looking up is pointing.
+    if (tier > 0 && forward.y > 0.05) {
+      const tierY = floorAt(body.x, body.z) + tier * step;
+      const tPlane = (tierY - eye.y) / forward.y;
+      if (tPlane > aimNear * 0.2 && tPlane < hit) hit = Math.max(aimNear * 0.2, tPlane);
+    }
+    aimHit = hit;
+    at.copy(eye).addScaledVector(forward, hit);
     atTurn = snap(at, at, eye, forward);
 
     // The tier comes from how far you looked up, and the base from the terrain under
@@ -1976,17 +2048,11 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     // together: eye height is about 1.7 m, so looking straight ahead already read as
     // most of a tier, and whether it tipped over depended on the slope in front.
     const ground = floorAt(at.x, at.z);
-    const step = G / 2;
     // A hung fixture takes its height from the crosshair on the wall; everything else
     // takes a tier off the ground. Two different questions, and they were being answered
     // by one formula — see `hungHeight`.
     const hung = hungHeight(selected, hungPanel, hungAimY, ground);
-    if (hung !== null) {
-      at.y = hung;
-    } else {
-      const tier = Math.max(0, Math.floor((at.y - eye.y) / step));
-      at.y = ground + tier * step;
-    }
+    at.y = hung !== null ? hung : ground + tier * step;
 
     ghost.geometry = geometries[selected].timber;
     ghost.position.copy(at);
@@ -2306,6 +2372,67 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   };
 
   /**
+   * How far along the aim ray the crosshair lands, capped at reach.
+   *
+   * Marched rather than raycast, for the reason given where it is called: the pieces are
+   * instanced and there are no objects to intersect. Steps of a fifth of a metre over
+   * seven — under forty samples of two analytic tests, once a frame — then five rounds of
+   * bisection on the step that hit, which pins the surface to about half a centimetre.
+   */
+  /**
+   * The stretch of the aim ray that counts, as distances from the camera.
+   *
+   * Recomputed once a frame and shared, because two different things walk this ray — the
+   * hit search and the wall-line search a fixture uses — and when they disagreed about
+   * where it started and ended, fixtures broke: the reach grew by the camera's own set-back
+   * and the wall the player was pointing at fell outside the fixture search's window, so
+   * nothing was found to hang on.
+   *
+   * It begins just past the character's head, not at the lens. The ray has to come from
+   * the camera to agree with the crosshair, but in third person the camera sits several
+   * metres behind the character and that stretch is underground as often as not — pulled in
+   * against a hillside, or below the floor being stood on. Marching from zero reported a
+   * hit at once and dropped every piece at the player's feet.
+   */
+  const aimWindow = (eye: Vector3, forward: Vector3, body: Vector3): void => {
+    const head = body.y + 1.7;
+    const ahead =
+      (body.x - eye.x) * forward.x + (head - eye.y) * forward.y + (body.z - eye.z) * forward.z;
+    aimNear = Math.max(0.35, ahead + 0.35);
+    aimFar = aimNear + REACH;
+  };
+
+  const aimDistance = (
+    eye: Vector3,
+    forward: Vector3,
+    floorAt: (x: number, z: number) => number,
+  ): number => {
+    const STEP = 0.2;
+    const solid = (t: number): boolean => {
+      const x = eye.x + forward.x * t;
+      const y = eye.y + forward.y * t;
+      const z = eye.z + forward.z * t;
+      return y <= floorAt(x, z) || blocksCamera(x, y, z);
+    };
+
+    const from = aimNear;
+    const to = aimFar;
+
+    for (let t = from; t <= to; t += STEP) {
+      if (!solid(t)) continue;
+      let lo = Math.max(from, t - STEP);
+      let hi = t;
+      for (let i = 0; i < 5; i++) {
+        const mid = (lo + hi) / 2;
+        if (solid(mid)) hi = mid;
+        else lo = mid;
+      }
+      return lo;
+    }
+    return to;
+  };
+
+  /**
    * Points the firelight pool at the nearest burning things.
    *
    * A fixed pool of four lights, no shadows, reassigned each frame — not one light per
@@ -2318,7 +2445,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
    * Reassignment is a partial sort over the pieces in the columns around the player, so it
    * does not care how much has been built either.
    */
-  const lightUp = (near: Vector3): void => {
+  const lightUp = (near: Vector3, dt = 1): void => {
     const gx = Math.round(near.x / G);
     const gz = Math.round(near.z / G);
     candidates.length = 0;
@@ -2337,18 +2464,34 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     }
     candidates.sort((a, b) => a.d2 - b.d2);
 
+    // Eased, so light arrives and leaves instead of snapping on.
+    //
+    // Two separate fades, because the abruptness had two separate causes. A fire at the
+    // edge of the pool's range went from full brightness to nothing the moment it crossed
+    // the cut-off, so the target is now faded out over the last third of the range. And a
+    // fire entering the pool at all jumped straight to full, so the light eases toward
+    // whatever the target is rather than being assigned it. Exponential, which is
+    // frame-rate independent — a fixed step per frame would fade at different speeds on
+    // different machines.
+    const k = 1 - Math.exp(-dt / 0.13);
+    const FADE_FROM = LIGHT_RANGE * 0.66;
     for (let i = 0; i < firelights.length; i++) {
       const light = firelights[i]!;
       const pick = candidates[i];
-      if (!pick) {
-        // Dimmed, not hidden. See the constructor: hiding it would change the number of
-        // lights the renderer sees and cost a full shader rebuild.
-        light.intensity = 0;
-        continue;
+      let target = 0;
+      if (pick) {
+        light.position.set(pick.p.x, pick.p.level + pick.glow.y, pick.p.z);
+        light.distance = pick.glow.reach;
+        const d = Math.sqrt(pick.d2);
+        const near01 = Math.min(1, Math.max(0, (LIGHT_RANGE - d) / (LIGHT_RANGE - FADE_FROM)));
+        // Smoothstep rather than linear: it leaves and arrives at zero slope, so there is
+        // no moment where the brightness visibly starts moving.
+        target = pick.glow.power * near01 * near01 * (3 - 2 * near01);
       }
-      light.position.set(pick.p.x, pick.p.level + pick.glow.y, pick.p.z);
-      light.distance = pick.glow.reach;
-      light.intensity = pick.glow.power;
+      // Dimmed, never hidden. See the constructor: hiding a light changes how many the
+      // renderer counts and costs a full shader rebuild.
+      light.intensity += (target - light.intensity) * k;
+      if (light.intensity < 0.01) light.intensity = 0;
     }
   };
 
@@ -2413,6 +2556,13 @@ export function createBuildSite(assets: AssetManager): BuildSite {
     heightAt,
     collide,
     blocksCamera,
+    aimInfo: () => ({
+      near: aimNear,
+      far: aimFar,
+      hit: aimHit,
+      panel: hungPanel ? hungPanel.kind : null,
+      aimY: hungAimY,
+    }),
     geometryFor: (kind) => geometries[kind].timber,
     dispose: () => {
       clear();

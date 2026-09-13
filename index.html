@@ -424,14 +424,25 @@
       #inventory.on {
         display: flex;
       }
+      /*
+       * Three columns, the way a survival game's inventory is laid out: who you are on the
+       * left, what you are carrying in the middle, and what you can do with it on the
+       * right, with your condition in the bottom corner.
+       *
+       * The previous arrangement put the bag in a full-width strip along the bottom, which
+       * meant the grid was as wide as the window and only three rows tall — so the thing
+       * being looked at most was the thing shaped least like a bag. Standing the grid up in
+       * its own column gives it the square proportions it wants and leaves both side panels
+       * full height.
+       */
       .invWindow {
         display: grid;
-        width: min(1240px, 96vw);
-        height: min(800px, 94vh);
+        width: min(1420px, 97vw);
+        height: min(880px, 95vh);
         gap: 10px;
         grid-template:
-          'you craft' minmax(0, 1fr)
-          'bag bag' min-content / 320px 1fr;
+          'you bag craft' minmax(0, 1fr)
+          'you bag vitals' min-content / minmax(220px, 320px) auto minmax(300px, 1fr);
         padding: 14px;
         border: 1px solid rgba(150, 190, 230, 0.16);
         border-radius: 10px;
@@ -457,6 +468,19 @@
       }
       .invBag {
         grid-area: bag;
+      }
+      /*
+       * Condition in the bottom corner, as three coloured bars with their values on them.
+       *
+       * Under the character it was a row of labelled grey tracks that read as form fields.
+       * Colour is what makes these legible at a glance — green for health, blue for water,
+       * amber for food — and the number belongs on the bar rather than beside it, because
+       * the bar is the thing the eye goes to.
+       */
+      .invVitals {
+        grid-area: vitals;
+        gap: 6px;
+        padding: 10px 12px;
       }
       .invHead {
         display: flex;
@@ -504,10 +528,19 @@
       /* Slots are a fixed size rather than a share of the width. Stretched to fill, three
          rows of them ate most of the window and squeezed the character and the recipes
          into a strip along the top. */
+      /* Six across, four down: the twenty-four slots the bag holds, in a block that reads
+         as a bag rather than as a strip. */
+      /*
+       * Columns that cap rather than fix, so the bag gives ground before the panel beside it
+       * does. At a fixed 76 px the grid claimed its width unconditionally and on a narrow
+       * window the crafting column was squeezed until every recipe subtitle was an ellipsis.
+       * The cells keep their square shape from `aspect-ratio`, so shrinking the track shrinks
+       * the cell without distorting it.
+       */
       #invGrid {
         display: grid;
         gap: 5px;
-        grid-template-columns: repeat(8, 78px);
+        grid-template-columns: repeat(6, minmax(46px, 76px));
         justify-content: center;
       }
       /* Filled slots are lifted well clear of the empty ones. Against a dark panel a
@@ -659,32 +692,52 @@
         align-items: center;
       }
       .invMeterLabel {
-        flex: 0 0 52px;
-        color: rgba(170, 200, 225, 0.62);
-        font-size: 10px;
+        flex: 0 0 18px;
+        color: rgba(200, 220, 240, 0.8);
+        font-size: 13px;
+        text-align: center;
       }
       .invMeter {
+        position: relative;
         display: block;
         overflow: hidden;
         flex: 1;
-        height: 9px;
-        border-radius: 5px;
-        background: rgba(255, 255, 255, 0.08);
+        height: 19px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.07);
       }
       .invMeterFill {
         display: block;
         width: 100%;
         height: 100%;
-        border-radius: 5px;
+        border-radius: 3px;
+      }
+      /*
+       * The value, printed on the bar rather than beside it.
+       *
+       * Positioned over the track and not over the fill, so the number holds still while the
+       * bar moves. Sitting it inside the fill would slide the text along with the level and,
+       * at a low level, clip it away entirely.
+       */
+      .invMeterValue {
+        position: absolute;
+        top: 0;
+        right: 7px;
+        color: rgba(12, 18, 14, 0.9);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+        line-height: 19px;
+        text-shadow: 0 1px 0 rgba(255, 255, 255, 0.28);
       }
       .invMeterFill.health {
-        background: linear-gradient(90deg, #d2544e, #f08a72);
+        background: linear-gradient(90deg, #4d9b57, #7ed08a);
       }
       .invMeterFill.water {
         background: linear-gradient(90deg, #3f86c6, #74c2ea);
       }
       .invMeterFill.food {
-        background: linear-gradient(90deg, #a8863a, #dcc06a);
+        background: linear-gradient(90deg, #c07a2c, #e8a75a);
       }
 
       /* Interaction prompt, just below the crosshair where the eye already is. */
@@ -1481,20 +1534,13 @@
           <div class="invBody">
             <img id="invFace" alt="" hidden />
           </div>
-          <div class="invBars">
-            <div class="invMeterRow">
-              <span class="invMeterLabel" data-i18n="inv.health">Health</span>
-              <span class="invMeter"><span class="invMeterFill health" id="barHealth"></span></span>
-            </div>
-            <div class="invMeterRow">
-              <span class="invMeterLabel" data-i18n="inv.water">Water</span>
-              <span class="invMeter"><span class="invMeterFill water" id="barWater"></span></span>
-            </div>
-            <div class="invMeterRow">
-              <span class="invMeterLabel" data-i18n="inv.food">Food</span>
-              <span class="invMeter"><span class="invMeterFill food" id="barFood"></span></span>
-            </div>
+        </div>
+        <div class="invPane invBag">
+          <div class="invHead">
+            <span class="invTitle" data-i18n="inv.bag">Bag</span>
+            <span id="invSlots" class="invSlots"></span>
           </div>
+          <div id="invGrid"></div>
         </div>
         <div class="invPane invWide">
           <div class="invHead">
@@ -1503,12 +1549,28 @@
           </div>
           <div id="invRecipes"></div>
         </div>
-        <div class="invPane invBag">
-          <div class="invHead">
-            <span class="invTitle" data-i18n="inv.bag">Bag</span>
-            <span id="invSlots" class="invSlots"></span>
+        <div class="invPane invVitals">
+          <div class="invMeterRow">
+            <span class="invMeterLabel" aria-hidden="true">&#10010;</span>
+            <span class="invMeter"
+              ><span class="invMeterFill health" id="barHealth"></span
+              ><span class="invMeterValue" id="valHealth"></span
+            ></span>
           </div>
-          <div id="invGrid"></div>
+          <div class="invMeterRow">
+            <span class="invMeterLabel" aria-hidden="true">&#128167;</span>
+            <span class="invMeter"
+              ><span class="invMeterFill water" id="barWater"></span
+              ><span class="invMeterValue" id="valWater"></span
+            ></span>
+          </div>
+          <div class="invMeterRow">
+            <span class="invMeterLabel" aria-hidden="true">&#127831;</span>
+            <span class="invMeter"
+              ><span class="invMeterFill food" id="barFood"></span
+              ><span class="invMeterValue" id="valFood"></span
+            ></span>
+          </div>
         </div>
       </div>
     </div>

@@ -44,18 +44,39 @@ async function spawn(label, name, skin, token) {
     [name, skin, token],
   );
   await page.goto(`${url}/?room=${room}`, { waitUntil: 'load' });
-  await page.waitForFunction(() => {
+  await until(page, () => {
     const b = document.getElementById('btnPlay');
     return !!b && !b.disabled;
-  });
+  }, 40000, 'the Play button never enabled');
   await page.click('#btnPlay');
   await page.evaluate(() => window.arena.engine.requestScene('exterior'));
-  await page.waitForFunction(
+  await until(
+    page,
     () => window.arena.engine.scenes.currentName === 'exterior' && !!window.arena.scene?.crowd,
-    null,
-    { timeout: 300000 },
+    60000,
+    'the exterior scene never came up',
   );
   return page;
+}
+
+/**
+ * Waits for a condition in a page, polled from this process.
+ *
+ * Every in-page waiter in this file has been replaced by this, and the reason is worth
+ * recording: `waitForFunction` installs its poll *inside* the page, and a page that is not
+ * in front barely gets scheduled — so a wait could sit there while the thing it wanted had
+ * already happened. With two clients and a five-minute timeout on one of these, a run that
+ * should take ninety seconds hung for twenty minutes before anybody stopped it. Polling
+ * from the test process cannot stall, and every deadline here is now short enough that a
+ * failure is reported rather than waited out.
+ */
+async function until(page, fn, ms, what) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (await page.evaluate(fn)) return true;
+    await page.waitForTimeout(150);
+  }
+  throw new Error(what);
 }
 
 try {
@@ -71,25 +92,25 @@ try {
     // animating a page that is not in front — so each is brought forward while it
     // waits, the same way the networking probe does it.
     await page.bringToFront();
-    const ok = await page
-      .waitForFunction(
-        () => {
-          const n = window.arena.scene?.net;
-          return !!n && n.isOnline && n.remotePlayers.size >= 1;
-        },
-        null,
-        // Polled on a timer, not on animation frames.
-        //
-        // The default is one check per animation frame, and a page that is not in front
-        // barely gets any — so this timed out on the page waiting its turn while the
-        // condition it was waiting for had *already* come true. The diagnostic printed
-        // right afterwards said so in as many words: online, one remote, everything the
-        // wait wanted. It was the asking that had stalled, not the thing being asked
-        // about. A timer keeps ticking in a background page; animation frames do not.
-        { timeout: 120000, polling: 200 },
-      )
-      .then(() => true)
-      .catch(() => false);
+    // Polled from this side, not by an in-page waiter.
+    //
+    // `waitForFunction` installs the poll inside the page, and twice now it has timed out
+    // while the condition it wanted was already true — the diagnostic printed a moment
+    // later said so in as many words: online, one remote, everything the wait was after. It
+    // was the asking that stalled, not the thing being asked about, and moving the poll from
+    // animation frames to an in-page timer did not fix it either. A loop of `evaluate` calls
+    // is driven from the test process, so nothing the page does to its own clocks can stop
+    // it from being asked.
+    const deadline = Date.now() + 30000;
+    let ok = false;
+    while (Date.now() < deadline) {
+      ok = await page.evaluate(() => {
+        const n = window.arena.scene?.net;
+        return !!n && !!n.isOnline && n.remotePlayers.size >= 1;
+      });
+      if (ok) break;
+      await page.waitForTimeout(200);
+    }
     if (!ok) {
       const s = await page.evaluate(() => {
         const n = window.arena.scene?.net;
@@ -188,14 +209,21 @@ try {
    * of a duration is the only version of this that cannot flake.
    */
   const awaitSeen = async (page, id, x, z) => {
-    await page.waitForFunction(
-      ([who, tx, tz]) => {
-        const p = window.arena.scene.net.remotePlayers.get(who);
-        return !!p && Math.hypot(p.x - tx, p.z - tz) < 4;
-      },
-      [id, x, z],
-      { timeout: 30000, polling: 100 },
-    );
+    // Polled from the test process, for the same reason as the readiness wait above.
+    const deadline = Date.now() + 15000;
+    let there = false;
+    while (Date.now() < deadline) {
+      there = await page.evaluate(
+        ([who, tx, tz]) => {
+          const p = window.arena.scene.net.remotePlayers.get(who);
+          return !!p && Math.hypot(p.x - tx, p.z - tz) < 4;
+        },
+        [id, x, z],
+      );
+      if (there) break;
+      await page.waitForTimeout(150);
+    }
+    if (!there) throw new Error(`${id} never arrived at ${x},${z}`);
     // Then real frames, not milliseconds — and that distinction is the whole bug.
     //
     // The sight test is staggered every fourth *frame*, so the wait for it has to be

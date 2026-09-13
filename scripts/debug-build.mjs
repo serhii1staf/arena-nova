@@ -118,6 +118,37 @@ try {
         }
         return null;
       },
+      /**
+       * Stands the player a given distance off a wall's face, looking straight at it.
+       *
+       * Derived from the wall's own pose rather than from wherever the player happened to
+       * be when they built it. The tool keeps its rotation between blocks, so a wall can
+       * land on a side face instead of the one ahead — and a probe that assumes otherwise
+       * is testing a fixture against a wall it is not even looking at.
+       */
+      faceWall(sc, wall, back) {
+        // A wall's thin axis is its local +Z.
+        const nx = Math.sin(wall.ry);
+        const nz = Math.cos(wall.ry);
+        const px = wall.x - nx * back;
+        const pz = wall.z - nz * back;
+        sc.player.spawn(px, pz, Math.atan2(-(wall.x - px), -(wall.z - pz)));
+        sc.player.pitch = 0;
+        sc.player.update(0.016);
+        // Pitched at the wall's own middle, not at the horizon.
+        //
+        // The terrain is generated, so a wall built seven metres away and a player later
+        // teleported three metres from it are not standing at the same height. Level from
+        // the higher of the two, the ray passes clean over a four-metre wall and finds
+        // nothing — which reads as a mounting failure and is really a probe standing on a
+        // slope. Aiming at the middle of the panel removes the slope from the question.
+        const feet = sc.player.feetPosition;
+        const rise = wall.y + 1.6 - (feet.y + 1.7);
+        sc.player.pitch = Math.atan2(rise, back);
+        sc.player.update(0.016);
+        // Frames enough for the camera arm to arrive: the aim ray starts at the lens.
+        for (let i = 0; i < 12; i++) sc.render(1, 0.016);
+      },
       state() {
         const s = w.arena.scene?.buildSite;
         const hud = document.getElementById('buildHud');
@@ -1086,11 +1117,21 @@ try {
     sc.render(1, 0.016);
     if (!s.place()) return { placed: false };
     const w = window.probe.piece('wall', 0);
+    if (!w) return { placed: true, shelf: false };
+    // Stand in front of the wall that was actually built and look at it.
+    //
+    // Not "keep facing the way the wall was placed from": the tool carries a rotation
+    // between blocks, so the panel can land on a side face rather than the one ahead. This
+    // probe used to place a wall out of its own line of sight and still pass, because a
+    // fixture with nothing to hang on silently snapped to the nearest empty line and the
+    // measurement happened to land near the wall anyway. Positioning off the wall's real
+    // pose is the only setup that tests what it claims to.
+    window.probe.faceWall(sc, w, 3);
     s.select('shelf');
     sc.render(1, 0.016);
     if (!s.place()) return { placed: true, shelf: false };
     const f = window.probe.piece('shelf', 0);
-    if (!w || !f) return { placed: true, shelf: false };
+    if (!f) return { placed: true, shelf: false };
     // The wall's thin axis is its local +Z; the fixture must sit off the wall along it.
     const nx = Math.sin(w.ry);
     const nz = Math.cos(w.ry);
@@ -1127,20 +1168,38 @@ try {
     if (!s.place()) return { placed: false };
     const f = window.probe.piece('floor', 0);
     if (!f) return { placed: true, found: false };
-    // Now a bed, aimed at the same square.
+    // Stand on the slab and look down at it, which is how a room actually gets furnished
+    // now that pieces go where the crosshair lands rather than a fixed distance ahead.
+    sc.player.spawn(f.x, f.z + 1.2, 0);
+    sc.player.pitch = -0.55;
+    sc.player.update(0.016);
+    sc.render(1, 0.016);
+    sc.render(1, 0.016);
     s.select('bed');
     sc.render(1, 0.016);
     if (!s.place()) return { placed: true, found: false, bed: false };
     const b = window.probe.piece('bed', 0);
     if (!b) return { placed: true, found: false, bed: false };
+    // Measured against the surface under the bed itself, not against the floor piece's
+    // base. The two are only the same on level ground: `floorHeightAt` counts boulders, so
+    // half a metre sideways can be nearly two metres up, and this check used to read that
+    // slope as the bed floating. What it means to sit on something is that your base is
+    // where the surface is, right where you are.
+    // The highest surface under the bed that is not the bed: the slab's walking surface, or
+    // the bare ground if a boulder pokes up through it. Asking `heightAt` would include the
+    // bed's own top, which is measuring the thing against itself.
+    const worldGround = sc.world.floorHeightAt(b.x, b.z);
+    const slabTop = f.y + 0.3;
+    const surface = Math.max(worldGround, slabTop);
     return {
       placed: true,
       found: true,
       bed: true,
       floorY: +f.y.toFixed(2),
-      // The floor's walking surface is 0.3 above its own base, so a bed standing on it
-      // must have its base there rather than at the floor's base.
       bedY: +b.y.toFixed(2),
+      // Over the slab, so the check is about a built floor rather than open ground.
+      overSlab: Math.abs(b.x - f.x) <= 2 && Math.abs(b.z - f.z) <= 2,
+      onSurface: +(b.y - surface).toFixed(2),
       lift: +(b.y - f.y).toFixed(2),
     };
   });
@@ -1175,15 +1234,32 @@ try {
       sc.player.spawn(px, pz, yaw);
       sc.player.pitch = 0;
       sc.player.update(0.016);
-      sc.render(1, 0.016);
-      sc.render(1, 0.016);
-      return s.place();
+      // At the wall's middle rather than the horizon — the ground under the player and the
+      // ground under the wall are not the same height on generated terrain, and level from
+      // the higher one goes straight over the top of it.
+      const feet = sc.player.feetPosition;
+      sc.player.pitch = Math.atan2(w.y + 1.6 - (feet.y + 1.7), 3);
+      sc.player.update(0.016);
+      // Enough frames for the camera arm to actually arrive.
+      //
+      // The aim ray starts at the lens and is clipped to a window measured from the
+      // character, so until the arm has caught up with a teleport the crosshair means
+      // nothing — and a fixture that finds no wall in that window quietly stands on the
+      // floor instead, several metres from where it was wanted. Three frames was not
+      // enough for a jump of several metres and the first of the two torches went astray.
+      for (let i = 0; i < 12; i++) sc.render(1, 0.016);
+      const info = s.aimInfo();
+      const ok = s.place();
+      return { ok, panel: info.panel, hit: +info.hit.toFixed(2) };
     };
-    const first = put(-1.2);
-    const second = put(1.2);
+    const one = put(-1.2);
+    const two = put(1.2);
+    const first = one.ok;
+    const second = two.ok;
     const a = window.probe.piece('torch', 0);
     const b = window.probe.piece('torch', 1);
-    if (!a || !b) return { placed: true, found: false, first, second, count: a ? 1 : 0 };
+    if (!a || !b)
+      return { placed: true, found: false, first, second, one, two, count: a ? 1 : 0 };
     // Both on the near side of the wall, and a real distance apart along it.
     const sideOf = (p) => Math.sign((p.x - w.x) * nx + (p.z - w.z) * nz);
     return {
@@ -1196,6 +1272,10 @@ try {
       // The player stood on the negative side of the wall's own normal.
       nearSide: sideOf(a) === -1 && sideOf(b) === -1,
       offset: +Math.abs((a.x - w.x) * nx + (a.z - w.z) * nz).toFixed(2),
+      // Both must have found the wall itself. A fixture that found nothing stands on the
+      // floor, which is correct behaviour and a failed setup for this check.
+      one,
+      two,
     };
   });
   console.log(`aimed mount: ${JSON.stringify(aimedMount)}`);
@@ -1266,16 +1346,29 @@ try {
     sc.render(1, 0.016);
     if (!s.place()) return { placed: false };
     const w = window.probe.piece('wall', 0);
+    if (!w) return { placed: true, found: false };
+    window.probe.faceWall(sc, w, 2.4);
     s.select('cabinet');
     sc.render(1, 0.016);
     if (!s.place()) return { placed: true, found: false };
     const c = window.probe.piece('cabinet', 0);
-    if (!w || !c) return { placed: true, found: false };
+    if (!c) return { placed: true, found: false };
     const nx = Math.sin(w.ry);
     const nz = Math.cos(w.ry);
+    const info = s.aimInfo();
     return {
       placed: true,
       found: true,
+      // What the crosshair actually resolved to, so a mounting fault is readable rather
+      // than inferred from the position it ended up at.
+      aim: {
+        near: +info.near.toFixed(2),
+        far: +info.far.toFixed(2),
+        hit: +info.hit.toFixed(2),
+        panel: info.panel,
+      },
+      wallAt: [+w.x.toFixed(2), +w.z.toFixed(2)],
+      cabAt: [+c.x.toFixed(2), +c.z.toFixed(2)],
       // Clear of the wall by its own depth plus the wall's half-thickness, so its back is
       // against the wall rather than through it.
       offset: +Math.abs((c.x - w.x) * nx + (c.z - w.z) * nz).toFixed(2),
@@ -1300,6 +1393,10 @@ try {
     // and that number is baked into every material's compiled program — which is what made
     // the first torch freeze the game for five seconds. Brightness is the switch now.
     const burning = () => lights.filter((l) => l.intensity > 0);
+    // Settle first. The pool eases rather than snapping now, so brightness left over from
+    // the previous block is still draining and reading it straight after `clear()` reports
+    // a lit pool in an empty world — which is the probe being early, not a fault.
+    for (let i = 0; i < 40; i++) s.lightUp(sc.player.feetPosition, 0.05);
     const before = burning().length;
     s.select('campfire');
     sc.player.spawn(2100, 2100, 0);
@@ -1316,10 +1413,20 @@ try {
     const litCount = lit.length;
     const litPower = lit[0]?.intensity ?? 0;
     const litAt = f ? +Math.hypot(lit[0].position.x - f.x, lit[0].position.z - f.z).toFixed(2) : null;
-    // Walk far away: the pool must let go, so it never costs anything for fires nobody is
-    // standing near.
-    s.lightUp({ x: 2100 + 400, y: 0, z: 2100 + 400 });
+    // Now check it *fades* rather than snapping off. One short step must leave it part way
+    // down — that is the whole point of the easing — and enough steps must reach zero, so
+    // a fire nobody is near really does cost nothing.
+    const awayFar = { x: 2100 + 400, y: 0, z: 2100 + 400 };
+    const away = awayFar;
+    s.lightUp(away, 0.05);
+    const midFade = burning()[0]?.intensity ?? 0;
+    const fading = midFade > 0.5 && midFade < litPower;
+    for (let i = 0; i < 40; i++) s.lightUp(away, 0.05);
     const farLit = burning().length;
+    // And coming back must ease up rather than pop on.
+    s.lightUp(sc.player.feetPosition, 0.05);
+    const risingTo = burning()[0]?.intensity ?? 0;
+    const rising = risingTo > 0 && risingTo < litPower * 0.9;
     return {
       placed: true,
       pool: lights.length,
@@ -1330,10 +1437,160 @@ try {
       shadowless: lights.every((l) => l.castShadow === false),
       // Never hidden, at any point: that is the invariant that keeps placing a fire free.
       counted: lights.every((l) => l.visible === true),
+      fading,
+      rising,
+      midFade: +midFade.toFixed(2),
       farLit,
     };
   });
   console.log(`firelight: ${JSON.stringify(firelight)}`);
+
+  // ---- A whole room, then furnish it from inside ---------------------------
+  // The report this exists for, in the order it was reported: foundation, walls, a floor
+  // slab overhead for a ceiling, and then nothing at all could be placed indoors. The cause
+  // was that the aim point was a fixed seven metres ahead, which from inside a four-metre
+  // room is on the far side of the wall — so every slot being offered was outside the
+  // building. This walks the whole sequence rather than testing any one piece.
+  const indoors = await page.evaluate(() => {
+    const sc = window.arena.scene;
+    const s = sc.buildSite;
+    s.clear();
+    const settle = (n) => {
+      for (let i = 0; i < n; i++) sc.render(1, 0.016);
+    };
+    const look = (x, z, yaw, pitch) => {
+      sc.player.spawn(x, z, yaw);
+      sc.player.pitch = pitch;
+      sc.player.update(0.016);
+      settle(10);
+    };
+
+    // Well inside the map. The first attempt at this used (2700, 2700), which is outside the
+    // world's radius — the controller quietly clamped the player onto the boundary, five
+    // metres short in *both* axes, and every piece in the block inherited the same offset.
+    // The walls did ring a square; it was simply not the square the probe had built on. The
+    // `landed` check below is what makes that impossible to miss again.
+    const HOME_X = 2000;
+    const HOME_Z = 1200;
+    look(HOME_X, HOME_Z, 0, -0.45);
+    const landed =
+      Math.hypot(sc.player.feetPosition.x - HOME_X, sc.player.feetPosition.z - HOME_Z) < 0.5;
+    // Where the character and the crosshair actually are, before anything is placed. A
+    // systematic offset in every piece of a block is a sign the setup is not what it says.
+    const here = sc.player.feetPosition;
+    const dir = sc.camera.getWorldDirection(sc.camera.position.clone());
+    const where = {
+      feet: [+here.x.toFixed(1), +here.z.toFixed(1)],
+      dir: [+dir.x.toFixed(2), +dir.y.toFixed(2), +dir.z.toFixed(2)],
+      cam: [+sc.camera.position.x.toFixed(1), +sc.camera.position.z.toFixed(1)],
+    };
+    s.select('foundation');
+    settle(1);
+    if (!s.place()) return { base: false };
+    const f = window.probe.piece('foundation', 0);
+    if (!f) return { base: false };
+
+    // Ring the square by walking round it, which is how the edge lattice is meant to be
+    // used: the wall goes on the side of the square you are looking at.
+    //
+    // Standing in the middle and turning does not do it, and that is worth stating because
+    // it was this probe's first attempt: from a cell's centre, a downward glance lands three
+    // metres out — past the edge of the square and into the next one — so all four walls
+    // went up around a neighbour. Aiming at the square from outside it is unambiguous.
+    // From one stance, turning between each. The aim never moves, so the square never
+    // changes, and `rotate` steps to the next side of it — which is what the edge lattice
+    // exists for. Walking round the outside and aiming in was the first attempt and it is
+    // subject to two things this is not: the tool's accumulated rotation, and the slope of
+    // the ground outside the square, which can stop the ray short of it.
+    look(f.x, f.z + 1.2, 0, -0.5);
+    s.select('wall');
+    for (let i = 0; i < 4; i++) {
+      settle(2);
+      s.place();
+      s.rotate();
+    }
+    const walls = window.probe.piece('wall', 0)?.count ?? 0;
+    // Four distinct edges of this one square, not four walls scattered over the map.
+    const poses = [0, 1, 2, 3].map((i) => window.probe.piece('wall', i));
+    const ringed =
+      poses.every(
+        (w) => !!w && Math.abs(w.x - f.x) <= 2.1 && Math.abs(w.z - f.z) <= 2.1,
+      ) && new Set(poses.map((w) => `${(w.x - f.x).toFixed(1)}|${(w.z - f.z).toFixed(1)}`)).size === 4;
+
+    // A ceiling: a floor slab a tier up, aimed by looking up from inside.
+    look(f.x, f.z, 0, 0.5);
+    s.select('floor');
+    settle(2);
+    const ceilingOk = s.place();
+    const ceiling = window.probe.piece('floor', 0);
+    const overhead =
+      !!ceiling &&
+      Math.abs(ceiling.x - f.x) <= 2.1 &&
+      Math.abs(ceiling.z - f.z) <= 2.1 &&
+      ceiling.y > f.y + 1.5;
+
+    // Now furnish it from the inside, which is the part that did not work at all.
+    // Off centre, so a downward glance lands mid-square rather than exactly on the boundary
+    // between two of them, where the rounding could go either way.
+    look(f.x, f.z + 1.2, 0, -0.5);
+    s.select('bed');
+    settle(2);
+    const bedOk = s.place();
+    const bed = window.probe.piece('bed', 0);
+    const bedInside = !!bed && Math.abs(bed.x - f.x) <= 2 && Math.abs(bed.z - f.z) <= 2;
+
+    // And a torch on one of its own walls, aimed from inside the room.
+    const w0 = window.probe.piece('wall', 0);
+    let torchOk = false;
+    let torchPanel = null;
+    let torchNear = null;
+    if (w0) {
+      const nx = Math.sin(w0.ry);
+      const nz = Math.cos(w0.ry);
+      // Stand a metre off that wall's inner face, looking at it.
+      const side = Math.sign((f.x - w0.x) * nx + (f.z - w0.z) * nz) || 1;
+      const px = w0.x + nx * side * 1.4;
+      const pz = w0.z + nz * side * 1.4;
+      sc.player.spawn(px, pz, Math.atan2(-(w0.x - px), -(w0.z - pz)));
+      sc.player.pitch = 0;
+      sc.player.update(0.016);
+      const feet = sc.player.feetPosition;
+      sc.player.pitch = Math.atan2(w0.y + 1.6 - (feet.y + 1.7), 1.4);
+      sc.player.update(0.016);
+      settle(10);
+      s.select('torch');
+      settle(2);
+      torchPanel = s.aimInfo().panel;
+      torchOk = s.place();
+      const t0 = window.probe.piece('torch', 0);
+      if (t0) torchNear = +Math.abs((t0.x - w0.x) * nx + (t0.z - w0.z) * nz).toFixed(2);
+    }
+
+    return {
+      base: true,
+      landed,
+      where,
+      walls,
+      ringed,
+      at: [+f.x.toFixed(1), +f.y.toFixed(1), +f.z.toFixed(1)],
+      wallsAt: [0, 1, 2, 3].map((i) => {
+        const w = window.probe.piece('wall', i);
+        return w ? [+(w.x - f.x).toFixed(1), +(w.z - f.z).toFixed(1)] : null;
+      }),
+      ceilingAt: ceiling
+        ? [+(ceiling.x - f.x).toFixed(1), +(ceiling.y - f.y).toFixed(1), +(ceiling.z - f.z).toFixed(1)]
+        : null,
+      bedAt: bed ? [+(bed.x - f.x).toFixed(1), +(bed.z - f.z).toFixed(1)] : null,
+      ceilingOk,
+      overhead,
+      bedOk,
+      bedInside,
+      torchOk,
+      torchPanel,
+      torchNear,
+    };
+  });
+  console.log(`a room, furnished: ${JSON.stringify(indoors)}`);
 
   // ---- Lighting a fire must not rebuild every shader in the scene ----------
   // Reported as the game freezing for five seconds when a torch or a campfire goes down,
@@ -1534,7 +1791,15 @@ try {
     sc.player.update(0.016);
     sc.render(1, 0.016);
     s.place();
-    sc.render(1, 0.016);
+    const second = window.probe.piece('wall', 1);
+    if (!second) return { ok: false, second: false };
+    // Look straight at the second wall, from its own pose.
+    //
+    // Standing where it was built from is not the same thing: the tool keeps a rotation,
+    // so a wall can land on a side face — a plane parallel to the view — which a level ray
+    // never enters however close it is. This check used to depend on how many times
+    // something earlier in the run had pressed rotate.
+    window.probe.faceWall(sc, second, 3.2);
     const aimedBefore = s.aimedKind();
     const before = s.count();
     const ok = s.removeAimed();
@@ -1716,9 +1981,10 @@ try {
   // Freed means the game is not holding the mouse, and pressing again gives it back.
   const cursorToggles =
     cursor.freed === false && freed.freed === true && freed.locked === false && regrabbed === false;
-  // A bed on a floor stands on the floor's surface, not at the floor's base.
+  // A bed put down on a built floor rests on that floor's walking surface: it lands over
+  // the slab, and its base is exactly where the composed surface under it is.
   const sitsOnFloor =
-    onTopOf.found === true && onTopOf.lift > 0.2 && onTopOf.lift < 0.6;
+    onTopOf.found === true && onTopOf.overSlab === true && Math.abs(onTopOf.onSurface) < 0.02;
   // Two fixtures aimed at two points along one wall land apart, both on the near side.
   // Two fixtures aimed at two points along one wall land apart from each other, both on
   // the side the player was standing on. How far they sit off the wall is measured by the
@@ -1774,7 +2040,23 @@ try {
     firelight.intensity > 0 &&
     firelight.shadowless === true &&
     firelight.counted === true &&
+    firelight.fading === true &&
+    firelight.rising === true &&
     firelight.farLit === 0;
+  // A whole house: base, four walls round that square, a ceiling directly overhead, and
+  // then a bed and a torch placed from inside it.
+  const placesIndoors =
+    indoors.base === true &&
+    indoors.landed === true &&
+    indoors.walls === 4 &&
+    indoors.ringed === true &&
+    indoors.ceilingOk === true &&
+    indoors.overhead === true &&
+    indoors.bedOk === true &&
+    indoors.bedInside === true &&
+    indoors.torchOk === true &&
+    indoors.torchPanel === 'wall' &&
+    indoors.torchNear < 0.4;
   // Not one program compiled by lighting a fire, and the pool still lights.
   const lightsAreFree =
     noRecompile.ok === true &&
@@ -1925,7 +2207,12 @@ try {
   line(
     'fires light the place up:',
     firesLight,
-    `pool=${firelight.pool} lit=${firelight.lit} at=${firelight.atFire}m power=${firelight.intensity} away=${firelight.farLit}`,
+    `pool=${firelight.pool} lit=${firelight.lit} at=${firelight.atFire}m power=${firelight.intensity} fades=${firelight.fading}/${firelight.midFade} rises=${firelight.rising} away=${firelight.farLit}`,
+  );
+  line(
+    'a room, built and furnished:',
+    placesIndoors,
+    `walls=${indoors.walls}/${indoors.ringed} ceiling=${indoors.overhead} bed=${indoors.bedInside} torch=${indoors.torchPanel}@${indoors.torchNear}`,
   );
   line(
     'a fire compiles no shaders:',
@@ -1942,7 +2229,11 @@ try {
     furnishDarker,
     `wall=${stain.wall} furniture=${stain.table} materials=${stain.materials}`,
   );
-  line('a bed on a floor sits on it:', sitsOnFloor, `lift=${onTopOf.lift}`);
+  line(
+    'a bed on a floor sits on it:',
+    sitsOnFloor,
+    `onSurface=${onTopOf.onSurface} overSlab=${onTopOf.overSlab} lift=${onTopOf.lift}`,
+  );
   line(
     'fixtures go where you aim:',
     mountsWhereAimed,
@@ -2009,6 +2300,7 @@ try {
     fixturesMount &&
     sitsOnFloor &&
     mountsWhereAimed &&
+    placesIndoors &&
     doorsOpen &&
     cursorToggles &&
     labelCentred &&

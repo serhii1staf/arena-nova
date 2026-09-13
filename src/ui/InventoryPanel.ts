@@ -40,6 +40,8 @@ export class InventoryPanel {
   private readonly list: HTMLElement | null;
   private readonly face: HTMLImageElement | null;
   private readonly bars: Record<'health' | 'water' | 'food', HTMLElement | null>;
+  /** The number printed on each bar. */
+  private readonly values: Record<'health' | 'water' | 'food', HTMLElement | null>;
   private readonly hint: HTMLElement | null;
   private open = false;
   private icons = new Map<ItemId, string>();
@@ -64,6 +66,11 @@ export class InventoryPanel {
       health: document.getElementById('barHealth'),
       water: document.getElementById('barWater'),
       food: document.getElementById('barFood'),
+    };
+    this.values = {
+      health: document.getElementById('valHealth'),
+      water: document.getElementById('valWater'),
+      food: document.getElementById('valFood'),
     };
 
     inventory().onChange(() => {
@@ -218,8 +225,17 @@ export class InventoryPanel {
     const v = inventory().state;
     for (const [key, el] of Object.entries(this.bars) as [keyof typeof this.bars, HTMLElement | null][]) {
       if (!el) continue;
-      const pct = `${Math.round(v[key] * 100)}%`;
+      const whole = Math.round(v[key] * 100);
+      const pct = `${whole}%`;
       if (el.style.width !== pct) el.style.width = pct;
+      // The value, printed on the bar. Written only when it changes: this runs every frame
+      // the panel is open, and these meters drain slowly enough that the rounded number is
+      // the same for tens of seconds at a time.
+      const value = this.values[key];
+      if (value) {
+        const text = String(whole);
+        if (value.textContent !== text) value.textContent = text;
+      }
     }
   }
 

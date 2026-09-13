@@ -348,7 +348,7 @@ export class ExteriorScene implements GameScene {
     this.stepSurvival(frameDelta);
     // Firelight follows the player rather than existing per fire, so a room full of
     // torches costs the same as one torch.
-    this.buildSite.lightUp(p);
+    this.buildSite.lightUp(p, frameDelta);
 
     // Build preview. Driven from the camera rather than from the body, so the piece
     // lands where the crosshair points in third person too. Returns immediately
