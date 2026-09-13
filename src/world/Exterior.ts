@@ -17,6 +17,8 @@ import { applyTriplanarUV, boxAt } from './builders/geometry.ts';
 import { createLandmarks, type LandmarkStreamer } from './Landmarks.ts';
 import { createVillages, type VillageStreamer } from './Village.ts';
 import { disposePieceAssets } from './Building.ts';
+import { createVillagers, type VillagerCrew } from './Villagers.ts';
+import { createLivestock, type LivestockHerd } from './Livestock.ts';
 import { buildPortal, type PortalBuild } from './Portal.ts';
 import { PropRegistry } from './PropRegistry.ts';
 import { createScatter, type ScatterStreamer } from './Scatter.ts';
@@ -175,6 +177,14 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
   // to a cell, and their own terrace family in `WorldGen` â€” see `villageSiteFor`.
   const villages: VillageStreamer = createVillages(assets, registry);
   group.add(villages.group);
+
+  // The people and the animals that live in them. Both are a fixed crew reassigned to
+  // whichever settlement the player is near, so a world of two hundred villages costs what
+  // one does — see the headers of Villagers.ts and Livestock.ts.
+  const villagers: VillagerCrew = createVillagers();
+  group.add(villagers.group);
+  const livestock: LivestockHerd = createLivestock();
+  group.add(livestock.group);
 
   // Falling water where the rivers run off the escarpments. Streamed like the
   // rest of the world and derived from the same height field, so a fall is always
@@ -471,6 +481,8 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     scatter.update(playerPos);
     landmarks.update(playerPos, elapsed);
     villages.update(playerPos, elapsed);
+    villagers.update(dt, playerPos, air.nightFactor, villages);
+    livestock.update(dt, playerPos, villages);
     waterfalls.update(playerPos, elapsed, air.air);
 
     // Streaming shares one time budget per frame, spent in priority order:
@@ -578,6 +590,8 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     puddles.dispose();
     wildlife.dispose();
     waterfalls.dispose();
+    livestock.dispose();
+    villagers.dispose();
     villages.dispose();
     landmarks.dispose();
     scatter.dispose();

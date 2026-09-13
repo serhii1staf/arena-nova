@@ -32,6 +32,8 @@ import {
   surfaceBiomeAt,
   surfaceHeightAt,
   surfaceSlopeAt,
+  villageSiteFor,
+  VILLAGE_CELL,
   WORLD,
 } from './WorldGen.ts';
 import type { Wind } from './Wind.ts';
@@ -464,6 +466,31 @@ export function createScatter(
 
         // A single random test turns the density into a probability.
         if (r3 > Math.min(1, density * 0.62)) continue;
+
+        // Nothing grows in a village.
+        //
+        // Two problems, one test. Visually, trees and boulders were scattered straight
+        // through a settlement — standing in the road, growing out of a roof — because this
+        // function had no idea settlements existed. And it is wasted work: those are the
+        // triangles least likely to be visible and the ones most likely to be inside a wall.
+        //
+        // The radius is the built-up part of the pad, not the whole terrace: the blend ring
+        // outside it should keep its grass, or a village sits in a bald circle. Grass and the
+        // carpet are exempt, because a lawn between the houses is wanted — it is the trees
+        // and the rocks that cannot be there.
+        if (layer !== 'grass' && layer !== 'carpet' && layer !== 'flower') {
+          const vcx = Math.floor(x / VILLAGE_CELL);
+          const vcz = Math.floor(z / VILLAGE_CELL);
+          let inVillage = false;
+          for (let vz = -1; vz <= 1 && !inVillage; vz++) {
+            for (let vx = -1; vx <= 1 && !inVillage; vx++) {
+              const site = villageSiteFor(vcx + vx, vcz + vz);
+              if (!site) continue;
+              if (Math.hypot(x - site.x, z - site.z) < 56) inVillage = true;
+            }
+          }
+          if (inVillage) continue;
+        }
 
         // Nothing grows on cliffs.
         const slope = surfaceSlopeAt(x, z);

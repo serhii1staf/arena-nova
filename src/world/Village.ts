@@ -162,11 +162,44 @@ const PLANS: readonly Plan[] = [
   { w: 3, d: 3, storeys: 2, role: 'hall' },
 ];
 
+/**
+ * A place in a village somebody belongs to.
+ *
+ * Recorded while the layout is generated rather than searched for afterwards, because the
+ * generator is the only thing that knows which building is a home and which is a forge — and
+ * reverse-engineering that from placed geometry would be guessing at what it had just decided.
+ */
+export interface VillagePlace {
+  x: number;
+  y: number;
+  z: number;
+  role: Plan['role'];
+}
+
+/** What a settlement offers whoever lives in it. */
+export interface VillageInfo {
+  key: string;
+  x: number;
+  y: number;
+  z: number;
+  /** Radius the settlement occupies, for wandering and for spawning animals. */
+  radius: number;
+  homes: VillagePlace[];
+  works: VillagePlace[];
+  /** The square, where everyone ends up in the evening. */
+  centre: VillagePlace;
+}
+
 export interface VillageStreamer {
   group: Group;
   update(position: Vector3, elapsed: number): void;
   pump(deadline: number, force?: boolean): number;
   prime(position: Vector3, cells: number): void;
+  /**
+   * The loaded settlement nearest a point, or null. Villagers and livestock read this
+   * rather than holding their own copy of the layout.
+   */
+  nearest(position: Vector3): VillageInfo | null;
   dispose(): void;
 }
 
@@ -179,6 +212,8 @@ interface Built {
   lamps: { x: number; y: number; z: number }[];
   /** Instanced meshes owned by this village, to be disposed with it. */
   meshes: InstancedMesh[];
+  /** Null for an empty cell. */
+  info: VillageInfo | null;
 }
 
 /**
@@ -362,7 +397,7 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     const site = villageSiteFor(cx, cz);
     if (!site) {
       // Recorded as loaded so an empty cell is not retried every frame.
-      loaded.set(k, { key: k, cx, cz, root: new Group(), lamps: [], meshes: [] });
+      loaded.set(k, { key: k, cx, cz, root: new Group(), lamps: [], meshes: [], info: null });
       return;
     }
 
@@ -382,6 +417,8 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
      * one already took, which is the difference between a plan and a pile.
      */
     const slots: Slot[] = [];
+    const homes: VillagePlace[] = [];
+    const works: VillagePlace[] = [];
     const taken = new Set<string>();
     const cellKey = (gx: number, gz: number) => `${gx}|${gz}`;
     /** Cells the roads run through, kept clear of buildings. */
@@ -471,6 +508,14 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         for (const s of inner) {
           slots.push({ ...s, cx: baseX + s.cx, cz: baseZ + s.cz });
         }
+        // Record what this building is for and where its middle is, so somebody can live or
+        // work in it. Taken from the plan while it is being laid out — the only moment
+        // anything knows the difference between a home and a forge.
+        const midX = site.x + (baseX + (w - 1) / 2) * G;
+        const midZ = site.z + (baseZ + (d - 1) / 2) * G;
+        const place: VillagePlace = { x: midX, y: baseY, z: midZ, role: plan.role };
+        if (plan.role === 'home') homes.push(place);
+        else works.push(place);
         return true;
       }
       return false;
@@ -640,7 +685,38 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     }
 
     group.add(root);
-    loaded.set(k, { key: k, cx, cz, root, lamps: lampSpots, meshes });
+    loaded.set(k, {
+      key: k,
+      cx,
+      cz,
+      root,
+      lamps: lampSpots,
+      meshes,
+      info: {
+        key: k,
+        x: site.x,
+        y: baseY,
+        z: site.z,
+        radius: reach * G,
+        homes,
+        works,
+        centre: { x: site.x, y: baseY, z: site.z, role: 'hall' },
+      },
+    });
+  };
+
+  const nearest_ = (position: Vector3): VillageInfo | null => {
+    let best: VillageInfo | null = null;
+    let bestD2 = Infinity;
+    for (const cell of loaded.values()) {
+      if (!cell.info) continue;
+      const d2 = (cell.info.x - position.x) ** 2 + (cell.info.z - position.z) ** 2;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = cell.info;
+      }
+    }
+    return best;
   };
 
   const dropCell = (cell: Built): void => {
@@ -733,7 +809,7 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
     lamps.length = 0;
   };
 
-  return { group, update, pump, prime, dispose };
+  return { group, update, pump, prime, nearest: nearest_, dispose };
 }
 
 /** Metrics the diagnostics read. Exported so a probe can assert on layout, not pixels. */

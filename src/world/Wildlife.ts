@@ -476,6 +476,8 @@ function injectLimbAnimation(material: MeshStandardMaterial): void {
 type Behaviour = 'graze' | 'wander' | 'flee';
 
 interface Animal {
+  /** Which of four frame groups this animal thinks on when it is far away. */
+  stagger: number;
   species: number;
   slot: number;
   alive: boolean;
@@ -562,6 +564,8 @@ export function createWildlife(density = 1): WildlifeField {
       animals.push({
         species: si,
         slot,
+        // Spread across the four frame groups, so distant animals do not all think at once.
+        stagger: animals.length % 4,
         alive: false,
         x: 0,
         y: 0,
@@ -609,7 +613,11 @@ export function createWildlife(density = 1): WildlifeField {
     a.targetZ = a.z + Math.sin(angle) * dist;
   };
 
+  /** Frames since the field was built, for staggering distant thinking. */
+  let frame = 0;
+
   const update = (dt: number, playerPos: Vector3): void => {
+    frame++;
     for (const a of animals) {
       const species = SPECIES[a.species]!;
 
@@ -644,6 +652,29 @@ export function createWildlife(density = 1): WildlifeField {
       const playerDist = Math.hypot(pdx, pdz);
       const alert = species.alertRadius * a.scale;
 
+      /**
+       * Distant animals think on every fourth frame, with four frames' worth of time.
+       *
+       * The behaviour tree, the terrain height query and the eased gait ran for every animal
+       * on every frame regardless of distance — eighteen animals out to 190 m, each doing a
+       * `surfaceHeightAt` and a handful of trig, whether it was a metre away or a hundred and
+       * eighty. Nothing about a moose grazing at 150 m needs deciding sixty times a second.
+       *
+       * Staggered by index rather than by a shared counter, so the skipped work is spread
+       * across frames instead of every distant animal thinking on the same one — which would
+       * simply move the cost rather than reduce it. Anything inside its own alert radius is
+       * exempt: fleeing has to be immediate or it reads as the animal noticing you late.
+       */
+      const far = playerDist > alert + 45;
+      // Skipping only the deciding. The upload is a separate pass below and runs for every
+       // living animal regardless, so a distant one keeps standing where it is rather than
+       // vanishing on three frames in four.
+      if (far && (frame + a.stagger) % 4 !== 0) continue;
+      // Four frames' worth of time on the frame it does think, so a distant animal covers the
+      // same ground at the same speed — the saving is in how often it decides, not in how
+      // fast it walks.
+      const dtStep = far ? dt * 4 : dt;
+
       if (playerDist < alert) {
         // Bolt directly away from the player and keep running for a while.
         a.behaviour = 'flee';
@@ -653,7 +684,7 @@ export function createWildlife(density = 1): WildlifeField {
         a.targetZ = a.z - (pdz / len) * 60;
       }
 
-      a.timer -= dt;
+      a.timer -= dtStep;
       if (a.timer <= 0) {
         if (a.behaviour === 'flee') {
           // Calm down, but stay wary for a moment before settling.
@@ -688,7 +719,7 @@ export function createWildlife(density = 1): WildlifeField {
             pickWanderTarget(a);
           }
         } else {
-          const step = Math.min(tdist, speed * dt);
+          const step = Math.min(tdist, speed * dtStep);
           const nx = a.x + (tdx / tdist) * step;
           const nz = a.z + (tdz / tdist) * step;
           // Refuse to walk into water or up a cliff; pick a new target instead.
@@ -713,11 +744,11 @@ export function createWildlife(density = 1): WildlifeField {
 
       // ---- Animation drivers ---------------------------------------------
       const targetGait = speed > 0 ? Math.min(1, speed / species.runSpeed) : 0;
-      a.gait += (targetGait - a.gait) * Math.min(1, dt * 5);
+      a.gait += (targetGait - a.gait) * Math.min(1, dtStep * 5);
       const targetGraze = a.behaviour === 'graze' ? 1 : 0;
-      a.graze += (targetGraze - a.graze) * Math.min(1, dt * 2.5);
+      a.graze += (targetGraze - a.graze) * Math.min(1, dtStep * 2.5);
       // Stride frequency follows real speed, so the feet do not skate.
-      a.phase += dt * species.gaitRate * (1 + a.gait * 3.2);
+      a.phase += dtStep * species.gaitRate * (1 + a.gait * 3.2);
       if (a.phase > Math.PI * 2) a.phase -= Math.PI * 2;
     }
 
