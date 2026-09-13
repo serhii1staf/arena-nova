@@ -65,6 +65,22 @@ const MAX_PER_KIND = 200;
 const LAMP_POOL = 3;
 const LAMP_RANGE = 46;
 
+/** Fixtures that hang against a wall rather than standing on the boundary line. */
+const MOUNTED_KINDS: ReadonlySet<PieceKind> = new Set(['shelf', 'torch', 'lantern']);
+/** How far back off the wall line a fixture's origin sits. Matches `BuildSite`. */
+const MOUNT_OFF = 0.14;
+
+/**
+ * How far above a slot's own level the floor of that slot is.
+ *
+ * Ground floors are laid on `foundation`, whose deck is 0.42 m up; upper storeys are `floor`
+ * at 0.3 m. Anything standing in a room has to be lifted by this or it is sunk into the
+ * plinth — which is what happened to every bed and table in the first villages.
+ */
+function floorLift(s: { tier: number }): number {
+  return s.tier === 0 ? PIECE_METRICS.foundationTop : PIECE_METRICS.floorTop;
+}
+
 /**
  * A slot on the building lattice: which piece, which cell, which storey, which way round.
  *
@@ -571,11 +587,29 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
       }
     }
 
-    // Street lamps along the roads, and clutter at the edges of the square.
-    for (let i = -reach; i <= reach; i += 3) {
-      if (i === 0) continue;
-      slots.push({ kind: 'torch', cx: i, cz: 0, tier: 0, turn: 1 });
-      slots.push({ kind: 'torch', cx: 0, cz: i, tier: 0, turn: 0 });
+    /**
+     * Street lighting, and fences to walk between.
+     *
+     * Braziers rather than torches: a torch is a wall fixture, and stood in the open with
+     * nothing behind it, it is a bracket floating over the paving — which is exactly what the
+     * first villages looked like. A brazier is a standing fire bowl and reads correctly on its
+     * own. Railings run along the verge between the lamps, so a road is a road with edges
+     * rather than a strip of lighter ground.
+     */
+    for (let i = -reach; i <= reach; i++) {
+      if (Math.abs(i) < 2) continue;
+      if (i % 3 === 0) {
+        // Lamps at the roadside, offset onto the verge so they are not underfoot.
+        slots.push({ kind: 'brazier', cx: i, cz: 0, tier: 0, turn: 0, ox: 0, oz: 1.6 });
+        slots.push({ kind: 'brazier', cx: 0, cz: i, tier: 0, turn: 0, ox: 1.6, oz: 0 });
+      } else {
+        // Fencing on both verges of both roads. `railing` is the fence piece; the side index
+        // puts it on the cell boundary facing the road.
+        slots.push({ kind: 'railing', cx: i, cz: 0, tier: 0, turn: 1 });
+        slots.push({ kind: 'railing', cx: i, cz: 0, tier: 0, turn: 3 });
+        slots.push({ kind: 'railing', cx: 0, cz: i, tier: 0, turn: 0 });
+        slots.push({ kind: 'railing', cx: 0, cz: i, tier: 0, turn: 2 });
+      }
     }
     for (let i = 0; i < 5; i++) {
       const a = rand(800 + i) * Math.PI * 2;
@@ -632,17 +666,62 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
 
       for (let i = 0; i < list.length; i++) {
         const s = list[i]!;
-        // Cell pieces are centred on their cell; edge pieces sit on a boundary, which the
-        // piece geometry already expresses by being modelled at the cell's edge — so the
-        // slot's own turn is what puts it on the right side. Furnishings take a sub-cell
-        // offset. This mirrors `BuildSite.snap` rather than reimplementing it.
-        const half = lattice === 'corner' ? G / 2 : 0;
-        pos.set(
-          site.x + s.cx * G + half + (s.ox ?? 0),
-          baseY + s.tier * (G / 2),
-          site.z + s.cz * G + half + (s.oz ?? 0),
-        );
-        quat.setFromAxisAngle(up, (s.turn * Math.PI) / 2);
+        const cellX = site.x + s.cx * G;
+        const cellZ = site.z + s.cz * G;
+        let y = baseY + s.tier * (G / 2);
+        let turn = s.turn;
+        let px = cellX + (s.ox ?? 0);
+        let pz = cellZ + (s.oz ?? 0);
+
+        if (lattice === 'edge') {
+          /**
+           * Edge pieces stand on a cell *boundary*, and getting this wrong is why the first
+           * villages had no walls, no doors and no fences at all.
+           *
+           * The geometry is modelled centred on its own origin — a wall runs four metres
+           * along local X and is a fifth of a metre thick in local Z — so the origin has to
+           * be moved half a cell out to the boundary, and the piece turned so its length
+           * runs along that boundary. Placed at the cell's centre with the side index used
+           * directly as a rotation, as it was, every wall in the village ended up lying
+           * inside its own floor slab: from outside a house you saw paving and a roof with
+           * nothing between them.
+           *
+           * This is exactly what `BuildSite.snap` does for the edge lattice. The rotation is
+           * *not* the side index: sides 0 and 2 face along X, so the piece is turned a
+           * quarter to run along Z, while sides 1 and 3 are already aligned.
+           */
+          const nx = s.turn === 0 ? 1 : s.turn === 2 ? -1 : 0;
+          const nz = s.turn === 1 ? 1 : s.turn === 3 ? -1 : 0;
+          px = cellX + nx * (G / 2);
+          pz = cellZ + nz * (G / 2);
+          turn = s.turn === 0 || s.turn === 2 ? 1 : 0;
+
+          if (MOUNTED_KINDS.has(kind)) {
+            // A fixture stands *against* the wall rather than on the line, pushed back into
+            // the room by the wall's own half-thickness and turned to face inward — its
+            // local +Z is the side its bracket sticks out of.
+            px -= nx * MOUNT_OFF;
+            pz -= nz * MOUNT_OFF;
+            turn = s.turn === 0 ? 3 : s.turn === 1 ? 2 : s.turn === 2 ? 1 : 0;
+            // Chest height on the wall, not at its foot.
+            y += s.tier === 0 ? floorLift(s) : 0;
+          }
+        } else if (lattice === 'corner') {
+          px = cellX + G / 2 + (s.ox ?? 0);
+          pz = cellZ + G / 2 + (s.oz ?? 0);
+        } else if (lattice === 'quarter') {
+          /**
+           * Furnishings sit *on* the floor of the room, not at the slot's own level.
+           *
+           * A floor piece's walking surface is above its origin — 0.42 m for a foundation,
+           * 0.3 m for a floor — so furniture placed at the bare slot level is buried in the
+           * plinth up to its knees. Every bed and table in the first villages was.
+           */
+          y += floorLift(s);
+        }
+
+        pos.set(px, y, pz);
+        quat.setFromAxisAngle(up, (turn * Math.PI) / 2);
         matrix.compose(pos, quat, one);
         timber?.setMatrixAt(i, matrix);
         glass?.setMatrixAt(i, matrix);
@@ -655,21 +734,28 @@ export function createVillages(assets: AssetManager, registry: PropRegistry): Vi
         // circles along the piece, because the registry holds circles and a wall is four
         // metres long by a fifth thick — one circle covering its length would stop you two
         // metres out from it in every direction.
-        if (lattice === 'edge' && kind !== 'torch' && kind !== 'lantern' && kind !== 'shelf') {
-          const ang = (s.turn * Math.PI) / 2;
-          const ux = Math.cos(ang);
-          const uz = -Math.sin(ang);
-          // The edge piece stands on the cell boundary, half a cell out along its own normal.
-          const ex = pos.x + Math.sin(ang) * (G / 2);
-          const ez = pos.z + Math.cos(ang) * (G / 2);
-          const solid = kind !== 'doorway' && kind !== 'doorArch' && kind !== 'railing';
+        if (lattice === 'edge' && !MOUNTED_KINDS.has(kind)) {
+          // Along the piece, from the position it was actually placed at. The wall runs along
+          // its own local X, which after the quarter turn above is world Z for sides 0 and 2
+          // and world X for sides 1 and 3.
+          const runX = turn === 1 ? 0 : 1;
+          const runZ = turn === 1 ? 1 : 0;
+          // A doorway is a hole you walk through and a railing is knee-high, so neither
+          // blocks; a wall, a window and a shut door do.
+          const solid = kind !== 'doorway' && kind !== 'doorArch';
+          const height = kind === 'railing' ? 1.1 : G * 0.85;
+          // Three circles along the four metres, because the registry holds circles and one
+          // covering a wall's length would stop the player two metres out from it in every
+          // direction.
           for (let step = -1; step <= 1; step++) {
             registry.add(k, {
-              x: ex + ux * step * 1.3,
-              z: ez + uz * step * 1.3,
-              r: 0.9,
-              top: baseY + s.tier * (G / 2),
-              blockTop: baseY + s.tier * (G / 2) + (solid ? G * 0.8 : 0.1),
+              x: px + runX * step * 1.3,
+              z: pz + runZ * step * 1.3,
+              r: 0.85,
+              // Ground level, deliberately: raising it would teleport anyone walking past on
+              // top of the wall.
+              top: y,
+              blockTop: y + (solid ? height : 0.05),
               solid,
             });
           }

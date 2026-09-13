@@ -570,10 +570,26 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
   const prime = (): void => {
     const t0 = performance.now();
     const start = new Vector3(0, 0, 0);
-    terrain.prime(start, 2);
+    // One ring, not two.
+    //
+    // This is the blocking part of stepping out of the lobby, and it was twenty-five terrain
+    // chunks at up to eleven milliseconds each. Nine covers well over a hundred metres in
+    // every direction, which is further than the fade takes to lift, and ring two streams in
+    // over the following second through the ordinary budget. The horizon arriving a moment
+    // late is a far smaller cost than a multi-second freeze.
+    terrain.prime(start, 1);
     scatter.prime(start, 1);
     landmarks.prime(start, 1);
-    villages.prime(start, 1);
+    // Villages: the cell underfoot only.
+    //
+    // Nine cells of a kilometre each around the origin, and a settlement is the most
+    // expensive single thing this world builds — so priming them meant building up to nine
+    // whole villages synchronously before the first frame of the exterior. None of them is
+    // within two hundred metres of the spawn portal in any case, because illageSiteFor`r
+    // keeps them four plaza radii clear of it. One cell can still hold one settlement, which is
+    // worth having ready; the other eight stream in through the far budget long before the
+    // player could walk to them.
+    villages.prime(start, 0);
     waterfalls.prime(start, 1);
     primeMs = performance.now() - t0;
   };
