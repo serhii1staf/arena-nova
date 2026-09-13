@@ -514,7 +514,81 @@ export function landmarkSiteFor(cx: number, cz: number): LandmarkSite | null {
   return site;
 }
 
-/** Levels the ground toward any nearby landmark pad. */
+/**
+ * Placement grid for villages, and the pad each one levels.
+ *
+ * A separate, much coarser family than the landmarks. Two reasons, and both are forced
+ * rather than chosen. Spacing: a village is meant to be a day's walk from the next, so the
+ * cell has to be near a kilometre — the 420 m landmark grid would put one over every rise.
+ * Size: a landmark pad is 30 m across, which is seven building cells, and a settlement with
+ * a square, roads and a few farm plots needs four times that. Widening the landmark terrace
+ * instead would have flattened every campfire clearing in the world into a plateau.
+ *
+ * The flat disc is deliberately generous and the blend long. Buildings are rigid boxes on a
+ * 4 m lattice: they cannot follow noise at all, so every cell a village occupies has to be
+ * dead level, and the ground has to come back to natural slowly enough that the edge of the
+ * pad does not read as a crater rim.
+ */
+export const VILLAGE_CELL = 960;
+const VILLAGE_FLAT = 62;
+const VILLAGE_BLEND = 58;
+
+export interface VillageSite {
+  x: number;
+  z: number;
+  /** Levelled ground height of the pad. */
+  y: number;
+  /** 0..1, drives how many buildings the settlement gets. */
+  size: number;
+}
+
+const villageCache = new Map<number, VillageSite | null>();
+
+/**
+ * The village for one cell, or `null` when the cell has none.
+ *
+ * The single definition of where a settlement exists, for exactly the reason
+ * `landmarkSiteFor` is: the terrain has to level the pad, so the generator and whatever
+ * builds the houses must agree to the metre or the walls float. Deterministic and cached,
+ * because `elevationAt` consults the nine surrounding cells on every sample.
+ *
+ * Refusals are stricter than a landmark's. A campfire can sit on a 0.42 gradient; a village
+ * cannot, because levelling a pad that wide on that slope cuts a visible shelf out of the
+ * hillside. Ocean, beach and snow are excluded outright — the first two have nowhere to
+ * stand, and a settlement above the snow line reads as a mistake rather than as hardy.
+ */
+export function villageSiteFor(cx: number, cz: number): VillageSite | null {
+  const key = cx * 8192 + cz + 4_000_000;
+  const hit = villageCache.get(key);
+  if (hit !== undefined) return hit;
+
+  const rand = (n: number): number => cellRandom(cx * 61 + n, cz * 43 - n, 991);
+  let site: VillageSite | null = null;
+  // Roughly two cells in three carry one, so the spacing between neighbours comes out
+  // around a kilometre without them ever forming a visible grid.
+  if (rand(1) >= 0.34) {
+    // Kept well inside the cell so two neighbours can never end up adjacent across a
+    // boundary: at most 0.6 of a cell of wander, which still leaves 380 m between the
+    // closest possible pair.
+    const x = (cx + 0.2 + rand(2) * 0.6) * VILLAGE_CELL;
+    const z = (cz + 0.2 + rand(3) * 0.6) * VILLAGE_CELL;
+    const y = baseElevationAt(x, z);
+    const inside = Math.abs(x) < WORLD.halfSize - 200 && Math.abs(z) < WORLD.halfSize - 200;
+    const clearOfSpawn = Math.hypot(x, z) > WORLD.plazaRadius * 4;
+    const dry = y > WORLD.waterLevel + 4;
+    const flat = baseSlopeAt(x, z, 16) < 0.2;
+    const below = y < WORLD.snowLine - 20;
+    if (inside && clearOfSpawn && dry && flat && below) {
+      site = { x, z, y, size: rand(4) };
+    }
+  }
+
+  if (villageCache.size > 4_000) villageCache.clear();
+  villageCache.set(key, site);
+  return site;
+}
+
+/** Levels the ground toward any nearby landmark or village pad. */
 function applyLandmarkTerrace(h: number, x: number, z: number): number {
   const cx = Math.floor(x / LANDMARK_CELL);
   const cz = Math.floor(z / LANDMARK_CELL);
@@ -526,6 +600,20 @@ function applyLandmarkTerrace(h: number, x: number, z: number): number {
       const d = Math.hypot(x - site.x, z - site.z);
       if (d > TERRACE_FLAT + TERRACE_BLEND) continue;
       const t = smoothStep(Math.min(1, Math.max(0, (d - TERRACE_FLAT) / TERRACE_BLEND)));
+      out = site.y * (1 - t) + out * t;
+    }
+  }
+  // Villages second, so a settlement's pad wins where the two overlap — it is the larger
+  // and the less forgiving of the pair.
+  const vx = Math.floor(x / VILLAGE_CELL);
+  const vz = Math.floor(z / VILLAGE_CELL);
+  for (let dz = -1; dz <= 1; dz++) {
+    for (let dx = -1; dx <= 1; dx++) {
+      const site = villageSiteFor(vx + dx, vz + dz);
+      if (!site) continue;
+      const d = Math.hypot(x - site.x, z - site.z);
+      if (d > VILLAGE_FLAT + VILLAGE_BLEND) continue;
+      const t = smoothStep(Math.min(1, Math.max(0, (d - VILLAGE_FLAT) / VILLAGE_BLEND)));
       out = site.y * (1 - t) + out * t;
     }
   }
@@ -685,6 +773,7 @@ export function resetSurfaceCache(): void {
   latticeCold = new Map();
   biomeHot = new Map();
   biomeCold = new Map();
+  villageCache.clear();
 }
 
 /**

@@ -700,6 +700,114 @@ interface PieceGeo {
  * slot — so a placed piece needs no vertical fudge factor at all. Getting that wrong
  * per shape is what previously left some pieces hovering and others sunk.
  */
+/**
+ * The piece library and its materials, built once and shared.
+ *
+ * Villages are laid out from the very same pieces the player builds with, which is the
+ * whole point of them — a settlement made of a separate set of models would drift from the
+ * building system the first time either changed. That means two owners for one library, so
+ * neither may dispose it: the geometries and materials live here, are created on first
+ * request, and are released by `disposePieceAssets` when the scene is torn down.
+ *
+ * Materials cannot be module constants because they are built from `AssetManager` textures,
+ * hence the accessor rather than a top-level `const`.
+ */
+export interface PieceMaterials {
+  timber: MeshStandardMaterial;
+  furnish: MeshStandardMaterial;
+  glass: MeshStandardMaterial;
+  glow: MeshStandardMaterial;
+}
+
+export interface PieceAssets {
+  geometries: Record<PieceKind, PieceGeo>;
+  materials: PieceMaterials;
+  /** Which kinds take the darker furnishing stain. */
+  furnished: ReadonlySet<PieceKind>;
+}
+
+let sharedPieces: PieceAssets | null = null;
+
+export function pieceAssets(assets: AssetManager): PieceAssets {
+  if (sharedPieces) return sharedPieces;
+  const tex = assets.plank(1);
+  for (const t of [tex.map, tex.normalMap, tex.roughnessMap]) {
+    t.wrapS = RepeatWrapping;
+    t.wrapT = RepeatWrapping;
+  }
+  const common = {
+    map: tex.map,
+    normalMap: tex.normalMap,
+    roughnessMap: tex.roughnessMap,
+    metalness: 0,
+  };
+  const materials: PieceMaterials = {
+    timber: new MeshStandardMaterial({ ...common, roughness: 1 }),
+    /**
+     * Furnishings, in a darker stain than the structure they stand in.
+     *
+     * Same boards, same grain, same normals — only the tint differs. Structural timber and
+     * a table made of the identical texture read as one continuous surface: pushed up
+     * against a wall, a cupboard disappeared into it. Free, as far as the renderer is
+     * concerned: colour is a uniform rather than a shader feature, so this shares its
+     * compiled program with the structural material.
+     */
+    furnish: new MeshStandardMaterial({ ...common, color: 0xbe9a7c, roughness: 0.92 }),
+    // Glass must not write depth, or a pane hides its own lit flame from outside.
+    glass: new MeshStandardMaterial({
+      color: 0xd6ecf5,
+      transparent: true,
+      opacity: 0.26,
+      roughness: 0.06,
+      metalness: 0,
+      depthWrite: false,
+    }),
+    glow: new MeshStandardMaterial({
+      color: 0xff9a3c,
+      emissive: 0xff7a18,
+      emissiveIntensity: 2.6,
+      roughness: 1,
+      metalness: 0,
+      transparent: true,
+      opacity: 0.92,
+    }),
+  };
+  sharedPieces = {
+    geometries: buildGeometries(),
+    materials,
+    furnished: new Set(CATEGORIES.find((c) => c.id === 'props')?.pieces ?? []),
+  };
+  return sharedPieces;
+}
+
+/** Releases the shared library. Called once, when the exterior scene is torn down. */
+export function disposePieceAssets(): void {
+  if (!sharedPieces) return;
+  for (const g of Object.values(sharedPieces.geometries)) {
+    g.timber.dispose();
+    g.glass?.dispose();
+    g.leaf?.dispose();
+    g.glow?.dispose();
+  }
+  for (const m of Object.values(sharedPieces.materials)) m.dispose();
+  sharedPieces = null;
+}
+
+/** The lattice a kind sits on, for anything laying pieces out programmatically. */
+export function latticeOf(kind: PieceKind): 'cell' | 'edge' | 'corner' | 'quarter' {
+  return LATTICE[kind];
+}
+
+/** Slot dimensions villages need in order to stack storeys and sit things on floors. */
+export const PIECE_METRICS = {
+  grid: BUILD_GRID,
+  floorTop: FLOOR_TOP,
+  foundationTop: FOUNDATION_TOP,
+  ceilTop: CEIL_TOP,
+  wallHeight: BUILD_GRID,
+  ridge: RIDGE,
+} as const;
+
 function buildGeometries(): Record<PieceKind, PieceGeo> {
   const G = BUILD_GRID;
   const s = G / 2;
@@ -1542,18 +1650,10 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   const group = new Group();
   group.name = 'Building';
 
-  const tex = assets.plank(1);
-  for (const t of [tex.map, tex.normalMap, tex.roughnessMap]) {
-    t.wrapS = RepeatWrapping;
-    t.wrapT = RepeatWrapping;
-  }
-  const timberMat = new MeshStandardMaterial({
-    map: tex.map,
-    normalMap: tex.normalMap,
-    roughnessMap: tex.roughnessMap,
-    roughness: 1,
-    metalness: 0,
-  });
+  // The library is shared with the village streamer, so neither side owns it. See
+  // `pieceAssets`.
+  const shared = pieceAssets(assets);
+  const timberMat = shared.materials.timber;
 
   /**
    * Furnishings, in a darker stain than the structure they stand in.
@@ -1569,37 +1669,14 @@ export function createBuildSite(assets: AssetManager): BuildSite {
    * so this shares its compiled program with the structural material — and every kind was
    * already its own instanced mesh, so no draw call has been added either.
    */
-  const furnishMat = new MeshStandardMaterial({
-    map: tex.map,
-    normalMap: tex.normalMap,
-    roughnessMap: tex.roughnessMap,
-    color: 0xbe9a7c,
-    roughness: 0.92,
-    metalness: 0,
-  });
-  /** Which kinds take the darker stain: the furnishings group, as offered in the hotbar. */
-  const FURNISHED: ReadonlySet<PieceKind> = new Set(
-    CATEGORIES.find((c) => c.id === 'props')?.pieces ?? [],
-  );
+  const furnishMat = shared.materials.furnish;
+  const FURNISHED = shared.furnished;
 
   // Glass, kept deliberately cheap: a smooth translucent standard material picks up
   // the scene's environment and the sun, which at a window's scale is the whole
   // effect. A physical material with real transmission would mean an extra render of
   // the backdrop per pane, for something you mostly see the sky through.
-  const glassMat = new MeshStandardMaterial({
-    color: 0xd6ecf5,
-    transparent: true,
-    opacity: 0.26,
-    roughness: 0.06,
-    metalness: 0,
-    // Glass must not write depth.
-    //
-    // A pane that writes depth hides whatever is behind it from every transparent thing
-    // drawn afterwards — which is why a lit lantern looked dark from outside and lit
-    // only once your head was through the glass: the flame was there, and the pane it
-    // sits inside had already claimed the depth buffer in front of it.
-    depthWrite: false,
-  });
+  const glassMat = shared.materials.glass;
 
   /**
    * Flame and ember.
@@ -1611,15 +1688,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
    * see, not the wall it would have lit — and costs one draw call for every fire in
    * the world put together.
    */
-  const glowMat = new MeshStandardMaterial({
-    color: 0xff9a3c,
-    emissive: 0xff7a18,
-    emissiveIntensity: 2.6,
-    roughness: 1,
-    metalness: 0,
-    transparent: true,
-    opacity: 0.92,
-  });
+  const glowMat = shared.materials.glow;
 
   const ghostOk = new MeshStandardMaterial({
     color: 0x5af08c,
@@ -1650,7 +1719,7 @@ export function createBuildSite(assets: AssetManager): BuildSite {
   });
 
   const G = BUILD_GRID;
-  const geometries = buildGeometries();
+  const geometries = shared.geometries;
 
   interface Bucket {
     mesh: InstancedMesh;
@@ -2881,16 +2950,10 @@ export function createBuildSite(assets: AssetManager): BuildSite {
         bucket.leaf?.dispose();
         bucket.glow?.dispose();
       }
-      for (const g of Object.values(geometries)) {
-        g.timber.dispose();
-        g.glass?.dispose();
-        g.leaf?.dispose();
-        g.glow?.dispose();
-      }
-      timberMat.dispose();
-      furnishMat.dispose();
-      glassMat.dispose();
-      glowMat.dispose();
+      // Neither the geometries nor the four timber materials are disposed here: they are
+      // the shared library, used by the village streamer as well, and released once by
+      // `disposePieceAssets` at scene teardown. Disposing them from here is what would
+      // strip the geometry out from under every village in the world.
       ghostOk.dispose();
       ghostBad.dispose();
       markMaterial.dispose();

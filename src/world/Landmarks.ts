@@ -581,7 +581,11 @@ export function createLandmarks(assets: AssetManager, registry: PropRegistry): L
       if (roll < 0.48) kind = 'campfire';
       else if (roll < 0.62) kind = 'camp';
       else if (roll < 0.78) kind = 'ruin';
-      else if (roll < 0.9) kind = 'village';
+      // The authored hamlet stays, and it is now what it always looked like: an *abandoned*
+      // one. Real settlements are built from the player's own pieces by `Village.ts` on a
+      // kilometre grid, so these two no longer mean the same thing — this is a find in the
+      // wilderness, and it keeps its lower share of the roll accordingly.
+      else if (roll < 0.86) kind = 'village';
       else kind = 'stones';
       // Snow and highland peaks get shelters rather than overgrown ruins.
       if ((biome === 'snow' || biome === 'highland') && kind === 'ruin') kind = 'camp';

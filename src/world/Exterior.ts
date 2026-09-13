@@ -15,6 +15,8 @@ import type { AssetManager } from '../core/AssetManager.ts';
 import type { QualitySettings } from '../core/QualityManager.ts';
 import { applyTriplanarUV, boxAt } from './builders/geometry.ts';
 import { createLandmarks, type LandmarkStreamer } from './Landmarks.ts';
+import { createVillages, type VillageStreamer } from './Village.ts';
+import { disposePieceAssets } from './Building.ts';
 import { buildPortal, type PortalBuild } from './Portal.ts';
 import { PropRegistry } from './PropRegistry.ts';
 import { createScatter, type ScatterStreamer } from './Scatter.ts';
@@ -100,7 +102,7 @@ export interface ExteriorBuild {
     biome: string;
     animals: number;
     /** Work still queued per streamer, so a backlog can be seen while it lasts. */
-    backlog: { terrain: number; scatter: number; landmarks: number; waterfalls: number };
+    backlog: { terrain: number; scatter: number; landmarks: number; villages: number; waterfalls: number };
     /** Everything still queued, across every streamer. */
     queued: number;
     /**
@@ -110,7 +112,7 @@ export interface ExteriorBuild {
      */
     streamMs: number;
     /** Where that time went, per streamer. Attributes a spike instead of guessing. */
-    cost: { terrain: number; scatter: number; landmarks: number; waterfalls: number };
+    cost: { terrain: number; scatter: number; landmarks: number; villages: number; waterfalls: number };
     /** CPU milliseconds `prime` took — the blocking part of a scene switch. */
     primeMs: number;
   };
@@ -168,6 +170,11 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
 
   const landmarks: LandmarkStreamer = createLandmarks(assets, registry);
   group.add(landmarks.group);
+
+  // Settlements, laid out from the player's own building pieces. Their own grid, a kilometre
+  // to a cell, and their own terrace family in `WorldGen` — see `villageSiteFor`.
+  const villages: VillageStreamer = createVillages(assets, registry);
+  group.add(villages.group);
 
   // Falling water where the rivers run off the escarpments. Streamed like the
   // rest of the world and derived from the same height field, so a fall is always
@@ -419,13 +426,13 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
   // ---- Frame update -----------------------------------------------------
   const centre = new Vector3();
   /** Work each streamer still had queued after the last pump. Diagnostics only. */
-  const backlog = { terrain: 0, scatter: 0, landmarks: 0, waterfalls: 0 };
+  const backlog = { terrain: 0, scatter: 0, landmarks: 0, villages: 0, waterfalls: 0 };
   /** Whose turn it is to be allowed one build past the shared deadline. */
   let forceTurn = 0;
   /** Frames the distant layers have been held back by the near-field backlog. */
   let farStarved = 0;
   /** Where the last frame's streaming time went, per streamer. Diagnostics only. */
-  const cost = { terrain: 0, scatter: 0, landmarks: 0, waterfalls: 0 };
+  const cost = { terrain: 0, scatter: 0, landmarks: 0, villages: 0, waterfalls: 0 };
   /** CPU cost of the last frame's streaming step, in ms. Diagnostics only. */
   let streamMs = 0;
   /** CPU cost of `prime`, in ms — the synchronous part of the scene switch. */
@@ -463,6 +470,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     terrain.update(playerPos);
     scatter.update(playerPos);
     landmarks.update(playerPos, elapsed);
+    villages.update(playerPos, elapsed);
     waterfalls.update(playerPos, elapsed, air.air);
 
     // Streaming shares one time budget per frame, spent in priority order:
@@ -487,7 +495,10 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     //
     // Terrain is first in the rotation as well as first in priority, because it is
     // the one layer whose absence is not cosmetic.
-    forceTurn = (forceTurn + 1) % 4;
+    // Five streamers now, so five turns. Villages share the far group's stand-down with the
+    // landmarks: a settlement is the most expensive single thing the world builds, and it has
+    // no business competing with the ground under the player.
+    forceTurn = (forceTurn + 1) % 5;
     let mark = streamStart;
     backlog.terrain = terrain.pump(deadline, forceTurn === 0);
     cost.terrain = (mark = performance.now()) - streamStart;
@@ -529,8 +540,11 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     backlog.landmarks = landmarks.pump(farDeadline, !nearBacklogged && forceTurn === 2);
     const afterLandmarks = performance.now();
     cost.landmarks = afterLandmarks - afterScatter;
+    backlog.villages = villages.pump(farDeadline, !nearBacklogged && forceTurn === 4);
+    const afterVillages = performance.now();
+    cost.villages = afterVillages - afterLandmarks;
     backlog.waterfalls = waterfalls.pump(farDeadline, !nearBacklogged && forceTurn === 3);
-    cost.waterfalls = performance.now() - afterLandmarks;
+    cost.waterfalls = performance.now() - afterVillages;
     // What the streaming step actually cost, against the budget it was given.
     // Measured rather than assumed: the budget is advisory, every streamer is
     // allowed to finish the build it has started, and how far past the deadline
@@ -547,6 +561,7 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     terrain.prime(start, 2);
     scatter.prime(start, 1);
     landmarks.prime(start, 1);
+    villages.prime(start, 1);
     waterfalls.prime(start, 1);
     primeMs = performance.now() - t0;
   };
@@ -563,10 +578,14 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     puddles.dispose();
     wildlife.dispose();
     waterfalls.dispose();
+    villages.dispose();
     landmarks.dispose();
     scatter.dispose();
     terrain.dispose();
     registry.clear();
+    // The building piece library is shared between the player's own site and every village,
+    // so neither disposes it. Released here, once, when the world goes away.
+    disposePieceAssets();
     // The lattice cache can hold a few hundred thousand samples; leaving it
     // alive across a scene switch would be a slow memory leak.
     resetSurfaceCache();
@@ -603,7 +622,12 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
       // Everything still waiting to be built, per streamer. `pending` above stays
       // as it was — terrain only — because the existing probes assert on it.
       backlog: { ...backlog },
-      queued: backlog.terrain + backlog.scatter + backlog.landmarks + backlog.waterfalls,
+      queued:
+        backlog.terrain +
+        backlog.scatter +
+        backlog.landmarks +
+        backlog.villages +
+        backlog.waterfalls,
       streamMs,
       cost: { ...cost },
       primeMs,
