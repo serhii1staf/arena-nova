@@ -409,6 +409,16 @@ export class ExteriorScene implements GameScene {
     }
   }
 
+  /**
+   * Streaming cost attribution for the diagnostics overlay.
+   *
+   * Peaks rather than averages, because a hitch is by definition one bad frame, and an average
+   * over half a second buries it. Reading resets them, so each refresh reports the worst frame in
+   * that window and names the layer that spent it.
+   */
+  statsLine(): string {
+    return this.world.streamPeaks();
+  }
   resize(width: number, height: number): void {
     this.camera.aspect = width / Math.max(1, height);
     this.camera.updateProjectionMatrix();

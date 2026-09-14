@@ -111,17 +111,25 @@ export function createLivestock(): LivestockHerd {
   }
 
   let torndown = false;
-  for (const an of animals) {
-    void makeVillagerBody(an.head.model).then((body) => {
-      if (torndown || !body) return;
+  /**
+   * Sequenced, for the same reason as the villagers: a GLB parse and a skeleton clone are
+   * synchronous main-thread work, and requests fired together land together. Awaiting each in
+   * turn spreads them over frames instead of stacking them into one.
+   */
+  const loadHerdInOrder = async (): Promise<void> => {
+    for (const an of animals) {
+      if (torndown) return;
+      const body = await makeVillagerBody(an.head.model);
+      if (torndown || !body) continue;
       group.add(body.object);
       an.body = body;
       // Visible if a settlement is already assigned. Created hidden and never shown again is
       // why the animals could not be found at all — see the villagers for the same race.
       body.object.visible = current !== null;
       body.object.position.set(an.x, an.y, an.z);
-    });
-  }
+    }
+  };
+  void loadHerdInOrder();
 
   let current: VillageInfo | null = null;
   const scratch = new Vector3();

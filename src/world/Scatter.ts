@@ -48,8 +48,9 @@ const CHUNK = 256;
 const GRASS_RADIUS = 1;
 const DETAIL_RADIUS = 1;
 const TREE_RADIUS = 2;
-/** Upper bound on chunks populated per frame; the real limit is the time budget. */
-const BUILD_BUDGET = 2;
+// A per-frame chunk count used to live here. Removed: a chunk is now built in steps, so the
+// clock is the only limit that means anything — a count could not express "stop half way through
+// the grass", which is the only stopping point that helps.
 
 /**
  * The authored grass clumps stream on their own, much finer grid.
@@ -575,13 +576,20 @@ export function createScatter(
     });
   };
 
-  const buildChunk = (cx: number, cz: number, ring: number): void => {
+  /**
+   * Builds one vegetation chunk, in steps.
+   *
+   * Nothing is published until `loaded.set` at the end, so a half-populated chunk is never
+   * visible and never registers half its colliders.
+   */
+  function* buildChunkSteps(cx: number, cz: number, ring: number): Generator<void> {
     const k = key(cx, cz);
     if (loaded.has(k)) return;
     const chunk: ScatterChunk = { key: k, cx, cz, meshes: [] };
 
     // Trees are grouped by species because each biome uses a different palette.
     if (ring <= LAYER_RADIUS.tree) {
+      yield;
       const perKind = new Map<TreeKind, Placement[]>();
       gather('tree', cx, cz, CHUNK, perKind);
       const useFarLod = ring >= 2;
@@ -614,6 +622,10 @@ export function createScatter(
     ];
     for (const layer of simpleLayers) {
       if (ring > LAYER_RADIUS[layer]) continue;
+      // One layer per step. Grass alone can be thousands of placements, and a chunk was the
+      // smallest thing this streamer could do — so a chunk started with the budget already spent
+      // ran every layer to the end inside one frame.
+      yield;
       const placements = gather(layer, cx, cz, CHUNK, null);
       const assets = layerAssets[layer];
       const shadows = layer === 'rock' || layer === 'log' ? ring <= 1 : false;
@@ -657,6 +669,14 @@ export function createScatter(
     }
 
     loaded.set(k, chunk);
+  }
+
+  /** Runs a chunk to completion. For priming only. */
+  const buildChunk = (cx: number, cz: number, ring: number): void => {
+    const it = buildChunkSteps(cx, cz, ring);
+    while (!it.next().done) {
+      // Deliberately empty: drain it.
+    }
   };
 
   /**
@@ -786,6 +806,9 @@ export function createScatter(
 
   const lastCentre = new Vector3();
 
+  /** The chunk currently part-built, carried between frames. */
+  let inFlight: Generator<void> | null = null;
+
   const pump = (deadline: number, force = true): number => {
     // Clumps first. They are the layer immediately around the player, and a cell
     // is a twentieth of the work of a chunk — making the near field wait behind
@@ -819,17 +842,31 @@ export function createScatter(
         forceLeft = false;
       }
     }
-    if (pending.size === 0) return clumpPending.size + carpetPending.size;
-    const queue = [...pending.entries()].sort((a, b) => a[1].dist - b[1].dist);
-    for (let i = 0; i < BUILD_BUDGET && i < queue.length; i++) {
-      if ((i > 0 || !forceLeft) && performance.now() >= deadline) break;
-      const [k, want] = queue[i]!;
-      pending.delete(k);
-      const ring = Math.max(Math.abs(want.cx - lastCentre.x), Math.abs(want.cz - lastCentre.z));
-      buildChunk(want.cx, want.cz, ring);
+    // Chunks, in steps. `forceLeft` now buys a single step rather than a whole chunk: a chunk
+    // runs every layer it carries, and grass alone can be thousands of placements, so granting
+    // one unconditionally is how this streamer overran the shared budget by tens of milliseconds.
+    for (;;) {
+      if (!inFlight) {
+        if (pending.size === 0) break;
+        let bestKey: string | null = null;
+        let bestDist = Infinity;
+        for (const [k, want] of pending) {
+          if (want.dist < bestDist) {
+            bestDist = want.dist;
+            bestKey = k;
+          }
+        }
+        if (bestKey === null) break;
+        const want = pending.get(bestKey)!;
+        pending.delete(bestKey);
+        const ring = Math.max(Math.abs(want.cx - lastCentre.x), Math.abs(want.cz - lastCentre.z));
+        inFlight = buildChunkSteps(want.cx, want.cz, ring);
+      }
+      if (!forceLeft && performance.now() >= deadline) break;
       forceLeft = false;
+      if (inFlight.next().done) inFlight = null;
     }
-    return pending.size + clumpPending.size + carpetPending.size;
+    return pending.size + clumpPending.size + carpetPending.size + (inFlight ? 1 : 0);
   };
 
   const prime = (position: Vector3, rings: number): void => {
@@ -865,6 +902,8 @@ export function createScatter(
 
   const dispose = (): void => {
     torndown = true;
+    // Abandon any part-built chunk: it is not in `loaded` yet, so nothing else would release it.
+    inFlight = null;
     for (const chunk of [...loaded.values()]) dropChunk(chunk, loaded);
     for (const cell of [...carpetLoaded.values()]) dropChunk(cell, carpetLoaded);
     carpetPending.clear();

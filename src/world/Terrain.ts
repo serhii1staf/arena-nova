@@ -25,6 +25,13 @@ import {
 } from './WorldGen.ts';
 
 /** Metres per terrain chunk. Must be a whole number of `SURFACE_STEP` cells. */
+/**
+ * Rows of a chunk's vertex lattice built between yields.
+ *
+ * Sixteen rows of a 64-segment chunk is a sixteenth of the vertex work, which puts a band well
+ * inside a frame's slack while keeping the number of resumes per chunk in single figures.
+ */
+const ROW_BAND = 16;
 const CHUNK = 256;
 /** How many chunks out from the player stay loaded (view ≈ this × CHUNK). */
 const VIEW_RADIUS = 4;
@@ -47,11 +54,10 @@ const NEAR_SEGMENTS = CHUNK / SURFACE_STEP; // 32
 const LOD_SEGMENTS = [NEAR_SEGMENTS, NEAR_SEGMENTS, NEAR_SEGMENTS, NEAR_SEGMENTS, 8];
 /** Rings that share the near resolution. Props may only stream this far out. */
 export const TERRAIN_NEAR_RINGS = 3;
-/**
- * Chunks built per frame. Low enough that a build never blows the frame budget,
- * high enough that walking briskly doesn't outrun the loader.
- */
-const BUILD_BUDGET = 4;
+// A per-frame chunk count used to live here. It is gone because it was answering the wrong
+// question: the cost of a chunk varies with LOD and with how much of the height lattice is
+// already cached, so any count is either wasted headroom or a blown frame. The build is now
+// stepped and bounded by the clock alone.
 /** How far chunk edges drop, to hide cracks between differing LOD levels. */
 const SKIRT_DEPTH = 26;
 
@@ -115,8 +121,15 @@ export interface TerrainStreamer {
  * can attach a "skirt": a ring of vertices dropped below the edge. Neighbouring
  * chunks may use different LOD levels, which leaves hairline cracks along the
  * seam — the skirt fills them with geometry that is hidden under the surface.
+ *
+ * A generator, so the vertex loop can be stopped part-way and resumed on the next frame. Nothing
+ * is published until the geometry is returned, so a partial chunk is never visible.
  */
-function buildChunkGeometry(cx: number, cz: number, segments: number): BufferGeometry {
+function* buildChunkGeometry(
+  cx: number,
+  cz: number,
+  segments: number,
+): Generator<void, BufferGeometry> {
   const verts = segments + 1;
   const step = CHUNK / segments;
   const originX = cx * CHUNK;
@@ -137,13 +150,22 @@ function buildChunkGeometry(cx: number, cz: number, segments: number): BufferGeo
   /** How much of the grass texture's colour survives at each vertex. */
   const chroma = new Float32Array(total);
 
+
   const tmp = new Color();
   const lowC = new Color();
   const highC = new Color();
   const rockC = new Color();
 
   // --- Surface grid ---
+  //
+  // Yielded in bands of rows, because this loop is the expensive part of a chunk and a chunk was
+  // the smallest thing the streamer could do. The budget could decide whether to *start* one but
+  // never how long it ran, and one is started past the deadline on purpose so the ground is never
+  // missing — so every few frames a full chunk landed inside a frame whatever the budget said.
+  // That is the stutter felt while running. A band is small enough to fit in what is left of a
+  // frame and large enough that the yield overhead is nothing.
   for (let iz = 0; iz < verts; iz++) {
+    if (iz > 0 && iz % ROW_BAND === 0) yield;
     for (let ix = 0; ix < verts; ix++) {
       const i = iz * verts + ix;
       const gx = originGX + ix * stride;
@@ -206,6 +228,10 @@ function buildChunkGeometry(cx: number, cz: number, segments: number): BufferGeo
       uvs[i * 2 + 1] = wz * 0.06;
     }
   }
+
+  // The vertex loop is the costly half; the index and skirt work below is array pushes on data
+  // already computed, so it runs in one go after a single further yield.
+  yield;
 
   const indices: number[] = [];
   for (let iz = 0; iz < segments; iz++) {
@@ -473,14 +499,20 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
   const ringSegments = (ring: number): number =>
     LOD_SEGMENTS[Math.min(ring, LOD_SEGMENTS.length - 1)] ?? 8;
 
-  const buildChunk = (cx: number, cz: number, ring: number): void => {
+  /**
+   * Builds one chunk, in steps. See `buildChunkGeometry` for why.
+   *
+   * The swap at the end is still atomic: the new mesh is added and the old one released in the
+   * same step, so a chunk being refined is never absent for a frame.
+   */
+  function* buildChunkSteps(cx: number, cz: number, ring: number): Generator<void> {
     const k = key(cx, cz);
     const segments = ringSegments(ring);
     const existing = loaded.get(k);
     // Already there at the right detail level — nothing to do.
     if (existing && existing.segments === segments) return;
 
-    const geometry = buildChunkGeometry(cx, cz, segments);
+    const geometry = yield* buildChunkGeometry(cx, cz, segments);
     const mesh = new Mesh(geometry, material);
     mesh.position.set(cx * CHUNK, 0, cz * CHUNK);
     mesh.receiveShadow = true;
@@ -494,6 +526,17 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
       existing.geometry.dispose();
     }
     loaded.set(k, { key: k, cx, cz, ring, segments, mesh, geometry });
+  }
+
+  /** The chunk currently part-built, carried between frames. */
+  let inFlight: Generator<void> | null = null;
+
+  /** Runs a chunk to completion. For priming, where missing ground is worse than a stall. */
+  const buildChunk = (cx: number, cz: number, ring: number): void => {
+    const it = buildChunkSteps(cx, cz, ring);
+    while (!it.next().done) {
+      // Deliberately empty: drain it.
+    }
   };
 
   const dropChunk = (chunk: Chunk): void => {
@@ -543,25 +586,37 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
   };
 
   const pump = (deadline: number, force = true): number => {
-    if (pending.size === 0) return 0;
-    // Nearest first, so the ground under the player always exists.
-    const queue = [...pending.entries()].sort((a, b) => a[1].dist - b[1].dist);
-    for (let i = 0; i < BUILD_BUDGET && i < queue.length; i++) {
-      // A time budget, not just a count: chunk cost varies with LOD and with how
-      // much of the height lattice is already cached, so a fixed count either
-      // wastes headroom or blows the frame.
+    let first = true;
+    for (;;) {
+      if (!inFlight) {
+        if (pending.size === 0) return 0;
+        // Nearest first, so the ground under the player always exists.
+        let bestKey: string | null = null;
+        let bestDist = Infinity;
+        for (const [k, want] of pending) {
+          if (want.dist < bestDist) {
+            bestDist = want.dist;
+            bestKey = k;
+          }
+        }
+        if (bestKey === null) return 0;
+        const want = pending.get(bestKey)!;
+        pending.delete(bestKey);
+        inFlight = buildChunkSteps(want.cx, want.cz, want.ring);
+      }
+      // A time budget, not just a count: chunk cost varies with LOD and with how much of the
+      // height lattice is already cached, so a fixed count either wastes headroom or blows the
+      // frame.
       //
-      // `force` is the guarantee of progress: the streamer it is granted to may
-      // start one build even with the budget already gone, so a run of slow frames
-      // cannot stall streaming forever. It used to be unconditional here and in
-      // every other streamer, which meant four of them each overran the shared
-      // budget by a whole chunk on the same frame — see `Exterior.update`.
-      if ((i > 0 || !force) && performance.now() >= deadline) break;
-      const [k, want] = queue[i]!;
-      pending.delete(k);
-      buildChunk(want.cx, want.cz, want.ring);
+      // `force` is the guarantee of progress: the streamer it is granted to may take one step
+      // even with the budget already gone, so a run of slow frames cannot stall streaming
+      // forever. It used to grant a whole *chunk*, which is the part that made it a stutter —
+      // a build, once begun, ran to the end regardless of the deadline. A step is bounded.
+      if (!(first && force) && performance.now() >= deadline) break;
+      first = false;
+      if (inFlight.next().done) inFlight = null;
     }
-    return pending.size;
+    return pending.size + (inFlight ? 1 : 0);
   };
 
   const prime = (position: Vector3, rings: number): void => {
@@ -577,6 +632,9 @@ export function createTerrain(assets: AssetManager, settings?: QualitySettings):
   };
 
   const dispose = (): void => {
+    // Abandon any part-built chunk: its buffers are not in the scene yet and the generator holds
+    // the only references to them.
+    inFlight = null;
     for (const chunk of [...loaded.values()]) dropChunk(chunk);
     pending.clear();
     material.dispose();

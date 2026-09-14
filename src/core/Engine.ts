@@ -308,10 +308,14 @@ export class Engine {
     // Average frame time hides stutter; the worst frame in the window exposes it,
     // which is what actually makes a high-FPS game feel bad.
     const avgMs = 1000 / Math.max(1, this.quality.fps);
+    // What the scene was doing, when it has something to report. Appended rather than merged so
+    // a scene with no diagnostics changes nothing about the overlay.
+    const sceneLine = this.scenes.current?.statsLine?.();
     this.onStats(
       `${Math.round(this.quality.fps)} fps · ${avgMs.toFixed(1)} ms (peak ${this.worstFrameMs.toFixed(1)})\n` +
         `${this.quality.tier} · res ${scale}% · ${this.displayHz}Hz\n` +
-        `draws ${info.render.calls} · tris ${(info.render.triangles / 1000).toFixed(0)}k`,
+        `draws ${info.render.calls} · tris ${(info.render.triangles / 1000).toFixed(0)}k` +
+        (sceneLine ? `\n${sceneLine}` : ''),
     );
     this.worstFrameMs = 0;
   }

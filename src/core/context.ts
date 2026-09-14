@@ -43,6 +43,15 @@ export interface GameScene {
    */
   readonly nightFactor?: number;
 
+  /**
+   * An extra line for the diagnostics overlay, or undefined for a scene with nothing to say.
+   *
+   * The overlay already reports the worst frame in each window, which is the number that matters
+   * for stutter — but not *what* spent it, so a spike could only be guessed at. A scene knows
+   * what it did per frame and can attribute it.
+   */
+  statsLine?(): string;
+
   init(ctx: EngineContext): void | Promise<void>;
   /** Fixed-step logic update. `dt` is constant (GameConfig.fixedStep). */
   update(dt: number, elapsed: number): void;

@@ -76,6 +76,11 @@ export interface ExteriorBuild {
   group: Group;
   /** romY bounds the answer to a step above the asker, so a ceiling is not a floor. */
   floorHeightAt(x: number, z: number, fromY?: number): number;
+  /**
+   * The worst frame each streaming layer has cost since this was last called, as one line, and
+   * resets the peaks. For the diagnostics overlay.
+   */
+  streamPeaks(): string;
   /** True where the player may not build: inside a settlement, plus a margin. */
   buildBlocked(x: number, z: number): boolean;
   /** Shows the village keep-out boundary. Driven by whether build mode is open. */
@@ -458,6 +463,16 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
   let farStarved = 0;
   /** Where the last frame's streaming time went, per streamer. Diagnostics only. */
   const cost = { terrain: 0, scatter: 0, landmarks: 0, villages: 0, waterfalls: 0 };
+  /**
+   * The worst single frame each streamer has cost since these were last read.
+   *
+   * The averages say nothing about stutter — a layer that costs 0.1 ms on 59 frames and 40 ms on
+   * the sixtieth averages under a millisecond and ruins the second. Peaks, held until read and
+   * then reset, are the measurement that names the layer responsible for a hitch. Reported into
+   * the diagnostics overlay rather than a console, because the machine that has the problem is
+   * not the machine with a debugger attached.
+   */
+  const peak = { terrain: 0, scatter: 0, landmarks: 0, villages: 0, waterfalls: 0, frame: 0 };
   /** CPU cost of the last frame's streaming step, in ms. Diagnostics only. */
   let streamMs = 0;
   /** CPU cost of `prime`, in ms — the synchronous part of the scene switch. */
@@ -540,11 +555,16 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     // at over 200 ms of CPU against a 5 ms budget, where the worst terrain chunk in
     // the same run cost 11 ms.
     //
-    // A time budget cannot help with that on its own: it decides whether a build
-    // may *start*, never how long it takes, and a village that starts with 0.1 ms
-    // of budget left still runs to completion. So the far layers stand down
-    // entirely while the near field has a real backlog behind it, which is the
-    // state that only happens for a second or two after the world is rebuilt.
+    // That was true while a build was atomic: a budget decides whether one may *start*, never
+    // how long it runs, so a village beginning with 0.1 ms left still ran to completion. Every
+    // streamer's build is now stepped — terrain by bands of vertex rows, vegetation by layer,
+    // villages by building and by piece kind — so the deadline is respected within a step rather
+    // than only between builds, and the `force` that guarantees progress now buys one step
+    // instead of one whole build.
+    //
+    // The stand-down below is kept even so. It is no longer protection against an overrun; it is
+    // priority. The ground under the player is worth more than scenery a kilometre away, and
+    // spending the budget in that order is still right.
     //
     // The threshold is a backlog, not simply "anything queued": walking briskly
     // keeps a chunk or two on the queue almost permanently, and gating on that
@@ -578,6 +598,12 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     // that carries it is the whole question. GPU-independent, so this number means
     // the same thing on real hardware and under a software rasteriser.
     streamMs = performance.now() - streamStart;
+    peak.terrain = Math.max(peak.terrain, cost.terrain);
+    peak.scatter = Math.max(peak.scatter, cost.scatter);
+    peak.landmarks = Math.max(peak.landmarks, cost.landmarks);
+    peak.villages = Math.max(peak.villages, cost.villages);
+    peak.waterfalls = Math.max(peak.waterfalls, cost.waterfalls);
+    peak.frame = Math.max(peak.frame, streamMs);
 
     portal.update(elapsed);
   };
@@ -657,6 +683,20 @@ export function buildExterior(assets: AssetManager, settings: QualitySettings): 
     floorHeightAt,
     buildBlocked: villages.buildBlocked,
     showBuildBoundary: villages.showBoundary,
+    streamPeaks: () => {
+      const line =
+        `stream peak ${peak.frame.toFixed(1)}ms · ` +
+        `gnd ${peak.terrain.toFixed(1)} veg ${peak.scatter.toFixed(1)} ` +
+        `lmk ${peak.landmarks.toFixed(1)} vil ${peak.villages.toFixed(1)} ` +
+        `wtr ${peak.waterfalls.toFixed(1)}`;
+      peak.terrain = 0;
+      peak.scatter = 0;
+      peak.landmarks = 0;
+      peak.villages = 0;
+      peak.waterfalls = 0;
+      peak.frame = 0;
+      return line;
+    },
     collide,
     blocksCamera,
     skyMaterial,

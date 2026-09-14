@@ -158,9 +158,22 @@ export function createVillagers(): VillagerCrew {
   // Bodies arrive asynchronously and the crew simply has none until they do. Requested once,
   // at construction, so the first village the player reaches already has people in it.
   let torndown = false;
-  for (let i = 0; i < CREW; i++) {
-    void makeVillagerBody(CAST[i % CAST.length]!).then((body) => {
-      if (torndown || !body) return;
+  /**
+   * One at a time, not all six at once.
+   *
+   * Parsing a GLB and building a skinned hierarchy from it is synchronous work on the main
+   * thread, and cloning a skeleton is more. Six requests fired together finish together — six
+   * parses, six clones and the first compile of the skinned shader all landing inside a frame or
+   * two, right after the world opens. Sequenced, each lands in its own frame.
+   *
+   * Still not awaited by anything: the crew simply has no bodies until they arrive, and shows
+   * whoever has turned up so far.
+   */
+  const loadCrewInOrder = async (): Promise<void> => {
+    for (let i = 0; i < CREW; i++) {
+      if (torndown) return;
+      const body = await makeVillagerBody(CAST[i % CAST.length]!);
+      if (torndown || !body) continue;
       group.add(body.object);
       const v = crew[i]!;
       v.body = body;
@@ -176,8 +189,9 @@ export function createVillagers(): VillagerCrew {
       body.object.visible = current !== null;
       body.object.position.copy(v.at);
       body.object.rotation.y = v.yaw;
-    });
-  }
+    }
+  };
+  void loadCrewInOrder();
 
   let current: VillageInfo | null = null;
   const step = new Vector3();
